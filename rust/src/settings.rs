@@ -12,6 +12,11 @@ pub struct Settings {
     pub mcp_roots: Vec<String>,
     #[serde(default = "yes")]
     pub strict_secrets: bool,
+    /// history imported before reman recorded folders has no folder, so no root can contain it.
+    /// When on, agents also get the GENERIC ones (well-known tool, no paths/quotes/hosts/vars -
+    /// see describe::is_generic), labelled as folder-unknown.
+    #[serde(default)]
+    pub share_old_history: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub http: Option<Http>,
 }

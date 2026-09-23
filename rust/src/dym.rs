@@ -62,7 +62,12 @@ pub fn did_you_mean(store: &Store, failed: &str, qv: Option<&[f32]>, k: usize, w
         if !e.recallable(false) || e.text == failed || !store.in_scope(e, scope) {
             continue;
         }
-        if worked_only && store.agg(e, scope).ok == 0 {
+        // "worked" pool: anything not known to only fail - old history never recorded exit codes,
+        // and `docker ps` run 8x with no outcome is still the right answer to `dcoker ps`
+        if worked_only && {
+            let a = store.agg(e, scope);
+            a.ok == 0 && a.fail > 0
+        } {
             continue;
         }
         let sem = match qv {

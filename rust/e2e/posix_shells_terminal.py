@@ -52,6 +52,9 @@ class Term:
                 data = self.p.read(65536)
             except EOFError:
                 return
+            if "\x1b[c" in data:
+                # ConPTY waits for the terminal's DA1 answer before rendering; pyte doesn't send one
+                self.p.write("\x1b[?61;4;6;7;14;21;22;23;24;28;32;42c")
             with self.lock:
                 self.stream.feed(data)
 
@@ -135,22 +138,22 @@ for sh in ("bash", "zsh", "fish"):
     check("leading-space command not recorded", not daemon({"op": "detail", "command": f"echo secret-{tag}"}).get("found"))
     # finder
     t.keys("ctrl_r")
-    opened = t.wait(r"reman>", 15) and t.wait(r"scope:all", 5)
+    opened = t.wait(r"Recall  Fixes  Flows", 15) and t.wait(r"everywhere ←→", 5)
     check("Ctrl-R opens the finder", opened, t.text()[-300:])
     t.type(f"ok-{tag}"); time.sleep(1.2)
     t.keys("enter"); time.sleep(1.2)
     check("Enter puts the pick on the command line", f"echo ok-{tag}" in t.last_prompt(), t.last_prompt())
     t.keys("ctrl_u"); time.sleep(0.3)
     t.keys("up")
-    ok = t.wait(r"scope:folder", 15)
+    ok = t.wait(r"in this folder ←→", 15)
     time.sleep(1.2)
-    bar = [l for l in t.text().splitlines() if "reman>" in l]
-    n = re.search(r"\] (\d+)", bar[-1]) if bar else None
+    bar = [l for l in t.text().splitlines() if "←→" in l]
+    n = re.search(r"(\d+) (?:of \d+|results?)", bar[-1]) if bar else None
     check("Up opens folder-scoped finder that sees PowerShell's history of this folder", ok and n is not None and int(n.group(1)) > 5, bar[-1] if bar else "")
     t.keys("esc"); time.sleep(0.8)
     t.keys("ctrl_u"); time.sleep(0.3)
     t.keys("\t")
-    check("Tab on an empty line opens the finder", t.wait(r"scope:folder", 12), t.text()[-200:])
+    check("Tab on an empty line opens the finder", t.wait(r"in this folder ←→", 12), t.text()[-200:])
     t.keys("esc"); time.sleep(0.8)
     # latency of the capture path itself, measured inside the shell
     if sh == "bash":

@@ -33,21 +33,42 @@ These keys work in PowerShell, bash, zsh and fish.
 | `Tab` | normal completion. When there is nothing to complete (PowerShell) or the line is empty (every shell), it opens the finder with what you typed |
 | `Alt+F` | insert the fix suggested after a failed command |
 
-Inside the finder:
+### The finder
+
+The finder works like a command palette:
+- The query sits at the top, and the filters under it read as a sentence: *this folder first · by anyone · any outcome*. Each filter shows the key that changes it.
+- Results come in labelled sections.
+- A card beside the list (or below it, on narrow terminals) explains the selected command: what it does, whether it worked, where it ran, and why it matched.
+
+| when | what you see |
+|---|---|
+| your last command just failed | **last command failed: gti status** → `git status` (a proven fix, or the closest command that worked) |
+| empty query | **likely next**: what you usually run after your last command, then **recent in this folder**. An agent's one-off exploration (`cd x && grep …`) is hidden, with a note saying how many; `Tab` → agents shows it |
+| you type | **this folder** (strong matches only), then **everywhere**, ranked by meaning plus text. A folder with no good match never dead-ends |
+| Fixes tab | commands that failed. The card shows *what worked instead*, and `Enter` inserts that fix |
+| Flows tab | step sequences you repeat (`a → b → c`) |
 
 | finder key | action |
 |---|---|
+| `↑` / `↓`, `PgUp` / `PgDn` | move |
+| `Enter` | put the command on your prompt (it does not run) |
 | `Ctrl+T` | switch tab: **Recall**, **Fixes**, **Flows** |
-| `←` / `→` | scope: folder → repo → all |
-| `Tab` | actor: all → you → agent |
-| `F2` | pass/fail filter |
-| `Ctrl+G` | group variants |
+| `←` / `→` | where: this folder → this repo → everywhere |
+| `Tab` | who: anyone → you → agents |
+| `F2` | outcome: any → worked → failed |
+| `Ctrl+G` | fold variants that differ only in data (messages, paths, ids) / show each |
 | `Ctrl+P` | pin |
 | `Del` `Del` | forget the command everywhere |
-| `Enter` | insert the command |
+| `F1` | all keys |
 | `Esc` | close |
 
-With an empty query, the finder shows **predicted next commands** first. reman's own invocations (`reman search …`) are recorded but never offered back, unless your query mentions reman.
+What never gets offered back:
+- reman's own invocations (`reman search …`), unless your query mentions reman;
+- lines of source code that PowerShell recorded when you pasted code into a prompt (`return db_obj`, `for i in range(n):`). These stay in the database but are hidden.
+
+A command that only ever failed never leads a list.
+
+**Rendering:** colours are named ANSI colours, so light and dark themes both read well. Every changed line is repainted whole and cleared to the end, so leftover fragments can't survive a redraw.
 
 ## Capture cost
 
@@ -68,6 +89,7 @@ reman connect                      status of every agent on this machine
 reman connect all                  connect every installed agent
 reman connect claude-code codex    connect specific ones
 reman connect --root D:\proj ...   which folders agents may see (one list, applied to every agent)
+reman connect --old-history on     also share generic commands from old, folder-less history
 reman connect http [--port 8777]   local HTTP endpoint for SDKs / scripts
 reman connect --print              config to paste into any other MCP client
 reman disconnect <id> | all | http
@@ -96,6 +118,12 @@ After `reman connect http`, the daemon serves these routes on `127.0.0.1` only. 
 | `POST /tools/<name>` | call a tool; the JSON body is its arguments |
 
 Without HTTP, you can also use the CLI: `reman tools --format openai` for the schemas, and `reman call reman_search '{"intent":"run the tests"}'` to call a tool.
+
+**Old history.** History imported before reman recorded folders (for example, PowerShell history that passed through Atuin) has no folder, so no root can contain it.
+- With `--old-history on`, agents also get the *generic* commands from it. A generic command starts with a well-known tool and has no paths, file names, quotes, URLs, hosts, variables or assignments. `docker-compose down` qualifies; `scp app.tar.gz root@host:/root/` does not.
+- These results come with `cwd: null` and a `cwd_note`.
+- They're never returned when an agent asks about a specific folder.
+- It's off by default.
 
 **Security boundary.** Agents only see commands whose recorded folder is inside the shared roots. Secrets are redacted, and in strict mode anything still secret-looking is withheld. A result must be relevant: an agent gets an empty answer rather than an unrelated "closest" command.
 

@@ -168,6 +168,9 @@ enum Cmd {
         /// print paste-able config for any other MCP client
         #[arg(long)]
         print: bool,
+        /// share generic commands from old, folder-less history with agents: on | off
+        #[arg(long = "old-history", value_parser = ["on", "off"])]
+        old_history: Option<String>,
     },
     /// Undo `reman connect` for the given agents (or `all`, `http`)
     Disconnect { targets: Vec<String> },
@@ -377,7 +380,7 @@ fn real_main() -> Result<()> {
             println!("reman reindex: {} commands re-embedded", r["reembedded"]);
             Ok(())
         }
-        Cmd::Connect { targets, roots, port, print } => connect_cmd(&targets, &roots, port, print),
+        Cmd::Connect { targets, roots, port, print, old_history } => connect_cmd(&targets, &roots, port, print, old_history.as_deref()),
         Cmd::Disconnect { targets } => disconnect_cmd(&targets),
         Cmd::Tools { format } => {
             println!("{}", serde_json::to_string_pretty(&mcp::tools_as(&format)?)?);
@@ -443,7 +446,7 @@ fn agent_exes() -> Result<(PathBuf, PathBuf)> {
     Ok((exe, hook))
 }
 
-fn connect_cmd(targets: &[String], roots: &[String], port: Option<u16>, print: bool) -> Result<()> {
+fn connect_cmd(targets: &[String], roots: &[String], port: Option<u16>, print: bool, old_history: Option<&str>) -> Result<()> {
     let (exe, hook) = agent_exes()?;
     if print {
         println!("{}", connect::generic_snippet(&exe));
@@ -455,6 +458,12 @@ fn connect_cmd(targets: &[String], roots: &[String], port: Option<u16>, print: b
         st.mcp_roots = connect::resolve_roots(roots);
         settings::save(&st)?;
     }
+    if let Some(v) = old_history {
+        st.share_old_history = v == "on";
+        settings::save(&st)?;
+        println!("old history (no recorded folder): {}", if st.share_old_history { "generic commands shared with agents" } else { "hidden from agents" });
+    }
+    let old_line = if st.share_old_history { "plus generic commands from old, folder-less history" } else { "old, folder-less history hidden (--old-history on to share generic commands)" };
     if targets.is_empty() {
         println!("reman connect - agents on this machine\n");
         for (id, name) in connect::AGENTS {
@@ -469,9 +478,11 @@ fn connect_cmd(targets: &[String], roots: &[String], port: Option<u16>, print: b
         let http = st.http.as_ref().map(|h| format!("\x1b[32mon\x1b[0m  http://127.0.0.1:{}/mcp", h.port)).unwrap_or_else(|| "off".into());
         println!("  {:<15} {:<30} {http}", "http", "HTTP endpoint (any agent/SDK)");
         println!("\n  agents may see commands from: {}", st.mcp_roots.join("  |  "));
+        println!("                                {old_line}");
         println!("\n  reman connect all              connect every installed agent");
         println!("  reman connect <id> | http      one agent / the HTTP endpoint (OpenAI Agents SDK, LangChain, curl)");
         println!("  reman connect --root <dir> ... change which folders agents may see (all agents at once)");
+        println!("  reman connect --old-history on share generic commands (no paths/quotes/hosts) from folder-less old history");
         println!("  reman connect --print          config to paste into any other MCP client");
         return Ok(());
     }
@@ -480,7 +491,7 @@ fn connect_cmd(targets: &[String], roots: &[String], port: Option<u16>, print: b
     } else {
         targets.to_vec()
     };
-    println!("agents may see commands from: {}\n", st.mcp_roots.join("  |  "));
+    println!("agents may see commands from: {}\n                              {old_line}\n", st.mcp_roots.join("  |  "));
     for id in &ids {
         if id == "http" {
             connect_http(&mut st, port)?;

@@ -29,6 +29,8 @@ pub struct Entry {
     /// bitmask of the (lowercase ASCII) characters in the text - fuzzy prefilter
     pub mask: u64,
     pub gkey: String,
+    /// variants that differ only in data (messages, paths, ids) share a shape; the finder folds those
+    pub shape: String,
     pub desc: Option<String>,
     pub rows: Vec<Row>,
     pub pinned: bool,
@@ -38,12 +40,15 @@ pub struct Entry {
     pub self_ref: bool,
     pub alive: bool,
     pub has_vec: bool,
+    /// pasted source code that PSReadLine recorded as if it were a command (no folder, never an
+    /// outcome, reads like Python/JS). Kept in the db, never offered back.
+    pub noise: bool,
 }
 
 impl Entry {
     /// Should this command be offered back to the user / an agent?
     pub fn recallable(&self, show_self: bool) -> bool {
-        self.alive && !self.comment && (show_self || !self.self_ref)
+        self.alive && !self.comment && !self.noise && (show_self || !self.self_ref)
     }
 }
 
@@ -180,6 +185,38 @@ pub fn is_self_ref(text: &str) -> bool {
         || (prog.as_deref() == Some("python") && l.contains("reman.py"))
 }
 
+/// Source code pasted into a prompt (PSReadLine records every pasted line as a "command"):
+/// Python/JS statements, fragments of a multi-line block, bare number lists. Shell lines that
+/// merely look similar (`FOO=1 cmd`, `for f in *; do`, `$x = 1`) are not flagged.
+pub fn looks_like_code(text: &str) -> bool {
+    use std::sync::OnceLock;
+    static KW: OnceLock<regex::Regex> = OnceLock::new();
+    static ASSIGN: OnceLock<regex::Regex> = OnceLock::new();
+    let kw = KW.get_or_init(|| {
+        regex::Regex::new(
+            r"^(?:async\s+def\b|def\s|class\s|return\b|await\s|elif\b|else\s*:|try\s*:|except\b|finally\s*:|yield\b|raise\b|pass$|break$|continue$|lambda\b|from\s+\S+\s+import\s|import\s+[\w.]+(?:\s+as\s+\w+)?$|print\(|console\.log\(|const\s|let\s|var\s|if\s.*:$|for\s+[\w, ()]+\s+in\s.*:$|while\s.*:$|with\s.*:$|@\w+(?:\(.*\))?$)",
+        )
+        .unwrap()
+    });
+    let assign = ASSIGN.get_or_init(|| regex::Regex::new(r#"^[A-Za-z_][\w.\[\]'"]*\s+(?:[+\-*/]?=)\s+\S"#).unwrap());
+    let first = text.trim().lines().next().unwrap_or("").trim();
+    if first.is_empty() {
+        return true;
+    }
+    let c0 = first.chars().next().unwrap();
+    if matches!(c0, '.' | ')' | ']' | '}' | ',') && !first.starts_with("./") && !first.starts_with(".\\") && !first.starts_with("..") {
+        return true;
+    }
+    if kw.is_match(first) || assign.is_match(first) {
+        return true;
+    }
+    if first.chars().all(|c| c.is_ascii_digit() || c.is_whitespace() || matches!(c, '.' | ',' | '-')) {
+        return true;
+    }
+    // an unfinished block line: `ports:`, `foo(`, `[`
+    first.ends_with([':', '(', ',', '[']) && !(first.len() == 2 && first.as_bytes()[0].is_ascii_alphabetic())
+}
+
 impl Store {
     pub fn len(&self) -> usize {
         self.entries.len()
@@ -272,6 +309,11 @@ impl Store {
             };
             s.execs.push(ex);
         }
+        for i in 0..s.entries.len() {
+            let e = &s.entries[i];
+            let n = looks_like_code(&e.text) && e.rows.iter().all(|r| r.ok + r.fail == 0 && s.row_unscoped(r));
+            s.entries[i].noise = n;
+        }
         Ok(s)
     }
 
@@ -286,6 +328,14 @@ impl Store {
         self.cwd_repo.push(ri);
         debug_assert_eq!(self.cwd_repo.len(), i as usize + 1);
         i
+    }
+
+    /// A row with no recorded folder (history imported from before reman captured folders).
+    pub fn row_unscoped(&self, r: &Row) -> bool {
+        r.cwd.is_none_or(|c| {
+            let n = self.cwd_name(c);
+            n.is_empty() || n.eq_ignore_ascii_case("unknown")
+        })
     }
 
     pub fn cwd_name(&self, i: u32) -> &str {
@@ -397,6 +447,7 @@ impl Store {
             lower: text.to_lowercase(),
             mask: char_mask(text),
             gkey: describe::group_key(text),
+            shape: describe::shape_key(text),
             desc,
             rows: Vec::new(),
             pinned: false,
@@ -404,6 +455,7 @@ impl Store {
             self_ref: is_self_ref(text),
             alive: true,
             has_vec: vec.is_some(),
+            noise: false,
         });
         self.by_text.insert(text.to_string(), i);
         i
@@ -439,6 +491,7 @@ impl Store {
         let (h, a) = if run.is_agent() { (0, 1) } else { (1, 0) };
         let e = &mut self.entries[ei as usize];
         e.alive = true;
+        e.noise = false; // it just ran for real
         if new_row {
             e.rows.push(Row {
                 id: command_id,
@@ -540,6 +593,23 @@ mod tests {
         s.remove_rows(&s.row_ids("ls"));
         assert!(!s.knows("ls"));
         assert_eq!(s.execs.len(), 2);
+    }
+}
+
+#[cfg(test)]
+mod noise_tests {
+    use super::looks_like_code;
+
+    #[test]
+    fn pasted_code_vs_shell() {
+        for c in ["return db_obj", "async def update(", "for i in range(1, n + 1):", ".offset(skip)", "obj_in_data = obj_in",
+                  "from sqlalchemy import or_", "6 4 2 1 2 3", "ports:", "result = await db.execute(query)", "};", "print(*arr1)"] {
+            assert!(looks_like_code(c), "{c}");
+        }
+        for c in ["docker-compose up -d", "FOO=1 npm test", "for f in *.py; do echo $f; done", "$x = 1", "d:", "./run.sh",
+                  "../x/build.ps1", "python -c \"import x\"", "git commit -m \"fix: y\"", "if (Test-Path x) { rm x }", "import-module posh-git"] {
+            assert!(!looks_like_code(c), "{c}");
+        }
     }
 }
 

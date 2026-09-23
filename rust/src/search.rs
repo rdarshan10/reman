@@ -22,6 +22,11 @@ const W_PREFIX: f32 = 0.05;
 const W_HERE: f32 = 0.02;
 const W_PIN: f32 = 0.02;
 const W_SCRIPT: f32 = 0.04;
+/// an agent's one-off (ran once, never by you) - usually exploration: `cd x; echo ===; grep ...`
+const W_ONEOFF: f32 = 0.03;
+const W_FAILING: f32 = 0.06;
+/// below this share of a perfect match, a fuzzy hit is letters scattered by chance
+const FUZZY_FLOOR: f32 = 0.3;
 
 /// Bounded nudge against multi-KB / multi-line scripts (mostly agent-run) that merely mention the
 /// query's words: you want the command you'd rerun, not a 40-line heredoc. 0 up to 160 chars,
@@ -116,8 +121,18 @@ pub fn qtokens(q: &str) -> Vec<String> {
     let low = q.to_lowercase();
     low.split(|c: char| !c.is_ascii_alphanumeric())
         .filter(|w| w.len() > 2 && !STOP.contains(w))
-        .map(str::to_string)
+        .map(stem)
         .collect()
+}
+
+/// Crude stem for the literal-overlap check: "migrations" / "migration" / "migrate" all share
+/// "migrat", "containers" and "container" share "contain". Short words stay whole.
+fn stem(w: &str) -> String {
+    if w.len() < 6 {
+        return w.to_string();
+    }
+    let keep = (w.len() * 2 / 3).max(5);
+    w[..keep].to_string()
 }
 
 fn freq(runs: u32) -> f32 {
@@ -133,6 +148,9 @@ struct Cand {
     runs: u32,
     last: i64,
     here: bool,
+    oneoff: bool,
+    /// only ever failed: `gti status` must not outrank `git status` for `git st`
+    failing: bool,
 }
 
 /// Semantic similarity (max of raw-command and description vectors) for every entry.
@@ -169,6 +187,8 @@ pub fn search(store: &Store, q: &Query, qv: Option<&[f32]>) -> Outcome {
                 runs: a.runs,
                 last: a.last_used,
                 here: q.here.is_some_and(|h| e.rows.iter().any(|r| r.cwd == Some(h))),
+                oneoff: a.human == 0 && a.agent > 0 && a.runs <= 1,
+                failing: a.ok == 0 && a.fail > 0,
             })
         })
         .collect();
@@ -210,14 +230,20 @@ pub fn search(store: &Store, q: &Query, qv: Option<&[f32]>) -> Outcome {
             pat.score(Utf32Str::new(&e.text, &mut buf), &mut matcher).unwrap_or(0)
         })
         .collect();
-    let fmax = raw_f.iter().copied().max().unwrap_or(0);
-    if fmax > 0 {
-        for ((f, r), c) in fz.iter_mut().zip(&raw_f).zip(&cands) {
-            *f = *r as f32 / fmax as f32;
-            // a long script that merely mentions the words is not what you're typing
-            if store.entries[c.idx as usize].lower.len() > FUZZY_SPAN {
-                *f = f.min(LONG_FUZZY_CAP);
-            }
+    // normalise against the query matched against itself (the best any text can do), not
+    // against the best candidate: otherwise, when nothing really matches, letters scattered
+    // across an unrelated command get stretched up to ~1.0
+    let ideal = pat.score(Utf32Str::new(text, &mut buf), &mut matcher).unwrap_or(1).max(1);
+    let mut fmax = 0;
+    for ((f, r), c) in fz.iter_mut().zip(&raw_f).zip(&cands) {
+        let n = (*r as f32 / ideal as f32).min(1.0);
+        *f = if n < FUZZY_FLOOR { 0.0 } else { n };
+        // a long script that merely mentions the words is not what you're typing
+        if store.entries[c.idx as usize].lower.len() > FUZZY_SPAN {
+            *f = f.min(LONG_FUZZY_CAP);
+        }
+        if *f > 0.0 {
+            fmax = fmax.max(*r);
         }
     }
     // command-like queries (`dock comp up`, `npm e2e`) lean on fuzzy; natural-language intents
@@ -278,6 +304,8 @@ pub fn search(store: &Store, q: &Query, qv: Option<&[f32]>) -> Outcome {
                     + recency(c.last, now)
                     + if c.here { W_HERE } else { 0.0 }
                     + if e.pinned { W_PIN } else { 0.0 }
+                    - if c.oneoff { W_ONEOFF } else { 0.0 }
+                    - if c.failing { W_FAILING } else { 0.0 }
                     - script_penalty(e);
                 scored.push(hit(c.idx, score, s, fz[k]));
             }
@@ -287,7 +315,8 @@ pub fn search(store: &Store, q: &Query, qv: Option<&[f32]>) -> Outcome {
             for (k, c) in cands.iter().enumerate().filter(|(k, _)| fz[*k] > 0.0) {
                 let s = sim(c.idx).max(0.0);
                 let score = fz[k] + W_PREFIX * prefix(c.idx) + 0.25 * s + freq(c.runs) + recency(c.last, now)
-                    + if c.here { W_HERE } else { 0.0 };
+                    + if c.here { W_HERE } else { 0.0 }
+                    - if c.failing { W_FAILING } else { 0.0 };
                 scored.push(hit(c.idx, score, sim(c.idx), fz[k]));
             }
         }
@@ -319,12 +348,12 @@ fn finish(store: &Store, scored: Vec<Hit>, q: &Query, group: bool, mode: &'stati
     let hits = if group {
         let mut sizes: HashMap<&str, u32> = HashMap::new();
         for h in &scored {
-            *sizes.entry(store.entries[h.idx as usize].gkey.as_str()).or_default() += 1;
+            *sizes.entry(store.entries[h.idx as usize].shape.as_str()).or_default() += 1;
         }
         let mut seen = std::collections::HashSet::new();
         let mut out = Vec::new();
         for mut h in scored {
-            let gk = store.entries[h.idx as usize].gkey.as_str();
+            let gk = store.entries[h.idx as usize].shape.as_str();
             if seen.insert(gk) {
                 h.variants = sizes[gk];
                 out.push(h);
@@ -380,6 +409,19 @@ mod tests {
         let out = search(&s, &q("dock comp up"), None);
         assert_eq!(out.mode, "fuzzy");
         assert_eq!(s.entries[out.hits[0].idx as usize].text, "docker compose up -d");
+    }
+
+    #[test]
+    fn a_command_that_only_failed_never_leads() {
+        let mut s = store_with(&["git status"]);
+        // `gti status` failed three times, more recently and more often than `git status` ran
+        for ts in 200..203 {
+            let r = Run { cmd: "gti status".into(), exit: Some(1), cwd: Some("C:/p".into()), actor: "human".into(), ts, ..Default::default() };
+            let v = vec![0.0; DIM];
+            s.apply_run(1200, ts == 200, &r, Some((&v, None, &[])));
+        }
+        let out = search(&s, &q("git st"), None);
+        assert_eq!(s.entries[out.hits[0].idx as usize].text, "git status");
     }
 
     #[test]

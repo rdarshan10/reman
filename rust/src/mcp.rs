@@ -23,6 +23,8 @@ pub struct Policy {
     pub roots: Vec<String>,
     pub allow_global: bool,
     pub strict: bool,
+    /// also share generic commands that have no recorded folder (settings.share_old_history)
+    pub old_history: bool,
 }
 
 impl Policy {
@@ -42,13 +44,14 @@ impl Policy {
             roots,
             allow_global: std::env::var("REMAN_MCP_ALLOW_GLOBAL").as_deref() == Ok("1"),
             strict: std::env::var("REMAN_MCP_STRICT_SECRETS").map(|v| v == "1").unwrap_or(st.strict_secrets),
+            old_history: std::env::var("REMAN_MCP_OLD_HISTORY").map(|v| v == "1").unwrap_or(st.share_old_history),
         }
     }
 
     /// The HTTP endpoint has no per-agent env: config.json only (no roots configured = sees nothing).
     pub fn from_settings() -> Self {
         let st = crate::settings::load();
-        Self { roots: st.mcp_roots.iter().map(|r| config::norm_path(r)).collect(), allow_global: false, strict: st.strict_secrets }
+        Self { roots: st.mcp_roots.iter().map(|r| config::norm_path(r)).collect(), allow_global: false, strict: st.strict_secrets, old_history: st.share_old_history }
     }
 
     pub fn from_req(req: &Value) -> Self {
@@ -56,6 +59,7 @@ impl Policy {
             roots: req.get("roots").and_then(Value::as_array).map(|a| a.iter().filter_map(Value::as_str).map(config::norm_path).collect()).unwrap_or_default(),
             allow_global: req.get("allow_global").and_then(Value::as_bool).unwrap_or(false),
             strict: req.get("strict").and_then(Value::as_bool).unwrap_or(false),
+            old_history: req.get("old_history").and_then(Value::as_bool).unwrap_or(false),
         }
     }
 
@@ -79,11 +83,17 @@ fn folder_eq(a: Option<&str>, b: &str) -> bool {
 }
 
 /// Rows of an entry the agent may see (inside the root, and in `cwd` when given), newest first.
+/// Rows with no recorded folder are only shared when the policy opts in, the agent didn't ask
+/// for a specific folder, and the command itself is project-neutral (describe::is_generic).
 fn visible<'a>(st: &Store, e: &'a Entry, pol: &Policy, cwd: Option<&str>) -> Vec<&'a Row> {
+    let mut generic: Option<bool> = None;
     let mut rows: Vec<&Row> = e
         .rows
         .iter()
         .filter(|r| {
+            if st.row_unscoped(r) && !pol.allow_global {
+                return pol.old_history && cwd.is_none() && *generic.get_or_insert_with(|| crate::describe::is_generic(&e.text));
+            }
             let c = r.cwd.map(|c| st.cwd_name(c));
             pol.within(c) && cwd.is_none_or(|w| folder_eq(c, w))
         })
@@ -114,7 +124,8 @@ fn sum(st: &Store, rows: &[&Row]) -> Seen {
         last_used: rows.first().map(|r| r.last_used).unwrap_or(0),
         last_exit: rows.first().and_then(|r| r.last_exit),
         actors: rows.iter().map(|r| r.last_actor.clone().unwrap_or_else(|| "human".into())).collect(),
-        cwd: rows.first().and_then(|r| r.cwd).map(|c| st.cwd_name(c).to_string()),
+        // newest row that has a real folder; null = only known from folder-less old history
+        cwd: rows.iter().find(|r| !st.row_unscoped(r)).and_then(|r| r.cwd).map(|c| st.cwd_name(c).to_string()),
     }
 }
 
@@ -182,6 +193,9 @@ fn tool_search(d: &Daemon, a: &Value, pol: &Policy, cwd: Option<&str>) -> Result
                 "last_run": config::age(s.last_used), "actor": s.actors.first().cloned().unwrap_or_else(|| "human".into())});
             if out.mode == "fuzzy" {
                 v["match"] = json!("fuzzy");
+            }
+            if s.cwd.is_none() {
+                v["cwd_note"] = json!("from old history - the folder it ran in was never recorded");
             }
             if prefer_human {
                 v["human_runs"] = json!(s.human);
@@ -455,7 +469,7 @@ impl Bridge {
 
     pub fn call(&mut self, tool: &str, args: &Value) -> Result<Value> {
         let req = json!({"op": "mcp", "tool": tool, "args": args, "roots": self.pol.roots,
-                         "allow_global": self.pol.allow_global, "strict": self.pol.strict});
+                         "allow_global": self.pol.allow_global, "strict": self.pol.strict, "old_history": self.pol.old_history});
         for attempt in 0..2 {
             if self.client.is_none() {
                 self.client = Some(Client::connect()?);
@@ -494,12 +508,31 @@ mod tests {
 
     #[test]
     fn boundary() {
-        let p = Policy { roots: vec![config::norm_path(r"D:\PlanetNaidu")], allow_global: false, strict: false };
+        let p = Policy { roots: vec![config::norm_path(r"D:\PlanetNaidu")], allow_global: false, strict: false, old_history: false };
         assert!(p.within(Some(r"D:\PlanetNaidu")));
         assert!(p.within(Some(r"d:\planetnaidu\api")));
         assert!(!p.within(Some(r"D:\PlanetNaiduEvil")));
         assert!(!p.within(Some(r"C:\Users")));
         assert!(!p.within(None));
+    }
+
+    #[test]
+    fn old_history_is_opt_in_and_generic_only() {
+        use crate::db::Run;
+        let mk = |cmd: &str, cwd: Option<&str>| Run { cmd: cmd.into(), exit: None, cwd: cwd.map(Into::into), session: "s".into(), actor: "human".into(), ts: 1, duration_ms: None };
+        let mut st = Store::default();
+        st.apply_run(1, true, &mk("docker ps", None), None);
+        st.apply_run(2, true, &mk("docker ps", Some("unknown")), None);
+        st.apply_run(3, true, &mk("python train.py", None), None);
+        st.apply_run(4, true, &mk("docker ps", Some(r"C:\elsewhere")), None);
+        let off = Policy { roots: vec![config::norm_path(r"D:\P")], allow_global: false, strict: false, old_history: false };
+        let on = Policy { old_history: true, ..off.clone() };
+        let e = |t: &str| st.entry(t).unwrap().1;
+        assert!(visible(&st, e("docker ps"), &off, None).is_empty());
+        assert_eq!(visible(&st, e("docker ps"), &on, None).len(), 2); // never the C:\elsewhere row
+        assert!(visible(&st, e("docker ps"), &on, Some(r"D:\P")).is_empty()); // a folder was asked for
+        assert!(visible(&st, e("python train.py"), &on, None).is_empty()); // names a project file
+        assert_eq!(sum(&st, &visible(&st, e("docker ps"), &on, None)).cwd, None);
     }
 }
 

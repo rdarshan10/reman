@@ -22,7 +22,7 @@ for k in ("CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "AGENT"):  # behave like a hum
 
 KEY = {"enter": "\r", "up": "\x1b[A", "down": "\x1b[B", "left": "\x1b[D", "right": "\x1b[C", "esc": "\x1b",
        "tab": "\t", "f2": "\x1bOQ", "del": "\x1b[3~", "bs": "\x7f", "ctrl_r": "\x12", "ctrl_t": "\x14",
-       "ctrl_g": "\x07", "ctrl_p": "\x10", "ctrl_u": "\x15", "alt_f": "\x1bf"}
+       "ctrl_g": "\x07", "ctrl_p": "\x10", "ctrl_u": "\x15", "alt_f": "\x1bf", "f1": "\x1bOP"}
 
 
 class Term:
@@ -39,6 +39,10 @@ class Term:
                 data = self.p.read(65536)
             except EOFError:
                 return
+            if "\x1b[c" in data:
+                # ConPTY asks the terminal to identify itself (DA1) and holds rendering until it
+                # hears back; Windows Terminal answers, pyte doesn't
+                self.p.write("\x1b[?61;4;6;7;14;21;22;23;24;28;32;42c")
             with self.lock:
                 self.stream.feed(data)
 
@@ -69,11 +73,14 @@ class Term:
         return lines[-1] if lines else ""
 
     def bar(self):
-        b = [l for l in self.text().splitlines() if "reman>" in l]
-        return b[-1] if b else ""
+        """The finder's query line + the filter line under it."""
+        lines = self.text().splitlines()
+        i = next((k for k, l in enumerate(lines) if l.startswith(" › ")), None)
+        return "" if i is None else lines[i] + "\n" + (lines[i + 1] if i + 1 < len(lines) else "")
 
-    def rows(self):
-        return [l for l in self.text().splitlines() if l.startswith(("> ", "  "))]
+    def selected(self):
+        s = [l for l in self.text().splitlines() if l.startswith(" ▌")]
+        return s[0] if s else ""
 
     def snap(self, title):
         print(f"\n----- {title} " + "-" * max(0, COLS - 8 - len(title)))
@@ -83,9 +90,13 @@ class Term:
         print("\n".join(body[-ROWS:]))
 
 
+FINDER = r"Recall  Fixes  Flows"
+
+
 def finder_running():
+    # only the finder opened by OUR test shell - the user may have one open in a real terminal
     out = subprocess.run(["powershell", "-NoProfile", "-Command",
-                          "@(Get-CimInstance Win32_Process -Filter \"Name='reman.exe'\" | Where-Object { $_.CommandLine -match ' find ' }).Count"],
+                          f"@(Get-CimInstance Win32_Process -Filter \"Name='reman.exe' AND ParentProcessId={t.p.pid}\" | Where-Object {{ $_.CommandLine -match ' find ' }}).Count"],
                          capture_output=True, text=True).stdout.strip()
     return out not in ("", "0")
 
@@ -132,7 +143,7 @@ t.type("ru"); t.keys("tab"); time.sleep(1.2)
 check("Tab still does normal completion (ru -> .\\rust)", "rust" in t.prompt_line() and not finder_running())
 t.keys("esc"); time.sleep(0.4)
 t.type("zzqq-nothing"); t.keys("tab")
-check("Tab with nothing to complete opens the finder seeded with the text", t.wait(r"reman> zzqq-nothing", 12))
+check("Tab with nothing to complete opens the finder seeded with the text", t.wait(r" › zzqq-nothing", 12))
 t.keys("esc"); time.sleep(0.8); t.keys("esc"); time.sleep(0.4)
 r = daemon({"op": "search", "query": "tear down containers", "k": 3})
 top = [x["command"] for x in r["results"]]
@@ -142,15 +153,22 @@ check("unknown-outcome commands have no success rate (not 0%)",
       all(x.get("success_rate") is None for x in r["results"] if x.get("status") == "unknown"))
 
 # 2. UpArrow -> finder scoped to this folder
+t.type("gti status"); t.keys("enter"); time.sleep(1.5)
 t.keys("up")
-opened = t.wait(r"reman>", 15) and t.wait(r"scope:folder", 5)
-time.sleep(1.0)
-t.snap("UpArrow finder (empty query, this folder)")
+opened = t.wait(FINDER, 15) and t.wait(r"in this folder ←→", 5)
+time.sleep(1.2)
+t.snap("UpArrow finder right after `gti status` failed")
 check("UpArrow opens the finder scoped to this folder", opened)
+check("right after a failure the finder leads with its fix",
+      "last command failed: gti status" in t.text() and "git status" in t.selected())
 t.type("git st"); time.sleep(1.2)
 t.snap("typed `git st` (folder scope)")
 b = t.bar()
-check("typing filters live (query in bar, results counted)", "git st" in b and re.search(r"\[(hybrid|fuzzy|semantic|manual)\] [1-9]", b) is not None)
+check("typing filters live (query in bar, results counted)", "git st" in b and re.search(r"\d+ (results?|of \d+)", b) is not None)
+t.keys("ctrl_u"); time.sleep(1.2)
+check("clearing the query redraws the empty state", "describe it in words" in t.bar() and "last command failed" in t.text())
+t.type("git st"); time.sleep(1.5)
+t.snap("retyped `git st` before Enter")
 t.keys("enter"); time.sleep(1.0)
 pl = t.prompt_line()
 check("Enter inserts the picked command at the prompt", "git" in pl.split(">", 1)[-1])
@@ -159,29 +177,31 @@ t.keys("esc"); time.sleep(0.4)
 
 # 3. Ctrl+R -> all folders; ranking; chips
 t.keys("ctrl_r")
-check("Ctrl+R opens the finder over all folders", t.wait(r"scope:all", 15))
+check("Ctrl+R opens the finder over all folders", t.wait(r"everywhere ←→", 15))
 t.type("git st"); time.sleep(1.2)
-sel_rows = [r for r in t.rows() if r.startswith("> ")]
-best = sel_rows[-1] if sel_rows else ""
-print("   bar:", t.bar()[:90], "| top row:", best[:80])
+best = t.selected()
+print("   bar:", t.bar().splitlines()[0][:90], "| selected:", best[:80])
 t.snap("Ctrl+R `git st`")
 check("`git st` ranks `git status` first across folders", "git status" in best)
 t.keys("ctrl_u"); time.sleep(0.4)
 t.type("docker"); time.sleep(1.0)
 t.keys("tab"); time.sleep(0.8)
-check("Tab cycles actor filter (all -> you)", "actor:you" in t.text())
+check("Tab cycles actor filter (anyone -> you)", "by you tab" in t.text())
 t.keys("f2"); time.sleep(0.8)
-check("F2 cycles pass filter (all -> ok)", "pass:ok" in t.text())
+check("F2 cycles outcome filter (any -> worked)", "worked F2" in t.text())
 t.keys("right"); time.sleep(0.8)
-check("Right arrow cycles scope (all -> folder)", "scope:folder" in t.text())
+check("Right arrow cycles scope (everywhere -> this folder first)", "this folder first ←→" in t.text())
 t.keys("left"); time.sleep(0.8)
-t.snap("Ctrl+R `docker`, actor:you pass:ok")
+t.snap("Ctrl+R `docker`, by you, worked")
 t.keys("ctrl_t"); time.sleep(1.0)
 t.snap("Ctrl+T -> Fixes tab")
-check("Ctrl+T switches to Fixes (did-you-mean results)", "typo" in t.text() or "PROVEN" in t.text())
+check("Ctrl+T switches to Fixes (what worked instead)", "what worked instead of: docker" in t.text() or "looks like a fix" in t.text())
 t.keys("ctrl_t"); time.sleep(1.2)
 t.snap("Ctrl+T -> Flows tab")
-check("Ctrl+T again switches to Flows", " ; " in t.text() or "workflow run" in t.text() or "no matches" in t.text())
+check("Ctrl+T again switches to Flows", "→" in t.text() or "sequences you repeat" in t.text() or "No repeated" in t.text())
+t.keys("f1"); time.sleep(0.6)
+check("F1 shows every key in a framed box", "┌ keys" in t.text() and "any key closes" in t.text())
+t.keys("x"); time.sleep(0.5)
 t.keys("esc")
 deadline = time.time() + 10
 while time.time() < deadline and finder_running():
@@ -193,11 +213,11 @@ time.sleep(0.5)
 t.type(" echo reman-tui-secret-space"); t.keys("enter"); time.sleep(0.8)
 t.type("echo reman-tui-forget-me"); t.keys("enter"); time.sleep(1.2)
 check("leading-space command was NOT recorded", not daemon({"op": "detail", "command": "echo reman-tui-secret-space"}).get("found"))
-t.keys("ctrl_r"); t.wait(r"reman>", 10)
+t.keys("ctrl_r"); t.wait(FINDER, 10)
 t.type("reman-tui"); time.sleep(1.2)
 has = "reman-tui-forget-me" in t.text()
 t.keys("del"); time.sleep(0.5)
-asked = "press Del again" in t.text()
+asked = "Del again forgets" in t.text()
 t.keys("del"); time.sleep(1.2)
 t.snap("after Del Del")
 check("Del asks to confirm, second Del forgets", has and asked and "forgotten" in t.text()
@@ -209,7 +229,7 @@ for _ in range(2):
     for c in ("echo step-one-tui", "echo step-two-tui"):
         t.type(c); t.keys("enter"); time.sleep(0.9)
 t.type("echo step-one-tui"); t.keys("enter"); time.sleep(1.0)
-t.keys("up"); t.wait(r"reman>", 10); time.sleep(1.2)
+t.keys("up"); t.wait(FINDER, 10); time.sleep(1.2)
 t.snap("empty query after `echo step-one-tui` (prediction)")
 check("empty-query finder predicts the next command (» step-two)", re.search(r"».*echo step-two-tui", t.text()) is not None)
 t.keys("esc"); time.sleep(0.5)

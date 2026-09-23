@@ -289,6 +289,31 @@ impl Daemon {
     }
 
     fn next_op(&self, req: &Value) -> Value {
+        let mut out = self.predict_op(req);
+        // the finder opened right after a command failed in this shell: lead with its fix
+        let failed = {
+            let st = self.store.read();
+            s(req, "session")
+                .and_then(|x| st.session_index(x))
+                .and_then(|si| st.execs.iter().rev().find(|x| x.session == si))
+                .filter(|x| x.exit.is_some_and(|e| e != 0) && config::now() - x.ts <= 600)
+                .map(|x| st.entries[x.entry as usize].text.clone())
+        };
+        if let Some(f) = failed {
+            if let Some(sg) = self.suggest(&f, s(req, "cwd")) {
+                let st = self.store.read();
+                if let Some((i, _)) = st.entry(sg["command"].as_str().unwrap_or("")) {
+                    let mut v = self.item(&st, &search::Hit { idx: i, score: 1.0, sim: -2.0, fuzzy: 0.0, variants: 1, matched_terms: 0 }, Scope::All);
+                    v["proven"] = json!(sg["kind"] == "proven");
+                    v["times_fixed"] = sg["times"].clone();
+                    out["fix"] = json!({"failed": f, "item": v});
+                }
+            }
+        }
+        out
+    }
+
+    fn predict_op(&self, req: &Value) -> Value {
         let st = self.store.read();
         let cwd = s(req, "cwd").and_then(|c| st.cwd_index(c));
         let (last, prev);
@@ -397,6 +422,39 @@ impl Daemon {
             tx.commit()?;
         }
         self.reload()?;
+        Ok(work.len())
+    }
+
+    /// One-time upgrade when describe() learns something new (v2: see through wrappers like
+    /// `docker exec web alembic ...`): re-describe and re-embed ONLY the affected commands'
+    /// descriptions, in the background, instead of asking the user for a full reindex.
+    pub fn redescribe(&self) -> Result<usize> {
+        const VERSION: &str = "2";
+        if db::meta_get(&self.db.lock(), "describe_version")?.as_deref() == Some(VERSION) {
+            return Ok(0);
+        }
+        let work: Vec<(String, Vec<i64>)> = {
+            let st = self.store.read();
+            st.entries.iter().filter(|e| e.alive && describe::wrapped(&e.text).is_some()).map(|e| (e.text.clone(), e.rows.iter().map(|r| r.id).collect())).collect()
+        };
+        for chunk in work.chunks(128) {
+            let descs: Vec<describe::Description> = chunk.iter().map(|(t, _)| describe::describe(t)).collect();
+            let batch: Vec<&str> = descs.iter().flat_map(|d| d.parts.iter().map(|p| p.1.as_str())).collect();
+            let mut vecs = if batch.is_empty() { Vec::new() } else { self.embedder.embed_many(&batch)? }.into_iter();
+            let mut conn = self.db.lock();
+            let tx = conn.transaction()?;
+            for ((_, ids), d) in chunk.iter().zip(&descs) {
+                let parts: Vec<(&str, Vec<f32>)> = d.parts.iter().map(|p| (p.0, vecs.next().unwrap())).collect();
+                for (i, id) in ids.iter().enumerate() {
+                    db::write_descriptions(&tx, *id, d.display.as_deref(), if i == 0 { &parts } else { &[] })?;
+                }
+            }
+            tx.commit()?;
+        }
+        db::meta_set(&self.db.lock(), "describe_version", VERSION)?;
+        if !work.is_empty() {
+            self.reload()?;
+        }
         Ok(work.len())
     }
 
@@ -521,6 +579,8 @@ impl Daemon {
             "commands": alive.len(), "runs": runs, "executions": st.execs.len(),
             "ok_runs": ok, "failed_runs": fail, "human_runs": human, "agent_runs": agent,
             "fix_pairs": pairs, "pinned": alive.iter().filter(|e| e.pinned).count(),
+            "hidden_pasted_code": alive.iter().filter(|e| e.noise).count(),
+            "no_folder": alive.iter().filter(|e| e.rows.iter().all(|r| st.row_unscoped(r))).count(),
             "top": top.iter().take(10).map(|(n, t)| json!({"command": t, "runs": n})).collect::<Vec<_>>(),
             "failing": failing.iter().take(5).map(|(n, t)| json!({"command": t, "fails": n})).collect::<Vec<_>>(),
             "folders": fv.iter().take(8).map(|(c, n)| json!({"cwd": st.cwd_name(*c), "runs": n})).collect::<Vec<_>>(),
@@ -706,6 +766,14 @@ pub fn serve(port: u16) -> Result<()> {
     );
     log(&msg);
     println!("{msg}");
+    {
+        let d = d.clone();
+        std::thread::spawn(move || match d.redescribe() {
+            Ok(0) => {}
+            Ok(n) => log(&format!("re-described {n} wrapped commands (docker exec / compose run / npx ...)")),
+            Err(e) => log(&format!("redescribe failed: {e}")),
+        });
+    }
     {
         let d = d.clone();
         std::thread::spawn(move || {

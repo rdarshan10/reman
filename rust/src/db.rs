@@ -177,6 +177,16 @@ pub fn write_vectors(db: &Connection, cid: i64, raw: &[f32], desc: Option<&str>,
     Ok(())
 }
 
+/// Replace a command's description + description vectors, leaving its raw vector alone.
+pub fn write_descriptions(db: &Connection, cid: i64, desc: Option<&str>, descs: &[(&str, Vec<f32>)]) -> Result<()> {
+    db.execute("DELETE FROM command_desc_vec WHERE command_id=?", [cid])?;
+    db.execute("UPDATE commands SET description=?, desc_source='tldr' WHERE id=?", params![desc, cid])?;
+    for (kind, v) in descs {
+        db.execute("INSERT OR REPLACE INTO command_desc_vec (command_id, kind, vec) VALUES (?,?,?)", params![cid, kind, pack(v)])?;
+    }
+    Ok(())
+}
+
 pub fn delete_command_rows(db: &Connection, ids: &[i64]) -> Result<()> {
     // children first, parent last (the schema declares command_vec -> commands)
     for id in ids {
