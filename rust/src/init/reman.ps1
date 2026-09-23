@@ -36,6 +36,18 @@ function global:__RemanSend {
   }
 }
 
+# Warm the daemon when the shell starts (non-blocking), so the very first failure already gets a
+# suggestion instead of landing in the spool.
+try {
+  $__c = New-Object Net.Sockets.TcpClient
+  $__iar = $__c.BeginConnect('127.0.0.1', __PORT__, $null, $null)
+  if (-not $__iar.AsyncWaitHandle.WaitOne(150)) {
+    $global:__RemanSpawned = [DateTime]::UtcNow
+    Start-Process -FilePath $global:__RemanExe -ArgumentList 'daemon' -WindowStyle Hidden
+  }
+  $__c.Close()
+} catch { }
+
 # Capture: wrap the prompt (guarded against double-wrap). Reads $? / $LASTEXITCODE FIRST, then
 # restores $LASTEXITCODE so the original prompt's exit indicator still works. A command typed with
 # a leading space is never recorded.
@@ -44,7 +56,10 @@ if (-not $global:__RemanPromptHooked) {
   $global:__RemanOrigPrompt = $function:prompt
   $global:__RemanLastHistId = -1
   function global:prompt {
-    $code = $global:LASTEXITCODE; $ok = $?
+    # `$?` MUST be read first: any statement before it (even an assignment) resets it to True,
+    # which silently recorded every command as a success.
+    $ok = $global:?
+    $code = $global:LASTEXITCODE
     try {
       $h = Get-History -Count 1
       if ($h -and $h.Id -ne $global:__RemanLastHistId) {

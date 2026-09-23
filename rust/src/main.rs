@@ -529,7 +529,18 @@ fn setup(no_profile: bool) -> Result<()> {
             }
             std::thread::sleep(std::time::Duration::from_millis(800));
         }
-        std::fs::copy(&me, &installed).with_context(|| format!("installing to {}", installed.display()))?;
+        if std::fs::copy(&me, &installed).is_err() {
+            // still locked by some other reman process (a daemon on another port, a finder):
+            // Windows lets a running exe be renamed, so move it aside and install fresh
+            let aside = installed.with_extension(format!("old-{}.exe", config::now()));
+            std::fs::rename(&installed, &aside).with_context(|| format!("{} is locked", installed.display()))?;
+            std::fs::copy(&me, &installed).with_context(|| format!("installing to {}", installed.display()))?;
+        }
+        for old in std::fs::read_dir(&bin)?.flatten() {
+            if old.file_name().to_string_lossy().contains(".old-") {
+                let _ = std::fs::remove_file(old.path()); // fails harmlessly while still running
+            }
+        }
     }
     println!("  binary          : {}", installed.display());
     // 2. warm daemon, started from the installed copy (in-process client: no captured child

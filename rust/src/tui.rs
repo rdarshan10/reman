@@ -1,5 +1,5 @@
 //! `reman find` - the native finder, identical on pwsh / bash / zsh / fish.
-//! Draws on stderr (stdout stays free for the pick, so `$(reman find)` works), talks to the daemon
+//! Draws on the terminal device (stdout stays free for the pick, so `$(reman find)` works), talks to the daemon
 //! from a worker thread (typing never blocks on a request; stale searches are dropped), and only
 //! ever fetches a page of results - never the whole history.
 use crate::client::Client;
@@ -414,6 +414,51 @@ fn draw(f: &mut Frame, app: &App) {
     let _ = Rect::default();
 }
 
+/// The terminal itself, never a std stream. Callers capture stdout (`$(reman find)`) and Windows
+/// PowerShell 5.1 also redirects a native command's stderr inside PSReadLine key handlers, so
+/// drawing on either can land in a pipe. CONOUT$ / /dev/tty always reach the screen.
+fn tty() -> Result<std::fs::File> {
+    let path = if cfg!(windows) { "CONOUT$" } else { "/dev/tty" };
+    Ok(std::fs::OpenOptions::new().read(true).write(true).open(path)?)
+}
+
+/// Console output code page -> UTF-8 while the finder is up (the frame is UTF-8; a legacy OEM
+/// code page turns `»` into `Γ├`), restored on drop.
+struct Utf8Console(#[allow(dead_code)] u32);
+
+impl Utf8Console {
+    fn enable() -> Self {
+        #[cfg(windows)]
+        unsafe {
+            let prev = win::GetConsoleOutputCP();
+            win::SetConsoleOutputCP(65001);
+            return Utf8Console(prev);
+        }
+        #[cfg(not(windows))]
+        Utf8Console(0)
+    }
+}
+
+impl Drop for Utf8Console {
+    fn drop(&mut self) {
+        #[cfg(windows)]
+        unsafe {
+            if self.0 != 0 {
+                win::SetConsoleOutputCP(self.0);
+            }
+        }
+    }
+}
+
+#[cfg(windows)]
+mod win {
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        pub fn GetConsoleOutputCP() -> u32;
+        pub fn SetConsoleOutputCP(cp: u32) -> i32;
+    }
+}
+
 pub fn run(o: Opts) -> Result<()> {
     let (jtx, jrx) = channel();
     let (rtx, rrx) = channel();
@@ -445,19 +490,25 @@ pub fn run(o: Opts) -> Result<()> {
     };
     app.refresh();
 
-    let mut err = std::io::stderr();
+    let _cp = Utf8Console::enable();
+    let mut out = tty()?;
     enable_raw_mode()?;
-    execute!(err, EnterAlternateScreen, cursor::Show)?;
+    execute!(out, EnterAlternateScreen, cursor::Show)?;
     let prev_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         let _ = disable_raw_mode();
-        let _ = execute!(std::io::stderr(), LeaveAlternateScreen);
+        if let Ok(mut t) = tty() {
+            let _ = execute!(t, LeaveAlternateScreen, cursor::Show);
+        }
+        // the alternate screen hides panics; keep a record
+        let _ = std::fs::write(crate::config::home().join("tui-panic.log"), format!("{info}\n{}", std::backtrace::Backtrace::force_capture()));
         prev_hook(info);
     }));
-    let mut term = Terminal::new(CrosstermBackend::new(std::io::stderr()))?;
+    // one buffered write per frame; an unbuffered console handle costs a syscall per cell run
+    let mut term = Terminal::new(CrosstermBackend::new(std::io::BufWriter::with_capacity(1 << 16, tty()?)))?;
     let chosen = event_loop(&mut term, &mut app, &rrx);
     disable_raw_mode()?;
-    execute!(std::io::stderr(), LeaveAlternateScreen, cursor::Show)?;
+    execute!(out, LeaveAlternateScreen, cursor::Show)?;
     let chosen = chosen?;
     if let Some(c) = chosen {
         match o.result_file {
@@ -468,7 +519,7 @@ pub fn run(o: Opts) -> Result<()> {
     Ok(())
 }
 
-fn event_loop(term: &mut Terminal<CrosstermBackend<std::io::Stderr>>, app: &mut App, replies: &Receiver<Reply>) -> Result<Option<String>> {
+fn event_loop(term: &mut Terminal<CrosstermBackend<std::io::BufWriter<std::fs::File>>>, app: &mut App, replies: &Receiver<Reply>) -> Result<Option<String>> {
     let mut dirty = true;
     loop {
         while let Ok(r) = replies.try_recv() {

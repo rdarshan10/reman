@@ -180,11 +180,12 @@ impl Daemon {
         if let Some(p) = self.fixes.lock().lookup(failed, &st).into_iter().next() {
             return Some(json!({"command": p.fixed, "kind": "proven", "confidence": p.confidence, "times": p.count}));
         }
-        let scope = cwd.map(|c| st.scope_folder(c)).filter(|s| *s != Scope::Nothing).unwrap_or(Scope::All);
-        let best = dym::did_you_mean(&st, failed, None, 1, true, scope).into_iter().next().or_else(|| {
-            (scope != Scope::All).then(|| dym::did_you_mean(&st, failed, None, 1, true, Scope::All).into_iter().next()).flatten()
-        })?;
-        (best.typo >= 0.8).then(|| json!({"command": st.entries[best.idx as usize].text, "kind": "typo", "confidence": (best.typo * 1000.0).round() / 1000.0}))
+        // prefer a strong typo match from this folder, else a strong one from anywhere
+        const STRONG: f32 = 0.8;
+        let strong = |scope: Scope| dym::did_you_mean(&st, failed, None, 1, true, scope).into_iter().next().filter(|s| s.typo >= STRONG);
+        let folder = cwd.map(|c| st.scope_folder(c)).filter(|s| *s != Scope::Nothing);
+        let best = folder.and_then(strong).or_else(|| strong(Scope::All))?;
+        Some(json!({"command": st.entries[best.idx as usize].text, "kind": "typo", "confidence": (best.typo * 1000.0).round() / 1000.0}))
     }
 
     fn scope_of(&self, st: &Store, req: &Value) -> (Scope, Option<u32>) {
