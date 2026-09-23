@@ -31,7 +31,10 @@ Register-ArgumentCompleter -Native -CommandName 'reman', 'reman.exe' -ScriptBloc
     [System.Management.Automation.CompletionResult]::new($insert, $v, $type, $(if ($d) { $d } else { $v }))
   }
 }
-if (-not $env:REMAN_SESSION) { $env:REMAN_SESSION = [guid]::NewGuid().ToString() }
+# One session per shell. Never inherited: a window (or VS Code) started from this one is a
+# different shell, and flows / "last command failed" are per shell.
+if (-not $global:__RemanSessionId) { $global:__RemanSessionId = [guid]::NewGuid().ToString() }
+$env:REMAN_SESSION = $global:__RemanSessionId
 
 # One JSON line to the daemon. $waitMs > 0 waits (bounded) for the reply. If the daemon is down the
 # run goes to the spool file (drained on next start) and the daemon is started in the background.
@@ -76,45 +79,122 @@ try {
   $__c.Close()
 } catch { }
 
-# Capture: wrap the prompt (guarded against double-wrap). Reads $? / $LASTEXITCODE FIRST, then
-# restores $LASTEXITCODE so the original prompt's exit indicator still works. A command typed with
-# a leading space is never recorded.
-if (-not $global:__RemanPromptHooked) {
-  $global:__RemanPromptHooked = $true
-  $global:__RemanOrigPrompt = $function:prompt
-  $global:__RemanLastHistId = -1
-  function global:prompt {
-    # `$?` MUST be read first: any statement before it (even an assignment) resets it to True,
-    # which silently recorded every command as a success.
-    $ok = $global:?
-    $code = $global:LASTEXITCODE
-    try {
-      $h = Get-History -Count 1
-      if ($h -and $h.Id -ne $global:__RemanLastHistId) {
-        $global:__RemanLastHistId = $h.Id
-        $cmd = $h.CommandLine
-        if ($cmd -and -not $cmd.StartsWith(' ') -and $cmd.Trim().Length -gt 1) {
-          $exit = if ($ok) { 0 } elseif ($code) { $code } else { 1 }
-          $dur = [int64]($h.EndExecutionTime - $h.StartExecutionTime).TotalMilliseconds
-          $req = @{ op = 'ingest'; command = $cmd; exit = $exit; cwd = (Get-Location).Path;
-                    session = $env:REMAN_SESSION; actor = 'human'; duration_ms = $dur }
-          if ($exit -ne 0) {
-            $r = __RemanSend $req 400
-            if ($r -and $r.suggest -and $r.suggest.command) {
-              $global:__RemanFix = [string]$r.suggest.command
-              $lead = if ($r.suggest.kind -eq 'proven') { 'last time this failed you ran' } else { 'did you mean' }
-              Write-Host "  reman: $lead -> " -NoNewline -ForegroundColor DarkGray
-              Write-Host $global:__RemanFix -NoNewline -ForegroundColor Cyan
-              Write-Host '   (Alt+F inserts)' -ForegroundColor DarkGray
-            }
-          } else { [void](__RemanSend $req 0) }
-        }
+# ---- Capture ---------------------------------------------------------------------------------
+# Whether a command failed is in `$?`, and only the FIRST statement of the prompt can read it -
+# any statement before it resets it to True. So reman's prompt must run first. Tools that wrap
+# the prompt after reman loads (a Python venv's Activate.ps1, conda, VS Code's shell integration)
+# would run their own code first and turn every failure into a success. When one wraps us, we
+# step back outside it and call it from there, handing it the real `$?`; when it unwinds (a
+# venv's `deactivate` puts an older prompt back) we drop it again.
+#   __RemanChain  wrappers installed after us, newest first
+#   __RemanLevels the prompt object we installed at each chain depth (identity = "we're outermost")
+#   __RemanDepth  $null outside a prompt; how deep the current prompt walk is
+
+# Record the command that just finished (once: repeated prompts see the same history id).
+# $trusted = we read `$?` first. Otherwise judge from what the command left behind.
+function global:__RemanCapture {
+  param([bool]$ok, $code, [bool]$trusted)
+  try {
+    $e0 = if ($global:Error.Count) { $global:Error[0] } else { $null }
+    $h = Get-History -Count 1
+    if ($h -and $h.Id -ne $global:__RemanLastHistId) {
+      $global:__RemanLastHistId = $h.Id
+      if (-not $trusted) {
+        $newErr = $e0 -and -not [object]::ReferenceEquals($e0, $global:__RemanErr0)
+        $ok = ($h.ExecutionStatus -eq 'Completed') -and -not $newErr -and -not ($code -and $code -ne $global:__RemanPrevCode)
       }
-    } catch { }
+      $cmd = $h.CommandLine
+      if ($cmd -and -not $cmd.StartsWith(' ') -and $cmd.Trim().Length -gt 1) {
+        $exit = if ($ok) { 0 } elseif ($code) { $code } else { 1 }
+        $dur = [int64]($h.EndExecutionTime - $h.StartExecutionTime).TotalMilliseconds
+        $req = @{ op = 'ingest'; command = $cmd; exit = $exit; cwd = (Get-Location).Path;
+                  session = $env:REMAN_SESSION; actor = 'human'; duration_ms = $dur }
+        if ($exit -ne 0) {
+          $r = __RemanSend $req 400
+          if ($r -and $r.suggest -and $r.suggest.command) {
+            $global:__RemanFix = [string]$r.suggest.command
+            $lead = if ($r.suggest.kind -eq 'proven') { 'last time this failed you ran' } else { 'did you mean' }
+            Write-Host "  reman: $lead -> " -NoNewline -ForegroundColor DarkGray
+            Write-Host $global:__RemanFix -NoNewline -ForegroundColor Cyan
+            Write-Host '   (Alt+F inserts)' -ForegroundColor DarkGray
+          }
+        } else { [void](__RemanSend $req 0) }
+      }
+    }
+    $global:__RemanErr0 = $e0
+    $global:__RemanPrevCode = $code
+  } catch { }
+}
+
+function global:__RemanBasePrompt {
+  if ($global:__RemanBase) { & $global:__RemanBase }
+  else { "PS $($executionContext.SessionState.Path.CurrentLocation)$('>' * ($nestedPromptLevel + 1)) " }
+}
+
+# An updated reman reloads itself into open shells at the next prompt (one file-time check).
+function global:__RemanAutoReload {
+  try {
+    $t = [IO.File]::GetLastWriteTimeUtc($global:__RemanExe)
+    if ($global:__RemanExeTime -and $t -ne $global:__RemanExeTime) {
+      $global:__RemanExeTime = $t
+      . ([scriptblock]::Create((& $global:__RemanExe init powershell | Out-String)))
+      Write-Host '  reman: updated - this shell now runs the new version' -ForegroundColor DarkGray
+    }
+  } catch { }
+}
+
+$global:__RemanPrompt = {
+  # reman-prompt
+  $ok = $global:?
+  $code = $global:LASTEXITCODE
+  if ($null -ne $global:__RemanDepth) {
+    # a wrapper is calling the prompt it wrapped: go one level further in, `$?` intact
+    $d = ++$global:__RemanDepth
     $global:LASTEXITCODE = $code
-    if ($global:__RemanOrigPrompt) { & $global:__RemanOrigPrompt } else { "PS " + (Get-Location).Path + "> " }
+    if (-not $ok) { Write-Error 'reman: the last command failed' -ErrorAction Ignore }
+    if ($d -lt @($global:__RemanChain).Count) { & @($global:__RemanChain)[$d] } else { __RemanBasePrompt }
+    return
+  }
+  $cur = $function:global:prompt
+  $levels = @($global:__RemanLevels)
+  $k = -1
+  for ($i = $levels.Count - 1; $i -ge 0; $i--) { if ([object]::ReferenceEquals($cur, $levels[$i])) { $k = $i; break } }
+  $trusted = $k -ge 0
+  if ($trusted -and $k -lt $levels.Count - 1) {
+    # an older prompt of ours is back (a venv's `deactivate`): the wrappers added since are gone
+    $global:__RemanChain = @(@($global:__RemanChain) | Select-Object -Skip ($levels.Count - 1 - $k))
+    $global:__RemanLevels = @($levels | Select-Object -First ($k + 1))
+  }
+  __RemanCapture $ok $code $trusted
+  if ($trusted) { __RemanAutoReload }
+  $global:__RemanDepth = 0
+  try {
+    $global:LASTEXITCODE = $code
+    if (-not $ok) { Write-Error 'reman: the last command failed' -ErrorAction Ignore }
+    if (@($global:__RemanChain).Count) { & @($global:__RemanChain)[0] } else { __RemanBasePrompt }
+  } finally {
+    $global:__RemanDepth = $null
+    if (-not $trusted) {
+      # something wrapped the prompt after reman: step back outside it, keeping it inside
+      $global:__RemanChain = @($cur) + @($global:__RemanChain)
+      $function:global:prompt = [scriptblock]::Create($global:__RemanPrompt.ToString())
+      $global:__RemanLevels = @($global:__RemanLevels) + @($function:global:prompt)
+    }
   }
 }
+
+if ($null -eq $global:__RemanLevels) {
+  # first load in this shell: the prompt that exists now is the one we build on
+  $global:__RemanBase = $function:prompt
+  $global:__RemanChain = @()
+  $global:__RemanLevels = @()
+  $global:__RemanLastHistId = -1
+}
+$global:__RemanDepth = $null
+$function:global:prompt = [scriptblock]::Create($global:__RemanPrompt.ToString())
+if ($global:__RemanLevels.Count) { $global:__RemanLevels[$global:__RemanLevels.Count - 1] = $function:global:prompt }
+else { $global:__RemanLevels = @($function:global:prompt) }
+$global:__RemanExeTime = try { [IO.File]::GetLastWriteTimeUtc($global:__RemanExe) } catch { $null }
 
 # Native finder. The query travels via env (Windows PowerShell 5.1 drops empty native args and
 # mangles embedded quotes); the pick comes back through a temp file.

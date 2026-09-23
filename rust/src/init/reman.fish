@@ -12,9 +12,11 @@ if string match -qr '^[A-Za-z]:' -- $__reman_spool; and command -q cygpath
     set __reman_spool (cygpath -u -- $__reman_spool)
 end
 function reman; $__reman_exe $argv; end
-if not set -q REMAN_SESSION
-    set -gx REMAN_SESSION fish-$fish_pid-(random)(random)
+# one session per shell: the id lives in an unexported variable, so a child shell makes its own
+if not set -q __reman_sid
+    set -g __reman_sid fish-$fish_pid-(random)(random)
 end
+set -gx REMAN_SESSION $__reman_sid
 
 # warm the daemon once per shell (it drains the spool and answers the finder)
 $__reman_exe ping >/dev/null 2>&1 &

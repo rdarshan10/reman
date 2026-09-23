@@ -8,7 +8,9 @@ __reman_exe="__REMAN__"
 __reman_hook="__HOOK__"
 __reman_port=__PORT__
 reman() { "$__reman_exe" "$@"; }
-[ -z "$REMAN_SESSION" ] && export REMAN_SESSION="bash-$$-$RANDOM$RANDOM"
+# one session per shell: the id lives in an unexported variable, so a child shell makes its own
+[ -z "$__reman_sid" ] && __reman_sid="bash-$$-$RANDOM$RANDOM"
+export REMAN_SESSION=$__reman_sid
 __reman_histfile="${TMPDIR:-/tmp}/.reman-hist-$$"
 # a command typed with a leading space is never recorded
 case ":$HISTCONTROL:" in *:ignorespace:*|*:ignoreboth:*) ;; *) HISTCONTROL="${HISTCONTROL:+$HISTCONTROL:}ignorespace" ;; esac

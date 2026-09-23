@@ -8,7 +8,9 @@ __reman_exe="__REMAN__"
 __reman_hook="__HOOK__"
 __reman_port=__PORT__
 reman() { "$__reman_exe" "$@" }
-[[ -z "$REMAN_SESSION" ]] && export REMAN_SESSION="zsh-$$-$RANDOM$RANDOM"
+# one session per shell: the id lives in an unexported variable, so a child shell makes its own
+[[ -z "$__reman_sid" ]] && __reman_sid="zsh-$$-$RANDOM$RANDOM"
+export REMAN_SESSION=$__reman_sid
 zmodload zsh/datetime 2>/dev/null
 zmodload zsh/net/tcp 2>/dev/null
 autoload -Uz add-zsh-hook
