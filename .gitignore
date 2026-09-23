@@ -1,0 +1,7 @@
+.venv/
+__pycache__/
+*.pyc
+tldr.zip
+atuin_history.tsv
+--help.txt
+rust/target/
