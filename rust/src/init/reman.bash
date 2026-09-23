@@ -88,6 +88,26 @@ __reman_tab_empty() {
   [ -n "$picked" ] && COMPREPLY=("$picked")
 }
 complete -o nospace -E -F __reman_tab_empty 2>/dev/null
+
+# Tab completion for reman itself (the same engine every shell uses: `reman complete`). reman
+# splits the line itself, so `D:\x` isn't broken at the colon by COMP_WORDBREAKS.
+__reman_complete() {
+  local before=${COMP_LINE:0:COMP_POINT}
+  local partial=${before##*[[:space:]]}
+  local cw=${COMP_WORDS[COMP_CWORD]}
+  local pre=${partial%"$cw"}   # what readline split off the current word (e.g. `D:`)
+  local IFS=$'\n' l v out
+  out=$("$__reman_exe" complete "--line=${before%"$partial"}" "--cur=$partial" 2>/dev/null)
+  COMPREPLY=()
+  for l in $out; do
+    v=${l%%$'\t'*}
+    [[ $v == *[[:space:]]* ]] && v=$(printf '%q' "$v")   # a whole command stays one argument
+    COMPREPLY+=("${v#"$pre"}")
+  done
+  # folders: no trailing space, so you can keep going into them
+  if (( ${#COMPREPLY[@]} )) && [[ ${COMPREPLY[0]} == */ || ${COMPREPLY[0]} == *\\ ]]; then compopt -o nospace 2>/dev/null; fi
+}
+complete -F __reman_complete reman reman.exe
 bind -x '"\C-r": __reman_find all'
 bind -x '"\e[A": __reman_find folder'
 bind -x '"\ef": __reman_insert_fix'

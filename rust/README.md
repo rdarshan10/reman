@@ -30,37 +30,53 @@ These keys work in PowerShell, bash, zsh and fish.
 |---|---|
 | `UpArrow` | open the finder, scoped to this folder |
 | `Ctrl+R` | open the finder across all folders |
-| `Tab` | normal completion. When there is nothing to complete (PowerShell) or the line is empty (every shell), it opens the finder with what you typed |
+| `Tab` | normal completion, including `reman`'s own commands (see below). When there is nothing to complete (PowerShell) or the line is empty (every shell), it opens the finder with what you typed |
 | `Alt+F` | insert the fix suggested after a failed command |
 
 ### The finder
 
-The finder works like a command palette:
-- The query sits at the top, and the filters under it read as a sentence: *this folder first · by anyone · any outcome*. Each filter shows the key that changes it.
-- Results come in labelled sections.
-- A card beside the list (or below it, on narrow terminals) explains the selected command: what it does, whether it worked, where it ran, and why it matched.
+The finder works like a command palette, bottom-up like the prompt it replaces:
+- The query is the last line, and the tabs **Recall · Fixes · Flows** sit at its right.
+- The filters sit just above the query and read as a sentence: *this folder first · by anyone · any outcome*. Each filter shows the key that changes it.
+- The best result is nearest the prompt, and `↑` moves further back.
+- Results come in labelled sections; a section's label sits at the base of its stack.
+- A card beside the list (or above it, on narrow terminals) explains the selected command: what it does, whether it worked, where it ran, and why it matched.
+- The top line shows only the keys that matter right now.
 
 | when | what you see |
 |---|---|
+| you're walking through a flow | **flow in progress · 1 of 2 done**: the next step is selected, right above the prompt |
 | your last command just failed | **last command failed: gti status** → `git status` (a proven fix, or the closest command that worked) |
-| empty query | **likely next**: what you usually run after your last command, then **recent in this folder**. An agent's one-off exploration (`cd x && grep …`) is hidden, with a note saying how many; `Tab` → agents shows it |
+| empty query | **likely next**: what you usually run after your last command, then **recent in this folder**. An agent's one-off exploration (`cd x && grep …`) is hidden, with a note saying how many; `F3` shows it |
 | you type | **this folder** (strong matches only), then **everywhere**, ranked by meaning plus text. A folder with no good match never dead-ends |
 | Fixes tab | commands that failed. The card shows *what worked instead*, and `Enter` inserts that fix |
 | Flows tab | step sequences you repeat (`a → b → c`) |
 
+**Walking through a flow.** In Flows:
+1. `Enter` opens a flow and lists its steps, each with its own stats.
+2. `Enter` on a step puts that step on your prompt and queues the rest.
+3. After the step runs, the next `↑` offers the following step first, and so on to the end.
+
+Steps you skip ahead to count too. `Ctrl+X` stops the flow, and it expires after 30 idle minutes. `Ctrl+A` inserts the whole flow as one line instead.
+
+Each tab keeps its own query, so switching tabs never carries "run migrations" into Fixes.
+
 | finder key | action |
 |---|---|
-| `↑` / `↓`, `PgUp` / `PgDn` | move |
-| `Enter` | put the command on your prompt (it does not run) |
-| `Ctrl+T` | switch tab: **Recall**, **Fixes**, **Flows** |
-| `←` / `→` | where: this folder → this repo → everywhere |
-| `Tab` | who: anyone → you → agents |
+| `↑` / `↓`, `PgUp` / `PgDn`, mouse wheel | move (`↑` goes further back) |
+| `Enter`, or a click on the selected row | put the command on your prompt (it does not run) |
+| `Tab` / `Shift+Tab`, `Ctrl+T` | next / previous tab: **Recall → Fixes → Flows** |
+| `Alt+1` `Alt+2` `Alt+3`, or a click on a tab | jump straight to a tab |
+| `←` / `→` | where: this folder → this repo → everywhere (in an open flow, `←` goes back) |
+| `F3` | who: anyone → you → agents |
 | `F2` | outcome: any → worked → failed |
 | `Ctrl+G` | fold variants that differ only in data (messages, paths, ids) / show each |
 | `Ctrl+P` | pin |
 | `Del` `Del` | forget the command everywhere |
+| `Ctrl+A` | Flows: insert every step as one line |
+| `Ctrl+X` | stop the flow in progress |
 | `F1` | all keys |
-| `Esc` | close |
+| `Esc` | back (out of an open flow) / close |
 
 What never gets offered back:
 - reman's own invocations (`reman search …`), unless your query mentions reman;
@@ -69,6 +85,28 @@ What never gets offered back:
 A command that only ever failed never leads a list.
 
 **Rendering:** colours are named ANSI colours, so light and dark themes both read well. Every changed line is repainted whole and cleared to the end, so leftover fragments can't survive a redraw.
+
+### Tab completion for `reman` itself
+
+`reman init <shell>` wires Tab completion for `reman`'s own commands. All four shells use one engine, `reman complete`:
+
+| you type | Tab offers |
+|---|---|
+| `reman co` | `connect` (subcommands, with their help) |
+| `reman connect ` | `all`, `http`, and each agent with its state: *Claude Code - connected*, *Cursor - not installed* |
+| `reman connect --add-root ` | your busiest folders that agents can't see yet, then folders on disk |
+| `reman connect --remove-root ` | the folders agents see now |
+| `reman forget dock` / `pin` / `check` | your own commands that match, e.g. `'docker ps'` (quoted, so it stays one argument) |
+| `reman fixes ` | your failed commands |
+| `reman call ` | the agent tools with what each does |
+| `reman init ` / `import ` / `tools --format ` | shells / history sources / schema formats |
+| `reman connect --old` | `--old-history`; flags are offered once you type `-` |
+
+- **PowerShell:** a `reman …` line opens PowerShell's menu of choices, with the highlighted choice's description shown below it.
+- **zsh and fish:** descriptions show next to each choice.
+- **bash:** plain choices.
+
+Completion never starts the daemon: if it isn't running, only the live values are skipped.
 
 ## Capture cost
 
@@ -85,10 +123,11 @@ This is the cost per command, measured in real terminals by `e2e/posix_shells_te
 ## Agents: plug and play
 
 ```
-reman connect                      status of every agent on this machine
+reman connect                      status of every agent, plus the folders agents can't see yet
 reman connect all                  connect every installed agent
 reman connect claude-code codex    connect specific ones
-reman connect --root D:\proj ...   which folders agents may see (one list, applied to every agent)
+reman connect --add-root D:\proj  let agents see another folder (--remove-root to undo)
+reman connect --root D:\proj ...   replace the whole list of folders agents may see
 reman connect --old-history on     also share generic commands from old, folder-less history
 reman connect http [--port 8777]   local HTTP endpoint for SDKs / scripts
 reman connect --print              config to paste into any other MCP client

@@ -64,6 +64,14 @@ function __reman_tab
 end
 
 bind \t __reman_tab
+
+# Tab completion for reman itself (the same engine every shell uses: `reman complete`);
+# fish reads `value<TAB>description` natively
+function __reman_complete
+    $__reman_exe complete "--line="(string join ' ' -- (commandline -opc))" " "--cur="(commandline -ct) 2>/dev/null
+end
+complete -c reman -f -a '(__reman_complete)'
+complete -c reman.exe -f -a '(__reman_complete)'
 bind \cr '__reman_find all'
 bind \e\[A '__reman_find folder'
 bind \ef __reman_insert_fix

@@ -30,6 +30,32 @@ pub struct Daemon {
     pub db: Mutex<Connection>,
     pub embedder: Embedder,
     started: Instant,
+    /// session -> a flow you're walking through (picked in the finder's Flows tab)
+    flows_armed: Mutex<std::collections::HashMap<String, ArmedFlow>>,
+}
+
+/// A flow being played back: `pos` is the next step to run. Running that step (from the same
+/// shell session) advances it; the finder offers `steps[pos]` first until the flow is done.
+#[derive(Clone)]
+pub struct ArmedFlow {
+    pub steps: Vec<String>,
+    pub pos: usize,
+    pub touched: i64,
+}
+
+const FLOW_IDLE_S: i64 = 30 * 60;
+
+impl ArmedFlow {
+    /// Advance past `cmd` if it is the next step (or a later one - you may skip ahead).
+    fn observe(&mut self, cmd: &str, ok: bool, now: i64) {
+        let cmd = cmd.trim();
+        if let Some(i) = self.steps.iter().skip(self.pos).position(|s| s.trim() == cmd) {
+            if ok {
+                self.pos += i + 1;
+            }
+            self.touched = now;
+        }
+    }
 }
 
 pub fn log(msg: &str) {
@@ -85,7 +111,14 @@ impl Daemon {
         log(&format!("loaded {} commands / {} runs in {:?}", store.alive_count(), store.execs.len(), t.elapsed()));
         let embedder = Embedder::load()?;
         embedder.embed_query("warmup query to load the model once")?;
-        Ok(Self { store: RwLock::new(store), fixes: Mutex::new(fixes), db: Mutex::new(conn), embedder, started: Instant::now() })
+        Ok(Self {
+            store: RwLock::new(store),
+            fixes: Mutex::new(fixes),
+            db: Mutex::new(conn),
+            embedder,
+            started: Instant::now(),
+            flows_armed: Mutex::new(std::collections::HashMap::new()),
+        })
     }
 
     /// Write path for everything (hooks, spool, imports). Embeds new texts outside any lock,
@@ -168,6 +201,18 @@ impl Daemon {
                 for (p, cwd, ts) in &proven {
                     fx.persist(&conn, p, cwd.as_deref(), *ts)?;
                 }
+            }
+        }
+        // flows being walked through: a successful next step advances; a finished flow is dropped
+        {
+            let mut armed = self.flows_armed.lock();
+            if !armed.is_empty() {
+                for r in runs {
+                    if let Some(f) = armed.get_mut(&r.session) {
+                        f.observe(&r.cmd, !r.failed(), r.ts);
+                    }
+                }
+                armed.retain(|_, f| f.pos < f.steps.len());
             }
         }
         let suggestions = runs.iter().map(|r| if r.failed() { self.suggest(&r.cmd, r.cwd.as_deref()) } else { None }).collect();
@@ -288,8 +333,54 @@ impl Daemon {
         Ok(json!({"results": results}))
     }
 
+    /// The flow this session is walking through: remaining steps as full items, next one first.
+    fn flow_progress(&self, session: &str) -> Option<Value> {
+        let f = {
+            let mut armed = self.flows_armed.lock();
+            let now = config::now();
+            armed.retain(|_, f| now - f.touched <= FLOW_IDLE_S && f.pos < f.steps.len());
+            armed.get(session).cloned()?
+        };
+        let st = self.store.read();
+        let items: Vec<Value> = f.steps[f.pos..]
+            .iter()
+            .enumerate()
+            .map(|(i, cmd)| {
+                let mut v = match st.entry(cmd) {
+                    Some((idx, _)) => self.item(&st, &search::Hit { idx, score: 0.0, sim: -2.0, fuzzy: 0.0, variants: 1, matched_terms: 0 }, Scope::All),
+                    None => json!({"command": cmd, "status": "unknown", "actor": "human"}),
+                };
+                v["flow_step"] = json!(f.pos + i + 1);
+                v["flow_total"] = json!(f.steps.len());
+                v
+            })
+            .collect();
+        Some(json!({"steps": f.steps, "pos": f.pos, "items": items}))
+    }
+
+    fn folders_op(&self, req: &Value) -> Value {
+        let st = self.store.read();
+        let mut runs: std::collections::HashMap<u32, (u32, i64)> = std::collections::HashMap::new();
+        for e in st.entries.iter().filter(|e| e.alive) {
+            for r in e.rows.iter().filter(|r| !st.row_unscoped(r)) {
+                if let Some(c) = r.cwd {
+                    let x = runs.entry(c).or_default();
+                    x.0 += r.runs;
+                    x.1 = x.1.max(r.last_used);
+                }
+            }
+        }
+        let mut v: Vec<(u32, (u32, i64))> = runs.into_iter().collect();
+        v.sort_by(|a, b| b.1.0.cmp(&a.1.0));
+        let k = n(req, "k", 50).max(1) as usize;
+        json!({"results": v.iter().take(k).map(|(c, (n, last))| json!({"cwd": st.cwd_name(*c), "runs": n, "last_used": last})).collect::<Vec<_>>()})
+    }
+
     fn next_op(&self, req: &Value) -> Value {
         let mut out = self.predict_op(req);
+        if let Some(fp) = s(req, "session").and_then(|x| self.flow_progress(x)) {
+            out["flow"] = fp;
+        }
         // the finder opened right after a command failed in this shell: lead with its fix
         let failed = {
             let st = self.store.read();
@@ -639,6 +730,20 @@ impl Daemon {
             "didyoumean" => self.dym_op(req)?,
             "fixfor" => json!({"suggest": self.suggest(s(req, "command").unwrap_or(""), s(req, "cwd"))}),
             "next" => self.next_op(req),
+            "folders" => self.folders_op(req),
+            "flow_arm" => {
+                let steps: Vec<String> = req["steps"].as_array().map(|a| a.iter().filter_map(Value::as_str).map(String::from).collect()).unwrap_or_default();
+                let sess = s(req, "session").unwrap_or("").to_string();
+                let pos = (n(req, "pos", 0).max(0) as usize).min(steps.len());
+                if sess.is_empty() || steps.is_empty() {
+                    json!({"ok": false, "error": "session and steps are required"})
+                } else {
+                    let total = steps.len();
+                    self.flows_armed.lock().insert(sess, ArmedFlow { steps, pos, touched: config::now() });
+                    json!({"ok": true, "pos": pos, "total": total})
+                }
+            }
+            "flow_stop" => json!({"ok": true, "stopped": self.flows_armed.lock().remove(s(req, "session").unwrap_or("")).is_some()}),
             "flows" => self.flows_op(req),
             "describe" => {
                 let st = self.store.read();
@@ -802,4 +907,22 @@ pub fn serve(port: u16) -> Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod flow_tests {
+    use super::ArmedFlow;
+
+    #[test]
+    fn a_flow_advances_on_its_own_steps_only() {
+        let mut f = ArmedFlow { steps: vec!["git pull".into(), "npm i".into(), "npm run dev".into()], pos: 0, touched: 0 };
+        f.observe("ls", true, 1);
+        assert_eq!(f.pos, 0); // unrelated commands don't move it
+        f.observe("git pull", false, 2);
+        assert_eq!(f.pos, 0); // a failed step is still the next step
+        f.observe("git pull", true, 3);
+        assert_eq!(f.pos, 1);
+        f.observe("npm run dev", true, 4); // skipping ahead is fine
+        assert_eq!(f.pos, 3);
+    }
 }

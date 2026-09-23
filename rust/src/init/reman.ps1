@@ -3,7 +3,34 @@
 #   UpArrow = finder scoped to this folder   Ctrl+R = finder over all folders   Alt+F = insert fix
 #   Tab = normal completion; when there's nothing to complete, the finder
 $global:__RemanExe = "__REMAN__"
-function global:reman { & $global:__RemanExe @args }
+# `reman` is the exe on PATH, not a wrapper function: PowerShell only gives native commands
+# their argument completer (below)
+$__remanDir = Split-Path -Parent $global:__RemanExe
+if (($env:PATH -split ';') -notcontains $__remanDir) { $env:PATH = "$__remanDir;$env:PATH" }
+Remove-Item Function:\reman -ErrorAction SilentlyContinue
+
+# Tab completion for reman itself - the same engine as bash / zsh / fish (`reman complete`):
+# subcommands and flags with their help, agents with their status, folders you could share,
+# your own commands for forget / pin / check / fixes.
+Register-ArgumentCompleter -Native -CommandName 'reman', 'reman.exe' -ScriptBlock {
+  param($wordToComplete, $commandAst, $cursorPosition)
+  $text = $commandAst.ToString()
+  $upto = [Math]::Min([Math]::Max($cursorPosition - $commandAst.Extent.StartOffset, 0), $text.Length)
+  $before = $text.Substring(0, $upto)
+  $head = $before.Substring(0, $before.Length - [Math]::Min($wordToComplete.Length, $before.Length))
+  $enc = [Console]::OutputEncoding
+  try {
+    [Console]::OutputEncoding = [Text.Encoding]::UTF8
+    $lines = & $global:__RemanExe complete "--line=$head" "--cur=$wordToComplete" 2>$null
+  } finally { [Console]::OutputEncoding = $enc }
+  foreach ($l in @($lines)) {
+    if (-not $l) { continue }
+    $v, $d = $l -split "`t", 2
+    $insert = if ($v -match "[\s'`"``$;&|(){}@#,]") { "'" + ($v -replace "'", "''") + "'" } else { $v }
+    $type = if ($v.StartsWith('-')) { 'ParameterName' } else { 'ParameterValue' }
+    [System.Management.Automation.CompletionResult]::new($insert, $v, $type, $(if ($d) { $d } else { $v }))
+  }
+}
 if (-not $env:REMAN_SESSION) { $env:REMAN_SESSION = [guid]::NewGuid().ToString() }
 
 # One JSON line to the daemon. $waitMs > 0 waits (bounded) for the reply. If the daemon is down the
@@ -126,6 +153,11 @@ if (Get-Module PSReadLine -ErrorAction SilentlyContinue) {
     param($key, $arg)
     $line = $null; $cur = $null
     [Microsoft.PowerShell.PSConsoleReadLine]::GetBufferState([ref]$line, [ref]$cur)
+    # `reman ...`: a menu of choices with their descriptions, never the finder
+    if ($line -match '^\s*reman(\.exe)?(\s|$)') {
+      [Microsoft.PowerShell.PSConsoleReadLine]::MenuComplete($key, $arg)
+      return
+    }
     if (-not [string]::IsNullOrWhiteSpace($line)) {
       [Microsoft.PowerShell.PSConsoleReadLine]::TabCompleteNext($key, $arg)
       $after = $null

@@ -79,6 +79,20 @@ __reman_tab() {
 }
 zle -N __reman_tab
 bindkey '^I' __reman_tab
+
+# Tab completion for reman itself (the same engine every shell uses: `reman complete`)
+_reman() {
+  local -a descs
+  local l v
+  for l in "${(@f)$("$__reman_exe" complete "--line=${(j: :)words[1,CURRENT-1]} " "--cur=$PREFIX" 2>/dev/null)}"; do
+    [[ -z $l ]] && continue
+    v=${l%%$'\t'*}
+    descs+=("${v//:/\\:}:${l#*$'\t'}")
+  done
+  (( ${#descs} )) && _describe -t reman 'reman' descs
+}
+(( $+functions[compdef] )) || { autoload -Uz compinit && compinit -u }
+compdef _reman reman reman.exe
 zle -N __reman_find_all
 zle -N __reman_find_here
 zle -N __reman_insert_fix

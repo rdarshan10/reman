@@ -22,7 +22,8 @@ for k in ("CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "AGENT"):  # behave like a hum
 
 KEY = {"enter": "\r", "up": "\x1b[A", "down": "\x1b[B", "left": "\x1b[D", "right": "\x1b[C", "esc": "\x1b",
        "tab": "\t", "f2": "\x1bOQ", "del": "\x1b[3~", "bs": "\x7f", "ctrl_r": "\x12", "ctrl_t": "\x14",
-       "ctrl_g": "\x07", "ctrl_p": "\x10", "ctrl_u": "\x15", "alt_f": "\x1bf", "f1": "\x1bOP"}
+       "ctrl_g": "\x07", "ctrl_p": "\x10", "ctrl_u": "\x15", "alt_f": "\x1bf", "f1": "\x1bOP", "f3": "\x1bOR",
+       "shift_tab": "\x1b[Z", "alt_1": "\x1b1", "alt_3": "\x1b3"}
 
 
 class Term:
@@ -73,10 +74,10 @@ class Term:
         return lines[-1] if lines else ""
 
     def bar(self):
-        """The finder's query line + the filter line under it."""
+        """The finder's filter line + the query line under it (bottom-up: the query is last)."""
         lines = self.text().splitlines()
-        i = next((k for k, l in enumerate(lines) if l.startswith(" › ")), None)
-        return "" if i is None else lines[i] + "\n" + (lines[i + 1] if i + 1 < len(lines) else "")
+        i = next((k for k, l in enumerate(lines) if l.startswith((" › ", " ⇢ "))), None)
+        return "" if i is None else (lines[i - 1] if i > 0 else "") + "\n" + lines[i]
 
     def selected(self):
         s = [l for l in self.text().splitlines() if l.startswith(" ▌")]
@@ -185,20 +186,24 @@ t.snap("Ctrl+R `git st`")
 check("`git st` ranks `git status` first across folders", "git status" in best)
 t.keys("ctrl_u"); time.sleep(0.4)
 t.type("docker"); time.sleep(1.0)
-t.keys("tab"); time.sleep(0.8)
-check("Tab cycles actor filter (anyone -> you)", "by you tab" in t.text())
+t.keys("f3"); time.sleep(0.8)
+check("F3 cycles who (anyone -> you)", "by you F3" in t.text())
 t.keys("f2"); time.sleep(0.8)
 check("F2 cycles outcome filter (any -> worked)", "worked F2" in t.text())
 t.keys("right"); time.sleep(0.8)
 check("Right arrow cycles scope (everywhere -> this folder first)", "this folder first ←→" in t.text())
 t.keys("left"); time.sleep(0.8)
 t.snap("Ctrl+R `docker`, by you, worked")
-t.keys("ctrl_t"); time.sleep(1.0)
-t.snap("Ctrl+T -> Fixes tab")
-check("Ctrl+T switches to Fixes (what worked instead)", "what worked instead of: docker" in t.text() or "looks like a fix" in t.text())
-t.keys("ctrl_t"); time.sleep(1.2)
-t.snap("Ctrl+T -> Flows tab")
-check("Ctrl+T again switches to Flows", "→" in t.text() or "sequences you repeat" in t.text() or "No repeated" in t.text())
+t.keys("tab"); time.sleep(1.2)
+t.snap("Tab -> Fixes tab (its own, empty query)")
+check("Tab switches to Fixes, with its own query", "commands that failed" in t.text() or "No failed commands" in t.text())
+t.keys("tab"); time.sleep(1.2)
+t.snap("Tab -> Flows tab")
+check("Tab again switches to Flows", "sequences you repeat" in t.text() or "No repeated" in t.text())
+t.keys("shift_tab"); time.sleep(1.0)
+check("Shift+Tab goes back to Fixes", "type the command that failed" in t.bar())
+t.keys("alt_1"); time.sleep(1.2)
+check("Alt+1 jumps to Recall and restores its query", "› docker" in t.bar())
 t.keys("f1"); time.sleep(0.6)
 check("F1 shows every key in a framed box", "┌ keys" in t.text() and "any key closes" in t.text())
 t.keys("x"); time.sleep(0.5)
@@ -233,6 +238,40 @@ t.keys("up"); t.wait(FINDER, 10); time.sleep(1.2)
 t.snap("empty query after `echo step-one-tui` (prediction)")
 check("empty-query finder predicts the next command (» step-two)", re.search(r"».*echo step-two-tui", t.text()) is not None)
 t.keys("esc"); time.sleep(0.5)
+
+# 6. walk through a flow: Flows tab -> open it -> Enter puts step 1 on the prompt; after it
+#    runs, the next ↑ offers step 2 first
+t.keys("up"); t.wait(FINDER, 10); time.sleep(0.8)
+t.keys("alt_3"); time.sleep(1.2)
+t.type("step-one"); time.sleep(0.8)
+t.snap("Flows filtered to `step-one`")
+t.keys("enter"); time.sleep(1.0)
+t.snap("the flow opened: its steps")
+check("Enter on a flow opens its steps", "steps · ran together" in t.text() and "1. echo step-one-tui" in t.selected())
+t.keys("enter"); time.sleep(1.0)
+check("Enter on step 1 puts it on the prompt", t.prompt_line().rstrip().endswith("echo step-one-tui"))
+t.keys("enter"); time.sleep(1.2)
+t.keys("up"); t.wait(FINDER, 10); time.sleep(1.2)
+t.snap("↑ after running step 1")
+check("after step 1 ran, ↑ offers step 2 first (flow in progress)", "flow in progress" in t.text() and "echo step-two-tui" in t.selected())
+t.keys("enter"); time.sleep(1.0)
+check("Enter inserts step 2", t.prompt_line().rstrip().endswith("echo step-two-tui"))
+t.keys("esc"); time.sleep(0.4)
+
+# 7. Tab completion for reman itself: menu with descriptions, live values
+t.type("reman con"); t.keys("tab"); time.sleep(2.0)
+check("Tab completes a subcommand (reman con -> reman connect)", t.prompt_line().rstrip().endswith("reman connect"))
+t.keys("esc"); time.sleep(0.4)
+t.type("reman init fi"); t.keys("tab"); time.sleep(2.0)
+check("Tab completes a value (reman init fi -> fish)", t.prompt_line().rstrip().endswith("reman init fish"))
+t.keys("esc"); time.sleep(0.4)
+t.type("reman connect "); t.keys("tab"); time.sleep(2.5)
+t.snap("reman connect <Tab> (menu)")
+check("Tab on `reman connect ` lists agents with their status", "claude-code" in t.text() and "windsurf" in t.text())
+t.keys("esc"); time.sleep(0.4); t.keys("esc"); time.sleep(0.4)
+t.type("reman forget ok-ru"); t.keys("tab"); time.sleep(2.0)
+check("Tab offers your own commands, quoted (reman forget ok-ru -> 'echo ok-run')", t.prompt_line().rstrip().endswith("reman forget 'echo ok-run'"))
+t.keys("esc"); time.sleep(0.4)
 
 t.type("exit"); t.keys("enter")
 print("\nTUI RESULT:", "PASS" if all(ok for _, ok in results) else "FAIL " + str([n for n, ok in results if not ok]))

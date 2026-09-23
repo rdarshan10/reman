@@ -2,6 +2,7 @@
 //! One binary: daemon, capture hooks, native finder, MCP server, importers.
 mod capture;
 mod client;
+mod complete;
 mod config;
 mod connect;
 mod daemon;
@@ -159,9 +160,15 @@ enum Cmd {
     Connect {
         /// all | http | claude-code | claude-desktop | codex | cursor | vscode | windsurf | gemini
         targets: Vec<String>,
-        /// folder agents may see (repeatable); stored once in ~/.reman/config.json for every agent
+        /// REPLACE the folders agents may see (repeatable); stored once in ~/.reman/config.json
         #[arg(long = "root")]
         roots: Vec<String>,
+        /// add a folder agents may see (repeatable), keeping the others
+        #[arg(long = "add-root")]
+        add_roots: Vec<String>,
+        /// stop sharing a folder with agents (repeatable)
+        #[arg(long = "remove-root")]
+        remove_roots: Vec<String>,
         /// port for `reman connect http` (default 8777)
         #[arg(long)]
         port: Option<u16>,
@@ -184,6 +191,19 @@ enum Cmd {
     /// Ping / stop the daemon
     Ping,
     Stop,
+    /// Tab-completion backend for the shell integrations (prints value<TAB>help lines)
+    #[command(hide = true)]
+    Complete {
+        /// the partial word under the cursor (`--cur=` when empty)
+        #[arg(long, default_value = "", allow_hyphen_values = true)]
+        cur: String,
+        /// the raw text before the partial word, starting with `reman` (split here, not by the shell)
+        #[arg(long, allow_hyphen_values = true)]
+        line: Option<String>,
+        /// or: the finished words after `reman`
+        #[arg(last = true)]
+        words: Vec<String>,
+    },
 }
 
 fn cwd() -> String {
@@ -380,7 +400,9 @@ fn real_main() -> Result<()> {
             println!("reman reindex: {} commands re-embedded", r["reembedded"]);
             Ok(())
         }
-        Cmd::Connect { targets, roots, port, print, old_history } => connect_cmd(&targets, &roots, port, print, old_history.as_deref()),
+        Cmd::Connect { targets, roots, add_roots, remove_roots, port, print, old_history } => {
+            connect_cmd(&targets, &roots, &add_roots, &remove_roots, port, print, old_history.as_deref())
+        }
         Cmd::Disconnect { targets } => disconnect_cmd(&targets),
         Cmd::Tools { format } => {
             println!("{}", serde_json::to_string_pretty(&mcp::tools_as(&format)?)?);
@@ -399,6 +421,12 @@ fn real_main() -> Result<()> {
             let t = Instant::now();
             let r = client::call(&json!({"op": "ping"}))?;
             println!("{} ({:.1} ms)", r, t.elapsed().as_secs_f64() * 1000.0);
+            Ok(())
+        }
+        Cmd::Complete { cur, line, words } => {
+            use clap::CommandFactory;
+            let words = line.map(|l| complete::split_line(&l)).unwrap_or(words);
+            complete::print(&Cli::command(), &words, &cur);
             Ok(())
         }
         Cmd::Stop => {
@@ -446,7 +474,14 @@ fn agent_exes() -> Result<(PathBuf, PathBuf)> {
     Ok((exe, hook))
 }
 
-fn connect_cmd(targets: &[String], roots: &[String], port: Option<u16>, print: bool, old_history: Option<&str>) -> Result<()> {
+/// Folders with history agents can't see (see complete::unshared_folders). Starts the daemon if
+/// needed - `reman connect` is interactive, unlike tab completion.
+fn unshared_folders(roots: &[String]) -> Vec<(String, u64)> {
+    let _ = client::call(&json!({"op": "ping"}));
+    complete::unshared_folders(roots)
+}
+
+fn connect_cmd(targets: &[String], roots: &[String], add: &[String], remove: &[String], port: Option<u16>, print: bool, old_history: Option<&str>) -> Result<()> {
     let (exe, hook) = agent_exes()?;
     if print {
         println!("{}", connect::generic_snippet(&exe));
@@ -456,6 +491,24 @@ fn connect_cmd(targets: &[String], roots: &[String], port: Option<u16>, print: b
     let mut st = settings::load();
     if !roots.is_empty() || st.mcp_roots.is_empty() {
         st.mcp_roots = connect::resolve_roots(roots);
+        settings::save(&st)?;
+    }
+    if !add.is_empty() || !remove.is_empty() {
+        for r in connect::resolve_roots(add) {
+            if !st.mcp_roots.iter().any(|x| config::norm_path(x) == config::norm_path(&r)) {
+                println!("  + agents may now see {r}");
+                st.mcp_roots.push(r);
+            }
+        }
+        for r in connect::resolve_roots(remove) {
+            let before = st.mcp_roots.len();
+            st.mcp_roots.retain(|x| config::norm_path(x) != config::norm_path(&r));
+            if st.mcp_roots.len() < before {
+                println!("  - agents no longer see {r}");
+            } else {
+                println!("  ({r} wasn't shared)");
+            }
+        }
         settings::save(&st)?;
     }
     if let Some(v) = old_history {
@@ -479,9 +532,18 @@ fn connect_cmd(targets: &[String], roots: &[String], port: Option<u16>, print: b
         println!("  {:<15} {:<30} {http}", "http", "HTTP endpoint (any agent/SDK)");
         println!("\n  agents may see commands from: {}", st.mcp_roots.join("  |  "));
         println!("                                {old_line}");
+        let hidden = unshared_folders(&st.mcp_roots);
+        if !hidden.is_empty() {
+            println!("\n  folders with history that agents can't see (busiest first):");
+            for (f, runs) in hidden.iter().take(6) {
+                println!("    {f:<50} {runs:>5} runs");
+            }
+            println!("    share one:  reman connect --add-root \"{}\"", hidden[0].0);
+        }
         println!("\n  reman connect all              connect every installed agent");
         println!("  reman connect <id> | http      one agent / the HTTP endpoint (OpenAI Agents SDK, LangChain, curl)");
-        println!("  reman connect --root <dir> ... change which folders agents may see (all agents at once)");
+        println!("  reman connect --add-root <dir> let agents see another folder (--remove-root to undo)");
+        println!("  reman connect --root <dir> ... replace the whole list (all agents at once)");
         println!("  reman connect --old-history on share generic commands (no paths/quotes/hosts) from folder-less old history");
         println!("  reman connect --print          config to paste into any other MCP client");
         return Ok(());
@@ -505,6 +567,12 @@ fn connect_cmd(targets: &[String], roots: &[String], port: Option<u16>, print: b
             Ok(detail) => println!("  \x1b[32m+\x1b[0m {name:<30} {detail}"),
             Err(e) => println!("  \x1b[31mx\x1b[0m {name:<30} {e:#}"),
         }
+    }
+    let hidden = unshared_folders(&st.mcp_roots);
+    if !hidden.is_empty() {
+        let names: Vec<&str> = hidden.iter().take(3).map(|h| h.0.as_str()).collect();
+        println!("\n{} other folder(s) with history stay private from agents ({}{}).", hidden.len(), names.join(", "), if hidden.len() > 3 { ", ..." } else { "" });
+        println!("share one with: reman connect --add-root <folder>   (`reman connect` lists them)");
     }
     println!("\nrestart the connected apps (or reload their MCP servers) to pick reman up.");
     Ok(())

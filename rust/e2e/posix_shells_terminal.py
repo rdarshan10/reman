@@ -155,6 +155,18 @@ for sh in ("bash", "zsh", "fish"):
     t.keys("\t")
     check("Tab on an empty line opens the finder", t.wait(r"in this folder ←→", 12), t.text()[-200:])
     t.keys("esc"); time.sleep(0.8)
+    # Tab completion for reman itself (same engine as PowerShell: `reman complete`). Fresh prompt
+    # first: bash doesn't redraw its prompt after the empty-line finder returns
+    t.keys("ctrl_c"); time.sleep(0.8)
+    t.type("reman con"); t.keys("\t"); time.sleep(2.0)
+    check("Tab completes `reman con` -> `reman connect`", "reman connect" in t.last_prompt(), t.last_prompt())
+    t.keys("ctrl_u"); time.sleep(0.3)
+    t.type("reman init fi"); t.keys("\t"); time.sleep(2.0)
+    check("Tab completes a value (`reman init fi` -> fish)", "reman init fish" in t.last_prompt(), t.last_prompt())
+    t.keys("ctrl_u"); time.sleep(0.3)
+    t.type("reman connect --old"); t.keys("\t"); time.sleep(2.0)
+    check("Tab completes a flag (`--old` -> --old-history)", "--old-history" in t.last_prompt(), t.last_prompt())
+    t.keys("ctrl_u"); time.sleep(0.3)
     # latency of the capture path itself, measured inside the shell
     if sh == "bash":
         t.run('__s=$EPOCHREALTIME; for i in {1..20}; do __reman_last_num=; __reman_start=1; __reman_precmd; done; echo "LAT $(( (${EPOCHREALTIME/[.,]/} - ${__s/[.,]/}) / 20 ))us"', 4)
