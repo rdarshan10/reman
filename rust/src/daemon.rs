@@ -667,6 +667,14 @@ fn serve_conn(d: Arc<Daemon>, stream: TcpStream) {
             continue;
         }
         let resp = match serde_json::from_str::<Value>(line.trim()) {
+            // needs the Arc (the listener outlives this connection), so it's handled here
+            Ok(req) if req.get("op").and_then(Value::as_str) == Some("http_enable") => match crate::settings::load().http {
+                None => json!({"ok": false, "error": "http endpoint not configured"}),
+                Some(h) => match crate::http::start(d.clone(), h.port) {
+                    Ok(started) => json!({"ok": true, "started": started, "port": h.port}),
+                    Err(e) => json!({"ok": false, "error": format!("port {}: {e}", h.port)}),
+                },
+            },
             Ok(req) => d.handle(&req).unwrap_or_else(|e| json!({"error": e.to_string()})),
             Err(e) => json!({"error": format!("bad json: {e}")}),
         };
@@ -685,6 +693,11 @@ pub fn serve(port: u16) -> Result<()> {
     let d = Arc::new(Daemon::open()?);
     let purged = d.purge_failed(1)?;
     let drained = d.drain_spool().unwrap_or(0);
+    if let Some(h) = crate::settings::load().http {
+        if let Err(e) = crate::http::start(d.clone(), h.port) {
+            log(&format!("http endpoint on port {} failed: {e}", h.port));
+        }
+    }
     let msg = format!(
         "reman daemon (rust) warm: {} commands indexed in {:.2}s, purged {purged}, drained {drained}, listening on {}:{port}",
         d.store.read().alive_count(),

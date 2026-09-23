@@ -28,17 +28,27 @@ pub struct Policy {
 impl Policy {
     /// Server config comes from the MCP process env - never from tool arguments (an agent can pass
     /// any cwd, so cwd is untrusted input).
+    /// Roots: $REMAN_MCP_ROOT (per agent), else ~/.reman/config.json `mcp_roots` (set by
+    /// `reman connect`), else the directory the agent launched us in.
     pub fn from_env() -> Self {
         let sep = if cfg!(windows) { ';' } else { ':' };
-        let raw = std::env::var("REMAN_MCP_ROOT")
-            .ok()
-            .filter(|s| !s.trim().is_empty())
-            .unwrap_or_else(|| std::env::current_dir().map(|p| p.to_string_lossy().into_owned()).unwrap_or_default());
+        let st = crate::settings::load();
+        let roots: Vec<String> = match std::env::var("REMAN_MCP_ROOT").ok().filter(|s| !s.trim().is_empty()) {
+            Some(raw) => raw.split(sep).filter(|p| !p.trim().is_empty()).map(config::norm_path).collect(),
+            None if !st.mcp_roots.is_empty() => st.mcp_roots.iter().map(|r| config::norm_path(r)).collect(),
+            None => vec![config::norm_path(&std::env::current_dir().map(|p| p.to_string_lossy().into_owned()).unwrap_or_default())],
+        };
         Self {
-            roots: raw.split(sep).filter(|p| !p.trim().is_empty()).map(config::norm_path).collect(),
+            roots,
             allow_global: std::env::var("REMAN_MCP_ALLOW_GLOBAL").as_deref() == Ok("1"),
-            strict: std::env::var("REMAN_MCP_STRICT_SECRETS").as_deref() == Ok("1"),
+            strict: std::env::var("REMAN_MCP_STRICT_SECRETS").map(|v| v == "1").unwrap_or(st.strict_secrets),
         }
+    }
+
+    /// The HTTP endpoint has no per-agent env: config.json only (no roots configured = sees nothing).
+    pub fn from_settings() -> Self {
+        let st = crate::settings::load();
+        Self { roots: st.mcp_roots.iter().map(|r| config::norm_path(r)).collect(), allow_global: false, strict: st.strict_secrets }
     }
 
     pub fn from_req(req: &Value) -> Self {
@@ -148,7 +158,13 @@ fn tool_search(d: &Daemon, a: &Value, pol: &Policy, cwd: Option<&str>) -> Result
     let q = Query { text: intent, k: 400, offset: 0, scope: Scope::All, actor: None, status: worked.then_some("ok"), group: true, rank: Rank::Hybrid, here: cwd.and_then(|c| st.cwd_index(c)) };
     let out = search::search(&st, &q, qv.as_deref().map(|v| v.as_slice()));
     let mut res: Vec<(Value, u32)> = Vec::new();
+    // relevance floor: an empty answer ("nothing known") beats the least-bad unrelated command.
+    // Fuzzy evidence only counts for command-like queries - for a sentence it's letter soup.
+    let cmd_like = search::command_like(&st, intent);
     for h in &out.hits {
+        if out.mode != "manual" && h.sim < search::WEAK_SIM && !(cmd_like && h.fuzzy >= 0.5) {
+            continue;
+        }
         let e = &st.entries[h.idx as usize];
         let rows = visible(&st, e, pol, cwd);
         if rows.is_empty() {
@@ -344,10 +360,11 @@ fn tool_next(d: &Daemon, a: &Value, pol: &Policy, cwd: Option<&str>) -> Value {
 }
 
 // ---------------------------------------------------------------------------------------------
-// stdio JSON-RPC bridge
+// JSON-RPC (shared by the stdio server and the HTTP endpoint)
 // ---------------------------------------------------------------------------------------------
 
-fn tools() -> Value {
+/// The MCP tool list (name, description, JSON-schema input).
+pub fn tools() -> Value {
     let cwd = json!({"type": "string", "description": "Only commands run in this exact folder (must be inside the allowed root)."});
     json!([
         {"name": "reman_search", "description": "Retrieve the user's REAL past commands by meaning (semantic + fuzzy). worked_only restricts to commands seen to exit 0; prefer='human' ranks human-verified commands above agent-run ones. Returns real commands only - never generated. Prefer these over writing a command from scratch.",
@@ -368,13 +385,75 @@ fn tools() -> Value {
     ])
 }
 
-struct Bridge {
+/// Tool schemas in the shape each ecosystem's function calling expects.
+pub fn tools_as(format: &str) -> Result<Value> {
+    let t = tools();
+    let list = t.as_array().cloned().unwrap_or_default();
+    Ok(match format {
+        "mcp" => t,
+        // OpenAI Chat Completions / Agents SDK function tools
+        "openai" => Value::Array(
+            list.into_iter()
+                .map(|x| json!({"type": "function", "function": {"name": x["name"], "description": x["description"], "parameters": x["inputSchema"]}}))
+                .collect(),
+        ),
+        // OpenAI Responses API (flat function tools)
+        "openai-responses" => Value::Array(
+            list.into_iter()
+                .map(|x| json!({"type": "function", "name": x["name"], "description": x["description"], "parameters": x["inputSchema"]}))
+                .collect(),
+        ),
+        // Anthropic Messages API tools
+        "anthropic" => Value::Array(
+            list.into_iter().map(|x| json!({"name": x["name"], "description": x["description"], "input_schema": x["inputSchema"]})).collect(),
+        ),
+        other => return Err(anyhow!("unknown format {other:?} (mcp | openai | openai-responses | anthropic)")),
+    })
+}
+
+/// Handle one JSON-RPC message; None for notifications (no reply).
+pub fn rpc(msg: &Value, call: &mut dyn FnMut(&str, &Value) -> Result<Value>) -> Option<Value> {
+    let id = msg.get("id").cloned()?;
+    let method = msg.get("method").and_then(Value::as_str).unwrap_or("");
+    let params = msg.get("params").cloned().unwrap_or(Value::Null);
+    let reply: std::result::Result<Value, Value> = match method {
+        "initialize" => Ok(json!({
+            "protocolVersion": params.get("protocolVersion").and_then(Value::as_str).unwrap_or("2025-06-18"),
+            "capabilities": {"tools": {"listChanged": false}},
+            "serverInfo": {"name": "reman", "version": config::VERSION},
+            "instructions": "Ground-truth memory of the commands this user really ran (with exit codes, folders, who ran them). Prefer reman_search / reman_check / reman_fixes results over guessing a command."
+        })),
+        "ping" => Ok(json!({})),
+        "tools/list" => Ok(json!({"tools": tools()})),
+        "tools/call" => {
+            let name = params.get("name").and_then(Value::as_str).unwrap_or("");
+            let args = params.get("arguments").cloned().unwrap_or(json!({}));
+            Ok(match call(name, &args) {
+                Ok(v) => json!({"content": [{"type": "text", "text": serde_json::to_string_pretty(&v).unwrap_or_default()}],
+                                "structuredContent": {"result": v}, "isError": false}),
+                Err(e) => json!({"content": [{"type": "text", "text": format!("reman error: {e}")}], "isError": true}),
+            })
+        }
+        _ => Err(json!({"code": -32601, "message": format!("method not found: {method}")})),
+    };
+    Some(match reply {
+        Ok(r) => json!({"jsonrpc": "2.0", "id": id, "result": r}),
+        Err(e) => json!({"jsonrpc": "2.0", "id": id, "error": e}),
+    })
+}
+
+/// Tool calls through the daemon (the stdio server and `reman call`).
+pub struct Bridge {
     client: Option<Client>,
-    pol: Policy,
+    pub pol: Policy,
 }
 
 impl Bridge {
-    fn call(&mut self, tool: &str, args: &Value) -> Result<Value> {
+    pub fn new(pol: Policy) -> Self {
+        Self { client: None, pol }
+    }
+
+    pub fn call(&mut self, tool: &str, args: &Value) -> Result<Value> {
         let req = json!({"op": "mcp", "tool": tool, "args": args, "roots": self.pol.roots,
                          "allow_global": self.pol.allow_global, "strict": self.pol.strict});
         for attempt in 0..2 {
@@ -392,7 +471,7 @@ impl Bridge {
 }
 
 pub fn serve_stdio() -> Result<()> {
-    let mut bridge = Bridge { client: None, pol: Policy::from_env() };
+    let mut bridge = Bridge::new(Policy::from_env());
     let stdin = std::io::stdin();
     let mut stdout = std::io::stdout();
     for line in stdin.lock().lines() {
@@ -401,35 +480,10 @@ pub fn serve_stdio() -> Result<()> {
             continue;
         }
         let Ok(msg) = serde_json::from_str::<Value>(&line) else { continue };
-        let Some(id) = msg.get("id").cloned() else { continue }; // notifications need no reply
-        let method = msg.get("method").and_then(Value::as_str).unwrap_or("");
-        let params = msg.get("params").cloned().unwrap_or(Value::Null);
-        let reply = match method {
-            "initialize" => Ok(json!({
-                "protocolVersion": params.get("protocolVersion").and_then(Value::as_str).unwrap_or("2025-06-18"),
-                "capabilities": {"tools": {"listChanged": false}},
-                "serverInfo": {"name": "reman", "version": config::VERSION},
-                "instructions": "Ground-truth memory of the commands this user really ran (with exit codes, folders, who ran them). Prefer reman_search / reman_check / reman_fixes results over guessing a command."
-            })),
-            "ping" => Ok(json!({})),
-            "tools/list" => Ok(json!({"tools": tools()})),
-            "tools/call" => {
-                let name = params.get("name").and_then(Value::as_str).unwrap_or("");
-                let args = params.get("arguments").cloned().unwrap_or(json!({}));
-                Ok(match bridge.call(name, &args) {
-                    Ok(v) => json!({"content": [{"type": "text", "text": serde_json::to_string_pretty(&v)?}],
-                                    "structuredContent": {"result": v}, "isError": false}),
-                    Err(e) => json!({"content": [{"type": "text", "text": format!("reman error: {e}")}], "isError": true}),
-                })
-            }
-            _ => Err(json!({"code": -32601, "message": format!("method not found: {method}")})),
-        };
-        let resp = match reply {
-            Ok(r) => json!({"jsonrpc": "2.0", "id": id, "result": r}),
-            Err(e) => json!({"jsonrpc": "2.0", "id": id, "error": e}),
-        };
-        writeln!(stdout, "{}", serde_json::to_string(&resp)?)?;
-        stdout.flush()?;
+        if let Some(resp) = rpc(&msg, &mut |name, args| bridge.call(name, args)) {
+            writeln!(stdout, "{}", serde_json::to_string(&resp)?)?;
+            stdout.flush()?;
+        }
     }
     Ok(())
 }
@@ -446,5 +500,26 @@ mod tests {
         assert!(!p.within(Some(r"D:\PlanetNaiduEvil")));
         assert!(!p.within(Some(r"C:\Users")));
         assert!(!p.within(None));
+    }
+}
+
+#[cfg(test)]
+mod rpc_tests {
+    use super::*;
+
+    #[test]
+    fn jsonrpc_and_formats() {
+        let mut call = |name: &str, _a: &Value| -> Result<Value> { Ok(json!([{"command": name}])) };
+        let init = rpc(&json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2025-03-26"}}), &mut call).unwrap();
+        assert_eq!(init["result"]["protocolVersion"], "2025-03-26");
+        assert!(rpc(&json!({"jsonrpc": "2.0", "method": "notifications/initialized"}), &mut call).is_none());
+        let list = rpc(&json!({"jsonrpc": "2.0", "id": 2, "method": "tools/list"}), &mut call).unwrap();
+        assert_eq!(list["result"]["tools"].as_array().unwrap().len(), 7);
+        let res = rpc(&json!({"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {"name": "reman_next", "arguments": {}}}), &mut call).unwrap();
+        assert_eq!(res["result"]["structuredContent"]["result"][0]["command"], "reman_next");
+        assert_eq!(rpc(&json!({"jsonrpc": "2.0", "id": 4, "method": "nope"}), &mut call).unwrap()["error"]["code"], -32601);
+        assert_eq!(tools_as("openai").unwrap()[0]["function"]["name"], "reman_search");
+        assert!(tools_as("anthropic").unwrap()[0]["input_schema"].is_object());
+        assert_eq!(tools_as("openai-responses").unwrap()[0]["name"], "reman_search");
     }
 }

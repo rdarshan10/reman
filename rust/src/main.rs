@@ -3,6 +3,7 @@
 mod capture;
 mod client;
 mod config;
+mod connect;
 mod daemon;
 mod db;
 mod describe;
@@ -10,11 +11,13 @@ mod dym;
 mod embed;
 mod fixpairs;
 mod flows;
+mod http;
 mod import;
 mod mcp;
 mod predict;
 mod redact;
 mod search;
+mod settings;
 mod store;
 mod tui;
 
@@ -152,6 +155,29 @@ enum Cmd {
     },
     /// Re-embed every command with the current model
     Reindex,
+    /// Plug reman into AI agents: `reman connect` (status), `all`, an agent id, or `http`
+    Connect {
+        /// all | http | claude-code | claude-desktop | codex | cursor | vscode | windsurf | gemini
+        targets: Vec<String>,
+        /// folder agents may see (repeatable); stored once in ~/.reman/config.json for every agent
+        #[arg(long = "root")]
+        roots: Vec<String>,
+        /// port for `reman connect http` (default 8777)
+        #[arg(long)]
+        port: Option<u16>,
+        /// print paste-able config for any other MCP client
+        #[arg(long)]
+        print: bool,
+    },
+    /// Undo `reman connect` for the given agents (or `all`, `http`)
+    Disconnect { targets: Vec<String> },
+    /// Tool schemas for function calling: mcp | openai | openai-responses | anthropic
+    Tools {
+        #[arg(long, default_value = "mcp")]
+        format: String,
+    },
+    /// Call one agent tool from the command line: reman call reman_search '{"intent":"..."}'
+    Call { tool: String, args: Option<String> },
     /// Ping / stop the daemon
     Ping,
     Stop,
@@ -351,6 +377,21 @@ fn real_main() -> Result<()> {
             println!("reman reindex: {} commands re-embedded", r["reembedded"]);
             Ok(())
         }
+        Cmd::Connect { targets, roots, port, print } => connect_cmd(&targets, &roots, port, print),
+        Cmd::Disconnect { targets } => disconnect_cmd(&targets),
+        Cmd::Tools { format } => {
+            println!("{}", serde_json::to_string_pretty(&mcp::tools_as(&format)?)?);
+            Ok(())
+        }
+        Cmd::Call { tool, args } => {
+            let args: Value = match args {
+                Some(a) => serde_json::from_str(&a).context("args must be a JSON object")?,
+                None => json!({}),
+            };
+            let v = mcp::Bridge::new(mcp::Policy::from_env()).call(&tool, &args)?;
+            println!("{}", serde_json::to_string_pretty(&v)?);
+            Ok(())
+        }
         Cmd::Ping => {
             let t = Instant::now();
             let r = client::call(&json!({"op": "ping"}))?;
@@ -392,6 +433,119 @@ fn init_script(shell: &str, exe: &Path) -> Result<String> {
 fn hook_exe(exe: &Path) -> PathBuf {
     let h = exe.with_file_name(if cfg!(windows) { "reman-hook.exe" } else { "reman-hook" });
     if h.exists() { h } else { exe.to_path_buf() }
+}
+
+/// The binaries agents should launch: the installed copy when present (stable path), else this one.
+fn agent_exes() -> Result<(PathBuf, PathBuf)> {
+    let installed = config::bin_dir().join(if cfg!(windows) { "reman.exe" } else { "reman" });
+    let exe = if installed.exists() { installed } else { std::env::current_exe()? };
+    let hook = hook_exe(&exe);
+    Ok((exe, hook))
+}
+
+fn connect_cmd(targets: &[String], roots: &[String], port: Option<u16>, print: bool) -> Result<()> {
+    let (exe, hook) = agent_exes()?;
+    if print {
+        println!("{}", connect::generic_snippet(&exe));
+        return Ok(());
+    }
+    // the boundary: one list of folders for every agent
+    let mut st = settings::load();
+    if !roots.is_empty() || st.mcp_roots.is_empty() {
+        st.mcp_roots = connect::resolve_roots(roots);
+        settings::save(&st)?;
+    }
+    if targets.is_empty() {
+        println!("reman connect - agents on this machine\n");
+        for (id, name) in connect::AGENTS {
+            let state = match (connect::installed(id), connect::status(id, &exe)) {
+                (_, Some(true)) => "\x1b[32mconnected\x1b[0m",
+                (_, Some(false)) => "\x1b[33mconnected (old path - reconnect)\x1b[0m",
+                (true, None) => "installed, not connected",
+                (false, None) => "\x1b[90mnot installed\x1b[0m",
+            };
+            println!("  {id:<15} {name:<30} {state}");
+        }
+        let http = st.http.as_ref().map(|h| format!("\x1b[32mon\x1b[0m  http://127.0.0.1:{}/mcp", h.port)).unwrap_or_else(|| "off".into());
+        println!("  {:<15} {:<30} {http}", "http", "HTTP endpoint (any agent/SDK)");
+        println!("\n  agents may see commands from: {}", st.mcp_roots.join("  |  "));
+        println!("\n  reman connect all              connect every installed agent");
+        println!("  reman connect <id> | http      one agent / the HTTP endpoint (OpenAI Agents SDK, LangChain, curl)");
+        println!("  reman connect --root <dir> ... change which folders agents may see (all agents at once)");
+        println!("  reman connect --print          config to paste into any other MCP client");
+        return Ok(());
+    }
+    let ids: Vec<String> = if targets.iter().any(|t| t == "all") {
+        connect::AGENTS.iter().filter(|(id, _)| connect::installed(id)).map(|(id, _)| id.to_string()).collect()
+    } else {
+        targets.to_vec()
+    };
+    println!("agents may see commands from: {}\n", st.mcp_roots.join("  |  "));
+    for id in &ids {
+        if id == "http" {
+            connect_http(&mut st, port)?;
+            continue;
+        }
+        let Some((_, name)) = connect::AGENTS.iter().find(|(a, _)| a == id) else {
+            println!("  \x1b[31mx\x1b[0m {id}: unknown agent (known: {}, http)", connect::AGENTS.iter().map(|a| a.0).collect::<Vec<_>>().join(", "));
+            continue;
+        };
+        match connect::connect(id, &exe, &hook) {
+            Ok(detail) => println!("  \x1b[32m+\x1b[0m {name:<30} {detail}"),
+            Err(e) => println!("  \x1b[31mx\x1b[0m {name:<30} {e:#}"),
+        }
+    }
+    println!("\nrestart the connected apps (or reload their MCP servers) to pick reman up.");
+    Ok(())
+}
+
+fn connect_http(st: &mut settings::Settings, port: Option<u16>) -> Result<()> {
+    let prev = st.http.clone();
+    let port = port.or(prev.as_ref().map(|h| h.port)).unwrap_or(8777);
+    let token = prev.map(|h| h.token).unwrap_or_else(settings::new_token);
+    st.http = Some(settings::Http { port, token });
+    settings::save(st)?;
+    let r = client::call(&json!({"op": "http_enable"}))?;
+    if r["ok"].as_bool() != Some(true) {
+        bail!("daemon could not start the endpoint: {}", r["error"].as_str().unwrap_or("?"));
+    }
+    let url = format!("http://127.0.0.1:{port}");
+    println!("  \x1b[32m+\x1b[0m HTTP endpoint                 {url}/mcp   (token in {})", settings::path().display());
+    println!(
+        "\n  MCP (Streamable HTTP) - OpenAI Agents SDK:\n\
+         \x20   from agents.mcp import MCPServerStreamableHttp\n\
+         \x20   reman = MCPServerStreamableHttp(params={{\"url\": \"{url}/mcp\", \"headers\": {{\"Authorization\": \"Bearer <token>\"}}}})\n\
+         \n  Plain function calling (any SDK):\n\
+         \x20   GET  {url}/tools?format=openai        tool schemas (also: anthropic, openai-responses, mcp)\n\
+         \x20   POST {url}/tools/reman_search         body = the tool's JSON arguments\n\
+         \n  curl -H \"Authorization: Bearer <token>\" {url}/tools/reman_search -d '{{\"intent\":\"run the tests\"}}'"
+    );
+    Ok(())
+}
+
+fn disconnect_cmd(targets: &[String]) -> Result<()> {
+    let (exe, _) = agent_exes()?;
+    let all = targets.iter().any(|t| t == "all");
+    let ids: Vec<String> = if all {
+        connect::AGENTS.iter().filter(|(id, _)| connect::status(id, &exe).is_some()).map(|(id, _)| id.to_string()).chain(["http".to_string()]).collect()
+    } else {
+        targets.to_vec()
+    };
+    for id in &ids {
+        if id == "http" {
+            let mut st = settings::load();
+            if st.http.take().is_some() {
+                settings::save(&st)?;
+                println!("  - HTTP endpoint disabled (requests are refused immediately)");
+            }
+            continue;
+        }
+        match connect::disconnect(id) {
+            Ok(d) => println!("  - {id}: {d}"),
+            Err(e) => println!("  x {id}: {e:#}"),
+        }
+    }
+    Ok(())
 }
 
 fn bench(n: usize) -> Result<()> {

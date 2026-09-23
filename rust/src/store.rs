@@ -166,12 +166,17 @@ fn is_comment(t: &str) -> bool {
 }
 
 pub fn is_self_ref(text: &str) -> bool {
+    // (not describe::parse_cmd: it reads a `cd` target like /c/x/reman as the program name)
     let (prog, _) = describe::parse_cmd(text);
-    if matches!(prog.as_deref(), Some("reman" | "reman-hook")) {
-        return true;
-    }
     let l = text.to_lowercase();
-    ["reman_tui.py", "reman_daemon.py", "reman_mcp.py", "reman_init.py", "reman_hook_claude.py"].iter().any(|s| l.contains(s))
+    // reman invoked anywhere in a pipeline / chain / loop, not just as the first word
+    let invokes = l.contains("reman.exe")
+        || l.contains("reman-hook")
+        || l.contains(".reman/bin")
+        || l.contains(".reman\\bin")
+        || l.split(|c: char| c.is_whitespace() || matches!(c, ';' | '|' | '&' | '(' | '`' | '$' | '{')).any(|t| t == "reman");
+    invokes
+        || ["reman_tui.py", "reman_daemon.py", "reman_mcp.py", "reman_init.py", "reman_hook_claude.py"].iter().any(|s| l.contains(s))
         || (prog.as_deref() == Some("python") && l.contains("reman.py"))
 }
 
@@ -535,5 +540,21 @@ mod tests {
         s.remove_rows(&s.row_ids("ls"));
         assert!(!s.knows("ls"));
         assert_eq!(s.execs.len(), 2);
+    }
+}
+
+#[cfg(test)]
+mod self_ref_tests {
+    use super::is_self_ref;
+
+    #[test]
+    fn flags_reman_invocations_only() {
+        assert!(is_self_ref(r#"reman search "tear down containers""#));
+        assert!(is_self_ref(r#"& "C:\py\python.exe" "C:\x\reman_tui.py" --query q"#));
+        assert!(is_self_ref(r#"for q in "a" "b"; do ~/.reman/bin/reman.exe search "$q"; done"#));
+        assert!(is_self_ref("cd /c/x && reman stats"));
+        assert!(!is_self_ref("cd /c/Users/rdars/reman && cargo build --release"));
+        assert!(!is_self_ref("git clone https://github.com/x/remanufacture"));
+        assert!(!is_self_ref("docker-compose down"));
     }
 }

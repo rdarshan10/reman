@@ -21,6 +21,16 @@ const LONG_FUZZY_CAP: f32 = 0.25;
 const W_PREFIX: f32 = 0.05;
 const W_HERE: f32 = 0.02;
 const W_PIN: f32 = 0.02;
+const W_SCRIPT: f32 = 0.04;
+
+/// Bounded nudge against multi-KB / multi-line scripts (mostly agent-run) that merely mention the
+/// query's words: you want the command you'd rerun, not a 40-line heredoc. 0 up to 160 chars,
+/// linear to W_SCRIPT at 1000+, plus a little for multi-line text.
+fn script_penalty(e: &crate::store::Entry) -> f32 {
+    let len = e.text.len() as f32;
+    let long = ((len - 160.0) / 840.0).clamp(0.0, 1.0) * W_SCRIPT;
+    long + if e.text.contains('\n') { 0.01 } else { 0.0 }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Rank {
@@ -267,7 +277,8 @@ pub fn search(store: &Store, q: &Query, qv: Option<&[f32]>) -> Outcome {
                     + freq(c.runs)
                     + recency(c.last, now)
                     + if c.here { W_HERE } else { 0.0 }
-                    + if e.pinned { W_PIN } else { 0.0 };
+                    + if e.pinned { W_PIN } else { 0.0 }
+                    - script_penalty(e);
                 scored.push(hit(c.idx, score, s, fz[k]));
             }
         }
