@@ -162,7 +162,7 @@ fn tool_search(d: &Daemon, a: &Value, pol: &Policy, cwd: Option<&str>) -> Result
             let mut v = json!({"command": safe, "cwd": s.cwd, "run_count": s.runs, "intent": e.gkey,
                 "variants": h.variants, "similarity": (h.sim.max(0.0) * 1000.0).round() / 1000.0,
                 "description": e.desc, "generated": false,
-                "success_rate": ((s.ok as f64 / s.runs.max(1) as f64) * 100.0).round() / 100.0,
+                "success_rate": (s.ok + s.fail > 0).then(|| ((s.ok as f64 / (s.ok + s.fail) as f64) * 100.0).round() / 100.0),
                 "last_run": config::age(s.last_used), "actor": s.actors.first().cloned().unwrap_or_else(|| "human".into())});
             if out.mode == "fuzzy" {
                 v["match"] = json!("fuzzy");
@@ -189,7 +189,7 @@ fn tool_recent(d: &Daemon, a: &Value, pol: &Policy, cwd: Option<&str>, failures:
     let n = arg_n(a, "n", 20);
     let st = d.store.read();
     let mut items: Vec<(i64, Value)> = Vec::new();
-    for e in st.entries.iter().filter(|e| e.alive && !e.comment) {
+    for e in st.entries.iter().filter(|e| e.recallable(false)) {
         let rows = visible(&st, e, pol, cwd);
         if rows.is_empty() {
             continue;

@@ -25,7 +25,7 @@ impl Client {
 
     /// Connect, starting the daemon if needed (first start loads the model: ~1s).
     pub fn connect() -> Result<Self> {
-        Self::connect_with(&std::env::current_exe()?)
+        Self::connect_with(&daemon_exe()?)
     }
 
     /// Like `connect`, but autostarts the daemon from a specific executable.
@@ -105,9 +105,18 @@ fn stop_std_handle_inheritance() {
     }
 }
 
-/// Start `reman daemon` (from this executable) detached, with no console window.
+/// The full `reman` executable: this one, or the sibling when running as the slim `reman-hook`.
+pub fn daemon_exe() -> Result<std::path::PathBuf> {
+    let me = std::env::current_exe()?;
+    if me.file_stem().is_some_and(|s| s == "reman") {
+        return Ok(me);
+    }
+    Ok(me.with_file_name(if cfg!(windows) { "reman.exe" } else { "reman" }))
+}
+
+/// Start `reman daemon` detached, with no console window.
 pub fn spawn_daemon() -> Result<()> {
-    spawn_daemon_exe(&std::env::current_exe()?)
+    spawn_daemon_exe(&daemon_exe()?)
 }
 
 pub fn spawn_daemon_exe(exe: &std::path::Path) -> Result<()> {

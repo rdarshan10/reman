@@ -59,7 +59,7 @@ pub fn did_you_mean(store: &Store, failed: &str, qv: Option<&[f32]>, k: usize, w
     }
     let mut cands: Vec<C> = Vec::new();
     for (i, e) in store.entries.iter().enumerate() {
-        if !e.alive || e.comment || e.text == failed || !store.in_scope(e, scope) {
+        if !e.recallable(false) || e.text == failed || !store.in_scope(e, scope) {
             continue;
         }
         if worked_only && store.agg(e, scope).ok == 0 {

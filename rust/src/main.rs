@@ -92,6 +92,9 @@ enum Cmd {
         /// on failure, wait for and print a fix suggestion
         #[arg(long)]
         suggest: bool,
+        /// also print the bare fix command on stdout
+        #[arg(long)]
+        print_fix: bool,
         #[arg(last = true, required = true)]
         command: Vec<String>,
     },
@@ -188,8 +191,9 @@ fn print_rows(rows: &[Value]) {
             meta.push(reason.to_string());
         }
         meta.push(format!("runs={}", r["run_count"]));
-        if let Some(sr) = r["success_rate"].as_f64() {
-            meta.push(format!("ok={}%", (sr * 100.0).round()));
+        match r["success_rate"].as_f64() {
+            Some(sr) => meta.push(format!("ok={}%", (sr * 100.0).round())),
+            None => meta.push("ok=?".into()),
         }
         meta.push(format!("last={}", r["last_run"].as_str().unwrap_or("?")));
         meta.push(r["actor"].as_str().unwrap_or("human").to_string());
@@ -267,8 +271,8 @@ fn real_main() -> Result<()> {
             println!("{}", serde_json::to_string_pretty(&r)?);
             Ok(())
         }
-        Cmd::Record { exit, cwd: c, session, actor, duration_ms, suggest, command } => {
-            capture::record(capture::RecordArgs { command: command.join(" "), exit, cwd: c, session, actor, duration_ms, suggest })
+        Cmd::Record { exit, cwd: c, session, actor, duration_ms, suggest, print_fix, command } => {
+            capture::record(capture::RecordArgs { command: command.join(" "), exit, cwd: c, session, actor, duration_ms, suggest, print_fix })
         }
         Cmd::Hook { agent } => match agent.as_str() {
             "claude" | "claude-code" => capture::hook_claude(),
@@ -373,9 +377,21 @@ fn init_script(shell: &str, exe: &Path) -> Result<String> {
         "fish" => include_str!("init/reman.fish"),
         other => bail!("unknown shell {other:?} (powershell|bash|zsh|fish)"),
     };
-    let exe_s = exe.to_string_lossy();
-    let exe_s = if shell == "powershell" || shell == "pwsh" { exe_s.into_owned() } else { exe_s.replace('\\', "/") };
-    Ok(tpl.replace("__REMAN__", &exe_s).replace("__PORT__", &config::port().to_string()).replace("__SPOOL__", &config::spool_path().to_string_lossy()))
+    let fix = |p: &Path| {
+        let s = p.to_string_lossy().into_owned();
+        if shell == "powershell" || shell == "pwsh" { s } else { s.replace('\\', "/") }
+    };
+    Ok(tpl
+        .replace("__REMAN__", &fix(exe))
+        .replace("__HOOK__", &fix(&hook_exe(exe)))
+        .replace("__PORT__", &config::port().to_string())
+        .replace("__SPOOL__", &fix(&config::spool_path())))
+}
+
+/// The slim capture binary next to `exe`, falling back to `exe` itself (`reman record` works too).
+fn hook_exe(exe: &Path) -> PathBuf {
+    let h = exe.with_file_name(if cfg!(windows) { "reman-hook.exe" } else { "reman-hook" });
+    if h.exists() { h } else { exe.to_path_buf() }
 }
 
 fn bench(n: usize) -> Result<()> {
@@ -536,6 +552,14 @@ fn setup(no_profile: bool) -> Result<()> {
             std::fs::rename(&installed, &aside).with_context(|| format!("{} is locked", installed.display()))?;
             std::fs::copy(&me, &installed).with_context(|| format!("installing to {}", installed.display()))?;
         }
+        // the slim capture binary ships next to the main one
+        let hook_src = me.with_file_name(if cfg!(windows) { "reman-hook.exe" } else { "reman-hook" });
+        let hook_dst = bin.join(hook_src.file_name().unwrap_or_default());
+        if hook_src.exists() && std::fs::copy(&hook_src, &hook_dst).is_err() {
+            let aside = hook_dst.with_extension(format!("old-{}.exe", config::now()));
+            let _ = std::fs::rename(&hook_dst, &aside);
+            std::fs::copy(&hook_src, &hook_dst).with_context(|| format!("installing {}", hook_dst.display()))?;
+        }
         for old in std::fs::read_dir(&bin)?.flatten() {
             if old.file_name().to_string_lossy().contains(".old-") {
                 let _ = std::fs::remove_file(old.path()); // fails harmlessly while still running
@@ -593,7 +617,7 @@ fn setup(no_profile: bool) -> Result<()> {
         let kind = ["zsh", "fish"].into_iter().find(|s| shell.contains(s)).unwrap_or("bash");
         println!("  shell ({kind})    : add to your rc file:  eval \"$({} init {kind})\"", installed.display());
     }
-    println!("  claude code     : hook   -> \"{}\" hook claude", installed.display());
+    println!("  claude code     : hook   -> \"{}\" claude", hook_exe(&installed).display());
     println!("                    mcp    -> claude mcp add reman -- \"{}\" mcp   (env REMAN_MCP_ROOT=<project dirs>)", installed.display());
     println!("\n  done.");
     Ok(())

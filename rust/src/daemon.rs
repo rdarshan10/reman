@@ -698,12 +698,14 @@ pub fn serve(port: u16) -> Result<()> {
         std::thread::spawn(move || {
             let mut tick = 0u64;
             loop {
-                std::thread::sleep(std::time::Duration::from_secs(15));
+                // 1s: fish (no TCP builtin) appends successes to the spool instead of spawning a
+                // process, so the spool is a live capture path; an absent file is one stat()
+                std::thread::sleep(std::time::Duration::from_secs(1));
                 tick += 1;
                 if let Err(e) = d.drain_spool() {
                     log(&format!("spool drain failed: {e}"));
                 }
-                if tick % 240 == 0 {
+                if tick % 3600 == 0 {
                     let _ = d.purge_failed(1); // hourly retention
                 }
             }

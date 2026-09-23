@@ -146,11 +146,12 @@ pub fn similarities(store: &Store, qv: &[f32]) -> Vec<f32> {
 
 pub fn search(store: &Store, q: &Query, qv: Option<&[f32]>) -> Outcome {
     let now = config::now();
+    let show_self = q.text.to_lowercase().contains("reman");
     let cands: Vec<Cand> = store
         .entries
         .iter()
         .enumerate()
-        .filter(|(_, e)| e.alive && !e.comment && store.in_scope(e, q.scope))
+        .filter(|(_, e)| e.recallable(show_self) && store.in_scope(e, q.scope))
         .filter_map(|(i, e)| {
             let a = store.agg(e, q.scope);
             store.passes(&a, q.actor, q.status).then(|| Cand {

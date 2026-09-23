@@ -62,7 +62,7 @@ pub fn predict(store: &Store, cwd: Option<u32>, last: Option<u32>, prev: Option<
         .into_iter()
         .filter(|(idx, _)| {
             let e = &store.entries[*idx as usize];
-            e.alive && !e.comment && !(store.agg(e, Scope::All).status() == "fail")
+            e.recallable(false) && store.agg(e, Scope::All).status() != "fail"
         })
         .map(|(idx, (s, n))| Prediction {
             idx,
@@ -80,7 +80,7 @@ pub fn predict(store: &Store, cwd: Option<u32>, last: Option<u32>, prev: Option<
                 .entries
                 .iter()
                 .enumerate()
-                .filter(|(i, e)| e.alive && !e.comment && Some(*i as u32) != last && !out.iter().any(|p| p.idx == *i as u32))
+                .filter(|(i, e)| e.recallable(false) && Some(*i as u32) != last && !out.iter().any(|p| p.idx == *i as u32))
                 .filter_map(|(i, e)| {
                     let a = store.agg(e, Scope::Folder(c));
                     (a.runs >= 2 && a.status() != "fail").then_some((i as u32, a.runs, a.last_used))

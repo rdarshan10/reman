@@ -78,6 +78,8 @@ pub struct RecordArgs {
     pub actor: Option<String>,
     pub duration_ms: Option<i64>,
     pub suggest: bool,
+    /// also print the bare fix command on stdout (for shells that capture it, e.g. fish Alt-F)
+    pub print_fix: bool,
 }
 
 pub fn record(a: RecordArgs) -> Result<()> {
@@ -93,6 +95,11 @@ pub fn record(a: RecordArgs) -> Result<()> {
     let failed = a.exit.is_some_and(|e| e > 0);
     if let Some(sg) = push(req, a.suggest && failed) {
         print_suggestion(&sg);
+        if a.print_fix {
+            if let Some(c) = sg.get("command").and_then(Value::as_str) {
+                println!("{c}");
+            }
+        }
     }
     Ok(())
 }
@@ -152,9 +159,10 @@ mod tests {
         spool(&json!({"op": "ingest", "command": "a b", "exit": 0})).unwrap();
         spool(&json!({"op": "ingest", "command": "c d", "exit": 1})).unwrap();
         let text = std::fs::read_to_string(&p).unwrap();
-        let runs: Vec<_> = text.lines().filter_map(|l| serde_json::from_str::<Value>(l).ok()).filter_map(|v| crate::daemon::run_from(&v, "human")).collect();
+        let runs: Vec<Value> = text.lines().filter_map(|l| serde_json::from_str::<Value>(l).ok()).collect();
         assert_eq!(runs.len(), 2);
-        assert!(runs[1].failed());
+        assert_eq!(runs[1]["exit"], json!(1));
+        assert_eq!(runs[0]["command"], json!("a b"));
         let _ = std::fs::remove_dir_all(dir);
     }
 }

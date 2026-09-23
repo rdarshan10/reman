@@ -66,9 +66,38 @@ pub fn age(ts: i64) -> String {
 /// Folder equality the way Python's os.path.normcase(normpath()) did it: case-insensitive and
 /// separator-agnostic on Windows, trailing separators ignored.
 pub fn norm_path(p: &str) -> String {
-    let mut s = p.trim().replace('/', std::path::MAIN_SEPARATOR_STR);
+    let p = p.trim();
+    // Git Bash / MSYS2 / Cygwin report `/c/Users/x` (or `/cygdrive/c/...`) for `C:\Users\x`
+    let msys;
+    let p = if cfg!(windows) {
+        let rest = p.strip_prefix("/cygdrive").unwrap_or(p);
+        let b = rest.as_bytes();
+        if b.len() >= 2 && b[0] == b'/' && b[1].is_ascii_alphabetic() && (b.len() == 2 || b[2] == b'/') {
+            msys = format!("{}:{}", b[1] as char, if b.len() == 2 { "/" } else { &rest[2..] });
+            msys.as_str()
+        } else {
+            p
+        }
+    } else {
+        p
+    };
+    let mut s = p.replace('/', std::path::MAIN_SEPARATOR_STR);
     while s.len() > 1 && s.ends_with(std::path::MAIN_SEPARATOR) && !s.ends_with(":\\") {
         s.pop();
     }
     if cfg!(windows) { s.to_lowercase() } else { s }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    #[cfg(windows)]
+    fn msys_paths_match_windows_paths() {
+        assert_eq!(norm_path("/c/Users/rdars/reman"), norm_path(r"C:\Users\rdars\reman"));
+        assert_eq!(norm_path("/d"), norm_path(r"D:\"));
+        assert_eq!(norm_path("/cygdrive/d/PlanetNaidu/"), norm_path(r"D:\PlanetNaidu"));
+        assert_ne!(norm_path("/usr/bin"), norm_path(r"U:\sr\bin"));
+    }
 }

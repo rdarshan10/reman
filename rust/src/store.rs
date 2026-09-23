@@ -33,8 +33,18 @@ pub struct Entry {
     pub rows: Vec<Row>,
     pub pinned: bool,
     pub comment: bool,
+    /// reman's own invocations (`reman search ...`, the legacy reman_*.py scripts): recorded,
+    /// but kept out of recall unless the query itself is about reman
+    pub self_ref: bool,
     pub alive: bool,
     pub has_vec: bool,
+}
+
+impl Entry {
+    /// Should this command be offered back to the user / an agent?
+    pub fn recallable(&self, show_self: bool) -> bool {
+        self.alive && !self.comment && (show_self || !self.self_ref)
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -81,8 +91,11 @@ impl Agg {
     pub fn is_agent(&self) -> bool {
         self.last_actor.as_deref().is_some_and(|a| a.starts_with("agent"))
     }
-    pub fn success_rate(&self) -> f64 {
-        ((self.ok as f64) / (self.runs.max(1) as f64) * 100.0).round() / 100.0
+    /// Share of runs with a KNOWN outcome that succeeded; None when no exit code was ever
+    /// captured (old imports) - that's "unknown", not "0% ok".
+    pub fn success_rate(&self) -> Option<f64> {
+        let known = self.ok + self.fail;
+        (known > 0).then(|| ((self.ok as f64) / (known as f64) * 100.0).round() / 100.0)
     }
 }
 
@@ -150,6 +163,16 @@ pub fn char_mask(t: &str) -> u64 {
 
 fn is_comment(t: &str) -> bool {
     t.trim_start().starts_with('#')
+}
+
+pub fn is_self_ref(text: &str) -> bool {
+    let (prog, _) = describe::parse_cmd(text);
+    if matches!(prog.as_deref(), Some("reman" | "reman-hook")) {
+        return true;
+    }
+    let l = text.to_lowercase();
+    ["reman_tui.py", "reman_daemon.py", "reman_mcp.py", "reman_init.py", "reman_hook_claude.py"].iter().any(|s| l.contains(s))
+        || (prog.as_deref() == Some("python") && l.contains("reman.py"))
 }
 
 impl Store {
@@ -373,6 +396,7 @@ impl Store {
             rows: Vec::new(),
             pinned: false,
             comment: is_comment(text),
+            self_ref: is_self_ref(text),
             alive: true,
             has_vec: vec.is_some(),
         });

@@ -49,7 +49,7 @@ pub fn runs(store: &Store, cwd: Option<u32>, gap: i64) -> Vec<Vec<u32>> {
     let mut last: Option<i64> = None;
     for x in &store.execs {
         let e = &store.entries[x.entry as usize];
-        if !e.alive || e.comment {
+        if !e.recallable(false) {
             continue;
         }
         if let Some(c) = cwd {
