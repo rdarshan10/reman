@@ -532,17 +532,27 @@ fn setup(no_profile: bool) -> Result<()> {
         std::fs::copy(&me, &installed).with_context(|| format!("installing to {}", installed.display()))?;
     }
     println!("  binary          : {}", installed.display());
-    // 2. warm daemon from the installed copy
-    let ping = std::process::Command::new(&installed).arg("ping").output()?;
-    println!("  daemon          : {}", String::from_utf8_lossy(&ping.stdout).trim());
+    // 2. warm daemon, started from the installed copy (in-process client: no captured child
+    //    pipes for the daemon to inherit)
+    let mut c = client::Client::connect_with(&installed)?;
+    let p = c.call(&json!({"op": "ping"}))?;
+    println!("  daemon          : up (engine={}, pid={}, {} commands)", p["engine"].as_str().unwrap_or("?"), p["pid"], p["indexed"]);
     // 3. one-time Atuin import (final catch-up), then scrub the double captures it causes
     if config::atuin_db_path().is_some() {
-        let out = std::process::Command::new(&installed).args(["import", "atuin"]).output()?;
-        println!("  atuin import    : {}", String::from_utf8_lossy(&out.stdout).trim());
+        let (mut runs, mut new) = (0, 0);
+        loop {
+            let r = c.call(&json!({"op": "import", "source": "atuin", "limit": 5000}))?;
+            runs += r["ingested"].as_u64().unwrap_or(0);
+            new += r["new"].as_u64().unwrap_or(0);
+            if r["remaining"].as_u64().unwrap_or(0) == 0 || r["ingested"].as_u64() == Some(0) {
+                break;
+            }
+        }
+        println!("  atuin import    : {runs} runs ({new} new commands)");
     }
-    let r = client::call(&json!({"op": "fix_dupes"}))?;
+    let r = c.call(&json!({"op": "fix_dupes"}))?;
     println!("  double captures : removed {}", r["removed"]);
-    let r = client::call(&json!({"op": "fixpairs_rebuild"}))?;
+    let r = c.call(&json!({"op": "fixpairs_rebuild"}))?;
     println!("  fix-pairs       : {} found in history", r["pairs"]);
     // 4. shell profile
     if !no_profile && cfg!(windows) {

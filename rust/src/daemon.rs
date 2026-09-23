@@ -617,12 +617,20 @@ impl Daemon {
             "purge" => json!({"ok": true, "purged": self.purge_failed(n(req, "fail_ttl_days", 1))?}),
             "fix_dupes" => json!({"ok": true, "removed": self.fix_dupes()?}),
             "fixpairs_rebuild" => {
+                // one-time backfill: live capture maintains pairs afterwards, and replaying
+                // history twice would double every count
+                let done = db::meta_get(&self.db.lock(), "fixpairs_backfilled")?.is_some();
+                if done && !b(req, "force", false) {
+                    let n: usize = self.fixes.lock().pairs.values().map(|v| v.len()).sum();
+                    return Ok(json!({"ok": true, "pairs": n, "already": true}));
+                }
                 let found = fixpairs::rebuild(&self.store.read());
                 let mut fx = self.fixes.lock();
                 let conn = self.db.lock();
                 for (p, cwd, ts) in &found {
                     fx.persist(&conn, p, cwd.as_deref(), *ts)?;
                 }
+                db::meta_set(&conn, "fixpairs_backfilled", &config::now().to_string())?;
                 json!({"ok": true, "pairs": found.len()})
             }
             "stats" => self.stats(),

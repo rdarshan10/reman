@@ -25,10 +25,15 @@ impl Client {
 
     /// Connect, starting the daemon if needed (first start loads the model: ~1s).
     pub fn connect() -> Result<Self> {
+        Self::connect_with(&std::env::current_exe()?)
+    }
+
+    /// Like `connect`, but autostarts the daemon from a specific executable.
+    pub fn connect_with(exe: &std::path::Path) -> Result<Self> {
         if let Ok(c) = Self::connect_timeout(Duration::from_millis(300)) {
             return Ok(c);
         }
-        spawn_daemon()?;
+        spawn_daemon_exe(exe)?;
         let t = Instant::now();
         while t.elapsed() < Duration::from_secs(60) {
             std::thread::sleep(Duration::from_millis(150));
@@ -77,9 +82,37 @@ pub fn daemon_up() -> bool {
     TcpStream::connect_timeout(&addr(), Duration::from_millis(200)).is_ok()
 }
 
-/// Start `reman daemon` detached from this shell, with no console window.
+/// Windows hands EVERY inheritable handle to a child. If our stdout is a pipe someone is reading
+/// (a hook runner, `$(...)`, an MCP client, `Command::output()`), the long-lived daemon would keep
+/// that pipe open and the reader would wait for EOF forever. Make our std handles non-inheritable
+/// first (std re-duplicates any handle it passes explicitly, so this is safe).
+#[cfg(windows)]
+fn stop_std_handle_inheritance() {
+    use std::ffi::c_void;
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn GetStdHandle(n: u32) -> *mut c_void;
+        fn SetHandleInformation(h: *mut c_void, mask: u32, flags: u32) -> i32;
+    }
+    const HANDLE_FLAG_INHERIT: u32 = 1;
+    for n in [-10i32, -11, -12] {
+        unsafe {
+            let h = GetStdHandle(n as u32);
+            if !h.is_null() && h as isize != -1 {
+                SetHandleInformation(h, HANDLE_FLAG_INHERIT, 0);
+            }
+        }
+    }
+}
+
+/// Start `reman daemon` (from this executable) detached, with no console window.
 pub fn spawn_daemon() -> Result<()> {
-    let exe = std::env::current_exe()?;
+    spawn_daemon_exe(&std::env::current_exe()?)
+}
+
+pub fn spawn_daemon_exe(exe: &std::path::Path) -> Result<()> {
+    #[cfg(windows)]
+    stop_std_handle_inheritance();
     let mut cmd = std::process::Command::new(exe);
     cmd.arg("daemon").stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null());
     #[cfg(windows)]
