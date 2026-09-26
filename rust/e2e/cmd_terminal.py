@@ -1,8 +1,7 @@
-"""Drive a REAL Command Prompt (cmd.exe with Clink, which loads reman's integration from its profile
-folder) in ConPTY: capture with real %ERRORLEVEL%, the fix suggestion + Alt+F, text cmd can't
-quote, leading-space privacy, the finder on Up / Ctrl+R, and Tab completion for reman.
-Isolated: own port + a COPY of the db. Needs Clink + `reman setup` (writes reman.lua into
-Clink's profile folder)."""
+"""Drive a REAL Command Prompt (plain cmd.exe, no add-ons) in ConPTY. `reman setup` makes cmd load
+two DOSKEY macros at start (AutoRun): `h` opens the finder for this folder, `hh` for everywhere,
+and the pick is typed onto the next prompt - ready to edit, not run.
+Isolated: own port + a COPY of the db."""
 import os, sys, time, shutil, threading, json, socket, subprocess
 import winpty, pyte
 
@@ -24,8 +23,21 @@ for ext in ("", "-wal", "-shm"):
         pass
 shutil.copy(os.path.join(os.path.expanduser("~"), ".reman", "reman.db"), DB)
 subprocess.run([EXE, "ping"], env=ENV, capture_output=True, timeout=60)
+HOME = os.path.expanduser("~")
+ODD = 'echo 50% "quoted & piped | text" ^& done-cmdtest'
 
-KEY = {"enter": "\r", "up": "\x1b[A", "esc": "\x1b", "tab": "\t", "ctrl_r": "\x12", "alt_f": "\x1bf", "esc_line": "\x1b"}
+
+def daemon(req):
+    s = socket.create_connection(("127.0.0.1", int(PORT)), timeout=10)
+    s.sendall((json.dumps(req) + "\n").encode())
+    d = b""
+    while not d.endswith(b"\n"):
+        d += s.recv(1 << 20)
+    return json.loads(d)
+
+
+# a command full of characters cmd can't quote, run in the folder the test shell starts in
+daemon({"op": "ingest", "command": ODD, "exit": 0, "cwd": HOME, "session": "cmdtest", "actor": "human"})
 
 
 class Term:
@@ -33,7 +45,7 @@ class Term:
         self.screen = pyte.Screen(COLS, ROWS)
         self.stream = pyte.Stream(self.screen)
         self.lock = threading.Lock()
-        self.p = winpty.PtyProcess.spawn("cmd.exe", env=ENV, dimensions=(ROWS, COLS), cwd=os.path.expanduser("~"))
+        self.p = winpty.PtyProcess.spawn("cmd.exe", env=ENV, dimensions=(ROWS, COLS), cwd=HOME)
         threading.Thread(target=self._pump, daemon=True).start()
 
     def _pump(self):
@@ -62,7 +74,7 @@ class Term:
 
     def keys(self, *ks, gap=0.2):
         for k in ks:
-            self.p.write(KEY.get(k, k))
+            self.p.write({"enter": "\r", "esc": "\x1b"}.get(k, k))
             time.sleep(gap)
 
     def type(self, s):
@@ -70,14 +82,8 @@ class Term:
             self.p.write(ch)
             time.sleep(0.03)
 
-    def run(self, cmd, wait=1.5):
-        self.type(cmd)
-        self.keys("enter")
-        time.sleep(wait)
-
-    def prompt_line(self):
-        lines = [l for l in self.text().splitlines() if l.rstrip().startswith("C:\\") and ">" in l]
-        return lines[-1] if lines else ""
+    def prompt_lines(self):
+        return [l for l in self.text().splitlines() if l.startswith(HOME + ">")]
 
     def snap(self, title):
         print(f"\n----- {title} " + "-" * max(0, COLS - 8 - len(title)))
@@ -85,19 +91,6 @@ class Term:
         while body and not body[-1].strip():
             body.pop()
         print("\n".join(body[-ROWS:]))
-
-
-def daemon(req):
-    s = socket.create_connection(("127.0.0.1", int(PORT)), timeout=10)
-    s.sendall((json.dumps(req) + "\n").encode())
-    d = b""
-    while not d.endswith(b"\n"):
-        d += s.recv(1 << 20)
-    return json.loads(d)
-
-
-def status(cmd):
-    return daemon({"op": "detail", "command": cmd}).get("status")
 
 
 results = []
@@ -109,59 +102,71 @@ def check(name, ok):
 
 
 t = Term()
-check("cmd.exe started with Clink", t.wait(">", 20))
-time.sleep(2.5)
-
-t.run("gti status", 3)
-t.snap("after `gti status`")
-check("unknown command recorded as FAIL (errorlevel 9009)", status("gti status") == "fail")
-check("a fix suggestion is printed", "reman:" in t.text() and "git status" in t.text())
-t.keys("alt_f")
-time.sleep(0.6)
-check("Alt+F puts the fix on the command line", t.prompt_line().rstrip().endswith("git status"))
-t.keys("esc")
-time.sleep(0.3)
-
-t.run("dir nope-zz-cmd", 3)
-check("a failing builtin (dir of a missing path) recorded as FAIL", status("dir nope-zz-cmd") == "fail")
-t.run("if errorlevel 1 (echo el-kept) else (echo el-lost)", 2)
-check("`if errorlevel` still sees the previous command's result", "el-kept" in t.text())
-odd = 'echo 50% "quoted & piped | text" ^& done'
-t.run(odd, 3)
-check("a success is recorded (through the spool) with its text intact", status(odd) == "ok")
-t.run(" echo secret-cmd-space", 2.5)
-check("a leading-space command is not recorded", not daemon({"op": "detail", "command": "echo secret-cmd-space"}).get("found"))
-d = daemon({"op": "detail", "command": odd})
-check("the folder is recorded", (d.get("cwd") or "").lower() == os.path.expanduser("~").lower())
-
-t.keys("up")
-check("Up opens the finder scoped to this folder", t.wait("in this folder ←→", 15))
+check("cmd.exe started", t.wait(HOME + ">", 20))
 time.sleep(1.0)
-t.snap("Up: the finder")
-t.keys("esc")
+check("no startup error from AutoRun", "is not recognized" not in t.text())
+t.type("doskey /macros")
+t.keys("enter")
+time.sleep(1.5)
+check("the h / hh macros are loaded", "h=" in t.text() and "hh=" in t.text())
+t.type("cls")
+t.keys("enter")
 time.sleep(1.0)
-t.keys("ctrl_r")
-check("Ctrl+R opens the finder over all folders", t.wait("everywhere ←→", 15))
-t.type("git status")
+
+# h -> finder for this folder; the pick lands on the prompt, not run
+t.type("h")
+t.keys("enter")
+check("`h` opens the finder scoped to this folder", t.wait("in this folder ←→", 15))
+time.sleep(1.0)
+t.type("50%")
+time.sleep(1.5)
+t.snap("h, then typed 50%")
+t.keys("enter")
+time.sleep(1.5)
+# (the emulator here has no alternate screen, so check by behaviour, not by where text is drawn)
+OUT = '50% "quoted & piped | text" & done-cmdtest'   # what that echo prints: ^& becomes &
+check("the pick waits on the prompt - not run yet", OUT not in t.text())
+t.keys("enter")
+time.sleep(1.5)
+t.snap("after pressing Enter on the typed pick")
+check("Enter runs exactly the picked text (quotes, &, |, %, ^ intact)", OUT in t.text())
+t.type("cls")
+t.keys("enter")
+time.sleep(1.0)
+t.type("h")
+t.keys("enter")
+t.wait("in this folder ←→", 15)
+time.sleep(1.0)
+t.type("50%")
 time.sleep(1.5)
 t.keys("enter")
-time.sleep(1.2)
-check("Enter puts the pick on the command line", "git" in t.prompt_line().split(">", 1)[-1])
+time.sleep(1.5)
 t.keys("esc")
-time.sleep(0.3)
+time.sleep(0.4)
+t.type("echo esc-cleared")
+t.keys("enter")
+time.sleep(1.5)
+t.snap("after Esc + echo esc-cleared")
+# output lines can land on leftover finder rows here, so match where a line starts
+check("Esc clears the typed pick like any typed text",
+      any(l.startswith("esc-cleared") for l in t.text().splitlines()) and "done-cmdtestecho" not in t.text() and OUT not in t.text())
+t.type("cls")
+t.keys("enter")
+time.sleep(1.0)
 
-t.type("reman con")
-t.keys("tab")
-time.sleep(2.5)
-check("Tab completes reman's own commands (reman con -> reman connect)", "reman connect" in t.prompt_line())
+# hh <words> -> finder everywhere, seeded with the words
+t.type("hh docker compose")
+t.keys("enter")
+check("`hh` opens the finder over all folders", t.wait("everywhere ←→", 15))
+time.sleep(1.0)
+check("words after hh seed the query", "› docker compose" in t.text())
 t.keys("esc")
-time.sleep(0.3)
-t.type("reman init c")
-t.keys("tab")
-time.sleep(2.5)
-t.snap("reman init c + Tab")
-check("Tab completes values too (reman init c -> cmd)", "reman init cmd" in t.prompt_line())
-t.keys("esc")
+time.sleep(1.2)
+t.type("echo nothing-typed")
+t.keys("enter")
+time.sleep(1.5)
+t.snap("after finder Esc + echo nothing-typed")
+check("Esc in the finder types nothing", any(l.startswith("nothing-typed") for l in t.text().splitlines()))
 
 t.type("exit")
 t.keys("enter")

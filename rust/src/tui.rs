@@ -138,6 +138,8 @@ pub struct Opts {
     pub scope: String,
     pub cwd: String,
     pub result_file: Option<String>,
+    /// type the pick onto the shell's next prompt (Command Prompt's `h` macro): ready to edit, not run
+    pub to_prompt: bool,
 }
 
 fn item_of(x: &Value) -> Item {
@@ -1245,10 +1247,32 @@ impl Drop for Utf8Console {
 
 #[cfg(windows)]
 mod win {
+    pub const KEY_EVENT: u16 = 1;
+
+    /// KEY_EVENT_RECORD (16 bytes)
+    #[repr(C)]
+    pub struct KeyEvent {
+        pub key_down: i32,
+        pub repeat: u16,
+        pub vk: u16,
+        pub scan: u16,
+        pub ch: u16,
+        pub ctrl: u32,
+    }
+
+    /// INPUT_RECORD holding a key event (20 bytes)
+    #[repr(C)]
+    pub struct InputRecord {
+        pub event_type: u16,
+        pub _pad: u16,
+        pub key: KeyEvent,
+    }
+
     #[link(name = "kernel32")]
     unsafe extern "system" {
         pub fn GetConsoleOutputCP() -> u32;
         pub fn SetConsoleOutputCP(cp: u32) -> i32;
+        pub fn WriteConsoleInputW(input: *mut core::ffi::c_void, buf: *const InputRecord, len: u32, written: *mut u32) -> i32;
     }
 }
 
@@ -1317,9 +1341,42 @@ pub fn run(o: Opts) -> Result<()> {
     if let Some(c) = chosen {
         match o.result_file {
             Some(p) => std::fs::write(p, c)?,
+            None if o.to_prompt => type_ahead(&c)?,
             None => println!("{c}"),
         }
     }
+    Ok(())
+}
+
+/// Queue `text` as typed keys in this console's input buffer, so the shell's next prompt starts
+/// with it - ready to edit, not run (Command Prompt reads it like anything you type ahead).
+/// Newlines would run a multi-line command early, so they become spaces.
+#[cfg(windows)]
+fn type_ahead(text: &str) -> Result<()> {
+    use std::os::windows::io::AsRawHandle;
+    let con = std::fs::OpenOptions::new().read(true).write(true).open("CONIN$")?;
+    let units: Vec<u16> = text.replace(['\r', '\n'], " ").encode_utf16().collect();
+    let mut recs: Vec<win::InputRecord> = Vec::with_capacity(units.len() * 2);
+    for ch in units {
+        for down in [1, 0] {
+            recs.push(win::InputRecord {
+                event_type: win::KEY_EVENT,
+                _pad: 0,
+                key: win::KeyEvent { key_down: down, repeat: 1, vk: 0, scan: 0, ch, ctrl: 0 },
+            });
+        }
+    }
+    let mut written = 0u32;
+    let ok = unsafe { win::WriteConsoleInputW(con.as_raw_handle(), recs.as_ptr(), recs.len() as u32, &mut written) };
+    if ok == 0 {
+        anyhow::bail!("could not type the pick onto the prompt: {}", std::io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+#[cfg(not(windows))]
+fn type_ahead(text: &str) -> Result<()> {
+    println!("{text}");
     Ok(())
 }
 

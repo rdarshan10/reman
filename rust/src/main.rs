@@ -66,6 +66,11 @@ enum Cmd {
         cwd: Option<String>,
         #[arg(long)]
         result_file: Option<String>,
+        /// type the pick onto the shell's next prompt instead of printing it (Command Prompt's `h`)
+        #[arg(long)]
+        to_prompt: bool,
+        /// starting query, e.g. `reman find docker`
+        words: Vec<String>,
     },
     /// Did-you-mean for a failed command (proven fixes first)
     Fixes { failed: Vec<String> },
@@ -282,9 +287,15 @@ fn real_main() -> Result<()> {
             eprintln!("\n\x1b[90m{} result(s), mode={}, {:.1} ms\x1b[0m", rows.len(), r["mode"].as_str().unwrap_or(""), t.elapsed().as_secs_f64() * 1000.0);
             Ok(())
         }
-        Cmd::Find { query, scope, cwd: c, result_file } => {
-            let query = if query.is_empty() { std::env::var("REMAN_FIND_QUERY").unwrap_or_default() } else { query };
-            tui::run(tui::Opts { query, scope, cwd: c.unwrap_or_else(cwd), result_file })
+        Cmd::Find { query, scope, cwd: c, result_file, to_prompt, words } => {
+            let query = if !query.is_empty() {
+                query
+            } else if !words.is_empty() {
+                words.join(" ")
+            } else {
+                std::env::var("REMAN_FIND_QUERY").unwrap_or_default()
+            };
+            tui::run(tui::Opts { query, scope, cwd: c.unwrap_or_else(cwd), result_file, to_prompt })
         }
         Cmd::Fixes { failed } => {
             let r = client::call(&json!({"op": "didyoumean", "query": failed.join(" "), "k": 5, "worked_only": true}))?;
@@ -793,6 +804,48 @@ fn clink_profile_dir() -> Option<PathBuf> {
         .or_else(|| dirs::data_local_dir().map(|d| d.join("clink")))
 }
 
+/// Command Prompt without add-ons: DOSKEY macros `h` / `hh` open the finder and type the pick
+/// onto the next prompt. cmd loads them at start through its AutoRun setting; whatever AutoRun
+/// already ran keeps running (ours is appended, once).
+fn wire_cmd_macros(exe: &Path) -> Result<PathBuf> {
+    let file = config::home().join("cmd-macros.txt");
+    std::fs::create_dir_all(config::home())?;
+    let e = exe.display();
+    std::fs::write(
+        &file,
+        format!("h=\"{e}\" find --scope folder --to-prompt $*\r\nhh=\"{e}\" find --scope all --to-prompt $*\r\n"),
+    )?;
+    let key = r"HKCU\Software\Microsoft\Command Processor";
+    let ours = format!("doskey /macrofile=\"{}\"", file.display());
+    let cur = std::process::Command::new("reg").args(["query", key, "/v", "AutoRun"]).output().ok();
+    let cur = cur
+        .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
+        .and_then(|s| s.lines().find_map(|l| l.split_once("REG_SZ").or_else(|| l.split_once("REG_EXPAND_SZ")).map(|(_, v)| v.trim().to_string())))
+        .unwrap_or_default();
+    // keep the other AutoRun commands, minus any whose program is gone (an uninstalled Clink
+    // leaves `"...\clink.bat" inject` behind, and cmd would print an error at every start)
+    let mut parts: Vec<String> = cur
+        .split(" & ")
+        .map(str::trim)
+        .filter(|p| !p.is_empty() && !p.contains("cmd-macros.txt"))
+        .filter(|p| match p.strip_prefix('"').and_then(|r| r.split_once('"')) {
+            Some((prog, _)) if prog.contains('\\') => Path::new(prog).exists(),
+            _ => true,
+        })
+        .map(String::from)
+        .collect();
+    if cur.contains("cmd-macros.txt") && parts.join(" & ") == cur.split(" & ").map(str::trim).filter(|p| !p.contains("cmd-macros.txt")).collect::<Vec<_>>().join(" & ") {
+        return Ok(file);
+    }
+    parts.push(ours);
+    let value = parts.join(" & ");
+    let st = std::process::Command::new("reg").args(["add", key, "/v", "AutoRun", "/t", "REG_SZ", "/d", &value, "/f"]).output()?;
+    if !st.status.success() {
+        bail!("reg add failed: {}", String::from_utf8_lossy(&st.stderr).trim());
+    }
+    Ok(file)
+}
+
 /// The file in Clink's profile folder: it runs `reman init cmd` at each cmd start, so every new
 /// Command Prompt gets the integration of the reman that's installed now.
 fn clink_loader(exe: &Path) -> String {
@@ -896,7 +949,10 @@ fn setup(no_profile: bool) -> Result<()> {
                 std::fs::write(&f, clink_loader(&installed))?;
                 println!("  cmd (clink)     : WIRED {} -> open a new Command Prompt", f.display());
             }
-            None => println!("  cmd             : install Clink for Command Prompt support (winget install chrisant996.Clink), then rerun setup"),
+            None => match wire_cmd_macros(&installed) {
+                Ok(f) => println!("  cmd             : WIRED `h` (this folder) / `hh` (everywhere) via {} -> open a new Command Prompt", f.display()),
+                Err(e) => println!("  cmd             : could not set up the `h` macro: {e:#}"),
+            },
         }
     }
     if !cfg!(windows) {

@@ -22,18 +22,27 @@ cargo build --release
 
 For bash, zsh and fish, add this to your rc file instead: `eval "$(reman init zsh)"` (or `reman init fish | source`).
 
-**Command Prompt (cmd.exe)** needs [Clink](https://chrisant996.github.io/clink/). cmd.exe alone has no hook that runs after each command and no key bindings, and Clink adds both.
-1. Install Clink: `winget install chrisant996.Clink`.
-2. Run `reman setup`. It writes a small `reman.lua` into Clink's profile folder, which loads `reman init cmd` in every new Command Prompt. Delete that file to turn reman off in cmd.
+**Command Prompt (cmd.exe)** works without add-ons, through two short commands:
 
-How it behaves:
-- **Recording:** every command is recorded with its real `%ERRORLEVEL%`. cmd's built-ins (`echo`, `cls`, …) never reset `%ERRORLEVEL%`, so reman prefixes each line with `(call )` to reset it first. Lines that mention `errorlevel` themselves (`if errorlevel 1 …`) are left exactly as typed.
-- **Speed:** a successful command costs nothing extra; it's appended to the spool file. Only a failure runs `reman-hook`, which prints the fix suggestion.
-- **Text:** commands travel to reman through environment variables, so quotes, `&`, `|`, `%` and `^` arrive intact.
+| type | what happens |
+|---|---|
+| `h` | the finder, for this folder. `h docker` starts it with "docker" already typed |
+| `hh` | the finder, for all folders |
+
+The command you pick is typed onto your next prompt, ready to edit or run with Enter; nothing runs by itself. `reman setup` defines `h` and `hh` as DOSKEY macros (`~/.reman/cmd-macros.txt`) and has cmd load them at startup through its AutoRun setting. Anything else already in AutoRun keeps running.
+
+That's all plain cmd.exe allows. It has no hook that runs after a command and no way to bind keys, so in Command Prompt:
+- commands aren't recorded automatically;
+- there are no exit codes or fix suggestions;
+- ↑ stays cmd's own history.
+
+Your recorded history from the other shells is all there in `h`.
+
+**If you use [Clink](https://chrisant996.github.io/clink/)**, `reman setup` wires reman into it instead (`reman init cmd`). That gives Command Prompt everything the other shells have: recording with the real `%ERRORLEVEL%`, fix suggestions, ↑ / Ctrl+R / Alt+F, and Tab completion.
 
 ## Keys
 
-These keys work in PowerShell, bash, zsh, fish and Command Prompt (through Clink).
+These keys work in PowerShell, bash, zsh and fish (and in Command Prompt with Clink; plain Command Prompt uses `h` / `hh`, above).
 
 | key | action |
 |---|---|
