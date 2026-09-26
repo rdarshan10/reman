@@ -41,10 +41,12 @@ fn main() {
                     _ => rest.push(x),
                 }
             }
-            if rest.is_empty() {
+            // cmd.exe can't pass a command line through intact (quotes, & | % ^), so the Clink
+            // integration hands it over in an environment variable instead
+            a.command = if rest.is_empty() { std::env::var("REMAN_RECORD_CMD").unwrap_or_default() } else { rest.join(" ") };
+            if a.command.trim().is_empty() {
                 usage();
             }
-            a.command = rest.join(" ");
             capture::record(a)
         }
         _ => usage(),

@@ -22,9 +22,18 @@ cargo build --release
 
 For bash, zsh and fish, add this to your rc file instead: `eval "$(reman init zsh)"` (or `reman init fish | source`).
 
+**Command Prompt (cmd.exe)** needs [Clink](https://chrisant996.github.io/clink/). cmd.exe alone has no hook that runs after each command and no key bindings, and Clink adds both.
+1. Install Clink: `winget install chrisant996.Clink`.
+2. Run `reman setup`. It writes a small `reman.lua` into Clink's profile folder, which loads `reman init cmd` in every new Command Prompt. Delete that file to turn reman off in cmd.
+
+How it behaves:
+- **Recording:** every command is recorded with its real `%ERRORLEVEL%`. cmd's built-ins (`echo`, `cls`, …) never reset `%ERRORLEVEL%`, so reman prefixes each line with `(call )` to reset it first. Lines that mention `errorlevel` themselves (`if errorlevel 1 …`) are left exactly as typed.
+- **Speed:** a successful command costs nothing extra; it's appended to the spool file. Only a failure runs `reman-hook`, which prints the fix suggestion.
+- **Text:** commands travel to reman through environment variables, so quotes, `&`, `|`, `%` and `^` arrive intact.
+
 ## Keys
 
-These keys work in PowerShell, bash, zsh and fish.
+These keys work in PowerShell, bash, zsh, fish and Command Prompt (through Clink).
 
 | key | action |
 |---|---|
@@ -118,6 +127,7 @@ This is the cost per command, measured in real terminals by `e2e/posix_shells_te
 | bash | `/dev/tcp`, fork-free (builtins only) | ~5 ms |
 | zsh | `zsh/net/tcp` | ~2 ms |
 | fish | append to the spool file with builtins; the daemon drains it every 1 s | ~4 ms |
+| Command Prompt (Clink) | Lua appends successes to the spool; failures go through `reman-hook` for the fix suggestion | no process spawn on success |
 | Claude Code hook / fish failures | `reman-hook` (1.9 MB, no ONNX Runtime) | ~Windows process-spawn floor |
 
 ## Agents: plug and play

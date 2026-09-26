@@ -119,7 +119,10 @@ fn option_values(sub: &Command, name: &str, opt: &str, cur: &str) -> Vec<Cand> {
 fn positional_values(name: &str, pos: usize, cur: &str) -> Vec<Cand> {
     match (name, pos) {
         ("connect", _) | ("disconnect", _) => agents(name == "disconnect"),
-        ("init", 0) => ["powershell", "bash", "zsh", "fish"].iter().map(|s| cand(*s, "print the shell integration")).collect(),
+        ("init", 0) => [("powershell", "PowerShell"), ("bash", "bash"), ("zsh", "zsh"), ("fish", "fish"), ("cmd", "Command Prompt (through Clink)")]
+            .iter()
+            .map(|(s, h)| cand(*s, format!("print the {h} integration")))
+            .collect(),
         ("import", 0) => [("atuin", "Atuin's history.db"), ("psreadline", "PowerShell history"), ("bash", "~/.bash_history"), ("zsh", "~/.zsh_history"), ("fish", "fish history")]
             .iter()
             .map(|(s, h)| cand(*s, *h))

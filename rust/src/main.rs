@@ -99,7 +99,7 @@ enum Cmd {
         /// also print the bare fix command on stdout
         #[arg(long)]
         print_fix: bool,
-        #[arg(last = true, required = true)]
+        #[arg(last = true)]
         command: Vec<String>,
     },
     /// Agent hooks (stdin payload). Currently: claude
@@ -110,7 +110,7 @@ enum Cmd {
         #[arg(long)]
         path: Option<String>,
     },
-    /// Print shell integration: powershell | bash | zsh | fish
+    /// Print shell integration: powershell | bash | zsh | fish | cmd (via Clink)
     Init { shell: String },
     /// Install the binary, import Atuin once, wire your shell profile
     Setup {
@@ -321,7 +321,12 @@ fn real_main() -> Result<()> {
             Ok(())
         }
         Cmd::Record { exit, cwd: c, session, actor, duration_ms, suggest, print_fix, command } => {
-            capture::record(capture::RecordArgs { command: command.join(" "), exit, cwd: c, session, actor, duration_ms, suggest, print_fix })
+            // cmd.exe (Clink) passes the command in the environment: its quoting can't carry it intact
+            let command = if command.is_empty() { std::env::var("REMAN_RECORD_CMD").unwrap_or_default() } else { command.join(" ") };
+            if command.trim().is_empty() {
+                bail!("nothing to record: pass the command after `--`");
+            }
+            capture::record(capture::RecordArgs { command, exit, cwd: c, session, actor, duration_ms, suggest, print_fix })
         }
         Cmd::Hook { agent } => match agent.as_str() {
             "claude" | "claude-code" => capture::hook_claude(),
@@ -425,6 +430,9 @@ fn real_main() -> Result<()> {
         }
         Cmd::Complete { cur, line, words } => {
             use clap::CommandFactory;
+            // Clink (cmd.exe) hands the line over in the environment, like `record`
+            let line = line.or_else(|| std::env::var("REMAN_COMPLETE_LINE").ok());
+            let cur = if cur.is_empty() { std::env::var("REMAN_COMPLETE_CUR").unwrap_or_default() } else { cur };
             let words = line.map(|l| complete::split_line(&l)).unwrap_or(words);
             complete::print(&Cli::command(), &words, &cur);
             Ok(())
@@ -447,11 +455,12 @@ fn init_script(shell: &str, exe: &Path) -> Result<String> {
         "bash" => include_str!("init/reman.bash"),
         "zsh" => include_str!("init/reman.zsh"),
         "fish" => include_str!("init/reman.fish"),
-        other => bail!("unknown shell {other:?} (powershell|bash|zsh|fish)"),
+        "cmd" | "clink" => include_str!("init/reman.lua"),
+        other => bail!("unknown shell {other:?} (powershell|bash|zsh|fish|cmd)"),
     };
     let fix = |p: &Path| {
         let s = p.to_string_lossy().into_owned();
-        if shell == "powershell" || shell == "pwsh" { s } else { s.replace('\\', "/") }
+        if matches!(shell, "powershell" | "pwsh" | "cmd" | "clink") { s } else { s.replace('\\', "/") }
     };
     Ok(tpl
         .replace("__REMAN__", &fix(exe))
@@ -764,6 +773,39 @@ fn rewire_profile(text: &str, exe: &Path) -> String {
     out.join(nl) + nl
 }
 
+/// Clink's profile folder (it loads every .lua there), as Clink itself reports it (`clink info`,
+/// "state"): its `~` means %LOCALAPPDATA%, not the home folder, so don't guess. None when Clink
+/// isn't hooked into cmd.exe.
+fn clink_profile_dir() -> Option<PathBuf> {
+    let out = std::process::Command::new("reg").args(["query", r"HKCU\Software\Microsoft\Command Processor", "/v", "AutoRun"]).output().ok()?;
+    let autorun = String::from_utf8_lossy(&out.stdout).to_string();
+    if !autorun.to_lowercase().contains("clink") {
+        return None;
+    }
+    // the AutoRun value starts with the quoted path of clink.bat
+    let bat = autorun.split('"').nth(1).filter(|p| p.to_lowercase().ends_with("clink.bat"))?.to_string();
+    let info = std::process::Command::new("cmd").args(["/d", "/c", "call", &bat, "info"]).output().ok()?;
+    String::from_utf8_lossy(&info.stdout)
+        .lines()
+        .find_map(|l| l.trim().strip_prefix("state").map(|r| r.trim_start().trim_start_matches(':').trim().to_string()))
+        .filter(|p| !p.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| dirs::data_local_dir().map(|d| d.join("clink")))
+}
+
+/// The file in Clink's profile folder: it runs `reman init cmd` at each cmd start, so every new
+/// Command Prompt gets the integration of the reman that's installed now.
+fn clink_loader(exe: &Path) -> String {
+    format!(
+        "-- reman (managed by `reman setup`): loads reman's Command Prompt integration.\n\
+         -- Delete this file to turn reman off in cmd.exe.\n\
+         local exe = [[{}]]\n\
+         local h = io.popen('\"\"' .. exe .. '\" init cmd 2>nul\"')\n\
+         if h then\n    local src = h:read(\"*a\")\n    h:close()\n    local f = load(src, \"reman-init\")\n    if f then f() end\nend\n",
+        exe.display()
+    )
+}
+
 fn setup(no_profile: bool) -> Result<()> {
     println!("reman setup\n{}", "=".repeat(46));
     // 1. install a stable copy (a running daemon locks its exe on Windows; builds must not fight it)
@@ -843,6 +885,18 @@ fn setup(no_profile: bool) -> Result<()> {
             }
             std::fs::write(&p, new)?;
             println!("  profile         : WIRED {} (backup .reman-bak; atuin hook removed) -> open a new shell", p.display());
+        }
+    }
+    // 5. Command Prompt, through Clink (cmd.exe itself has no per-command hook or key bindings)
+    if !no_profile && cfg!(windows) {
+        match clink_profile_dir() {
+            Some(dir) => {
+                let f = dir.join("reman.lua");
+                std::fs::create_dir_all(&dir)?;
+                std::fs::write(&f, clink_loader(&installed))?;
+                println!("  cmd (clink)     : WIRED {} -> open a new Command Prompt", f.display());
+            }
+            None => println!("  cmd             : install Clink for Command Prompt support (winget install chrisant996.Clink), then rerun setup"),
         }
     }
     if !cfg!(windows) {
