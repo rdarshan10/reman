@@ -66,7 +66,7 @@ enum Cmd {
         cwd: Option<String>,
         #[arg(long)]
         result_file: Option<String>,
-        /// type the pick onto the shell's next prompt instead of printing it (Command Prompt's `h`)
+        /// type the pick onto the shell's next prompt instead of printing it (Command Prompt's `r`)
         #[arg(long)]
         to_prompt: bool,
         /// starting query, e.g. `reman find docker`
@@ -804,7 +804,7 @@ fn clink_profile_dir() -> Option<PathBuf> {
         .or_else(|| dirs::data_local_dir().map(|d| d.join("clink")))
 }
 
-/// Command Prompt without add-ons: DOSKEY macros `h` / `hh` open the finder and type the pick
+/// Command Prompt without add-ons: DOSKEY macros `r` / `rr` open the finder and type the pick
 /// onto the next prompt. cmd loads them at start through its AutoRun setting; whatever AutoRun
 /// already ran keeps running (ours is appended, once).
 fn wire_cmd_macros(exe: &Path) -> Result<PathBuf> {
@@ -813,7 +813,7 @@ fn wire_cmd_macros(exe: &Path) -> Result<PathBuf> {
     let e = exe.display();
     std::fs::write(
         &file,
-        format!("h=\"{e}\" find --scope folder --to-prompt $*\r\nhh=\"{e}\" find --scope all --to-prompt $*\r\n"),
+        format!("r=\"{e}\" find --scope folder --to-prompt $*\r\nrr=\"{e}\" find --scope all --to-prompt $*\r\n"),
     )?;
     let key = r"HKCU\Software\Microsoft\Command Processor";
     let ours = format!("doskey /macrofile=\"{}\"", file.display());
@@ -950,8 +950,8 @@ fn setup(no_profile: bool) -> Result<()> {
                 println!("  cmd (clink)     : WIRED {} -> open a new Command Prompt", f.display());
             }
             None => match wire_cmd_macros(&installed) {
-                Ok(f) => println!("  cmd             : WIRED `h` (this folder) / `hh` (everywhere) via {} -> open a new Command Prompt", f.display()),
-                Err(e) => println!("  cmd             : could not set up the `h` macro: {e:#}"),
+                Ok(f) => println!("  cmd             : WIRED `r` (this folder) / `rr` (everywhere) via {} -> open a new Command Prompt", f.display()),
+                Err(e) => println!("  cmd             : could not set up the `r` macro: {e:#}"),
             },
         }
     }

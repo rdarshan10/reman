@@ -1,5 +1,5 @@
 """Drive a REAL Command Prompt (plain cmd.exe, no add-ons) in ConPTY. `reman setup` makes cmd load
-two DOSKEY macros at start (AutoRun): `h` opens the finder for this folder, `hh` for everywhere,
+two DOSKEY macros at start (AutoRun): `r` opens the finder for this folder, `rr` for everywhere,
 and the pick is typed onto the next prompt - ready to edit, not run.
 Isolated: own port + a COPY of the db."""
 import os, sys, time, shutil, threading, json, socket, subprocess
@@ -108,19 +108,19 @@ check("no startup error from AutoRun", "is not recognized" not in t.text())
 t.type("doskey /macros")
 t.keys("enter")
 time.sleep(1.5)
-check("the h / hh macros are loaded", "h=" in t.text() and "hh=" in t.text())
+check("the r / rr macros are loaded", "r=" in t.text() and "rr=" in t.text())
 t.type("cls")
 t.keys("enter")
 time.sleep(1.0)
 
 # h -> finder for this folder; the pick lands on the prompt, not run
-t.type("h")
+t.type("r")
 t.keys("enter")
-check("`h` opens the finder scoped to this folder", t.wait("in this folder ←→", 15))
+check("`r` opens the finder scoped to this folder", t.wait("in this folder ←→", 15))
 time.sleep(1.0)
 t.type("50%")
 time.sleep(1.5)
-t.snap("h, then typed 50%")
+t.snap("r, then typed 50%")
 t.keys("enter")
 time.sleep(1.5)
 # (the emulator here has no alternate screen, so check by behaviour, not by where text is drawn)
@@ -133,7 +133,7 @@ check("Enter runs exactly the picked text (quotes, &, |, %, ^ intact)", OUT in t
 t.type("cls")
 t.keys("enter")
 time.sleep(1.0)
-t.type("h")
+t.type("r")
 t.keys("enter")
 t.wait("in this folder ←→", 15)
 time.sleep(1.0)
@@ -154,12 +154,12 @@ t.type("cls")
 t.keys("enter")
 time.sleep(1.0)
 
-# hh <words> -> finder everywhere, seeded with the words
-t.type("hh docker compose")
+# rr <words> -> finder everywhere, seeded with the words
+t.type("rr docker compose")
 t.keys("enter")
-check("`hh` opens the finder over all folders", t.wait("everywhere ←→", 15))
+check("`rr` opens the finder over all folders", t.wait("everywhere ←→", 15))
 time.sleep(1.0)
-check("words after hh seed the query", "› docker compose" in t.text())
+check("words after rr seed the query", "› docker compose" in t.text())
 t.keys("esc")
 time.sleep(1.2)
 t.type("echo nothing-typed")

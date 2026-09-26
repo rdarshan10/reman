@@ -26,23 +26,23 @@ For bash, zsh and fish, add this to your rc file instead: `eval "$(reman init zs
 
 | type | what happens |
 |---|---|
-| `h` | the finder, for this folder. `h docker` starts it with "docker" already typed |
-| `hh` | the finder, for all folders |
+| `r` | the finder, for this folder. `r docker` starts it with "docker" already typed |
+| `rr` | the finder, for all folders |
 
-The command you pick is typed onto your next prompt, ready to edit or run with Enter; nothing runs by itself. `reman setup` defines `h` and `hh` as DOSKEY macros (`~/.reman/cmd-macros.txt`) and has cmd load them at startup through its AutoRun setting. Anything else already in AutoRun keeps running.
+The command you pick is typed onto your next prompt, ready to edit or run with Enter; nothing runs by itself. `reman setup` defines `r` and `rr` as DOSKEY macros (`~/.reman/cmd-macros.txt`) and has cmd load them at startup through its AutoRun setting. Anything else already in AutoRun keeps running.
 
 That's all plain cmd.exe allows. It has no hook that runs after a command and no way to bind keys, so in Command Prompt:
 - commands aren't recorded automatically;
 - there are no exit codes or fix suggestions;
 - ↑ stays cmd's own history.
 
-Your recorded history from the other shells is all there in `h`.
+Your recorded history from the other shells is all there in `r`.
 
 **If you use [Clink](https://chrisant996.github.io/clink/)**, `reman setup` wires reman into it instead (`reman init cmd`). That gives Command Prompt everything the other shells have: recording with the real `%ERRORLEVEL%`, fix suggestions, ↑ / Ctrl+R / Alt+F, and Tab completion.
 
 ## Keys
 
-These keys work in PowerShell, bash, zsh and fish (and in Command Prompt with Clink; plain Command Prompt uses `h` / `hh`, above).
+These keys work in PowerShell, bash, zsh and fish (and in Command Prompt with Clink; plain Command Prompt uses `r` / `rr`, above).
 
 | key | action |
 |---|---|

@@ -5,7 +5,7 @@ The terminal suites run on an isolated daemon (port 8768) against a *copy* of `~
 
 | suite | what it drives | needs |
 |---|---|---|
-| `cmd_terminal.py` | a real, plain Command Prompt (no add-ons). It checks that the `h` / `hh` macros load from AutoRun without errors, that the pick is typed onto the prompt and not run, that Enter runs it with quotes, `&`, `|`, `%` and `^` intact, and that Esc clears it | `reman setup` |
+| `cmd_terminal.py` | a real, plain Command Prompt (no add-ons). It checks that the `r` / `rr` macros load from AutoRun without errors, that the pick is typed onto the prompt and not run, that Enter runs it with quotes, `&`, `|`, `%` and `^` intact, and that Esc clears it | `reman setup` |
 | `cmd_clink_terminal.py` | a real Command Prompt with Clink. It checks capture with the real `%ERRORLEVEL%`, that `if errorlevel` still works, text cmd can't quote, the fix suggestion and Alt+F, the finder on ↑ and Ctrl+R, and Tab completion for reman | Clink, plus `reman setup` |
 | `powershell_wrappers.py` | exit-code capture when something wraps the prompt after reman: a Python venv's `Activate.ps1` (and `deactivate`), VS Code's shell integration. Also checks that open shells reload reman after an update | the above, plus a venv at `<repo>/.venv` |
 | `powershell_terminal.py` | a real interactive Windows PowerShell in ConPTY that loads your profile. It presses the actual keys (UpArrow, Ctrl+R, Tab, Alt+F, Del, F2, Ctrl+T) and reads the screen through a VT emulator | `pip install pywinpty pyte` |
