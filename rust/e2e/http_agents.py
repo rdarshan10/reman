@@ -5,6 +5,7 @@ sys.stdout.reconfigure(encoding="utf-8")
 cfg = json.load(open(os.path.join(os.path.expanduser("~"), ".reman", "config.json"), encoding="utf-8"))
 TOKEN, PORT = cfg["http"]["token"], cfg["http"]["port"]
 BASE = f"http://127.0.0.1:{PORT}"
+REPO = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."))
 results = []
 
 
@@ -35,7 +36,7 @@ check("folder outside the shared roots -> nothing", st == 200 and out == [], out
 
 print("== plain function calling (REST)")
 st, oa = http("GET", "/tools?format=openai", headers=AUTH)
-check("OpenAI function schemas", st == 200 and len(oa) == 7 and oa[0]["type"] == "function" and "parameters" in oa[0]["function"])
+check("OpenAI function schemas", st == 200 and len(oa) == 8 and oa[0]["type"] == "function" and "parameters" in oa[0]["function"])
 st, an = http("GET", "/tools?format=anthropic", headers=AUTH)
 check("Anthropic tool schemas", st == 200 and "input_schema" in an[0])
 st, res = http("POST", "/tools/reman_search", {"intent": "run database migrations", "worked_only": False, "k": 3}, AUTH)
@@ -57,7 +58,7 @@ async def mcp_sdk():
         async with ClientSession(read, write) as s:
             await s.initialize()
             names = [t.name for t in (await s.list_tools()).tools]
-            check("MCP SDK connects + lists the 7 reman tools", len(names) == 7 and "reman_search" in names, names)
+            check("MCP SDK connects + lists the 8 reman tools", len(names) == 8 and "reman_search" in names, names)
             r = await s.call_tool("reman_check", {"command": "git status"})
             text = r.content[0].text
             check("MCP SDK tool call (reman_check) returns a verdict", '"verdict"' in text, text[:200])
@@ -74,8 +75,8 @@ async def agents_sdk():
     server = MCPServerStreamableHttp(params={"url": f"{BASE}/mcp", "headers": AUTH}, name="reman", client_session_timeout_seconds=20)
     async with server:
         names = [t.name for t in await server.list_tools()]
-        check("Agents SDK connects + lists the 7 reman tools", len(names) == 7, names)
-        r = await server.call_tool("reman_next", {"cwd": r"C:\Users\rdars\reman"})
+        check("Agents SDK connects + lists the 8 reman tools", len(names) == 8, names)
+        r = await server.call_tool("reman_next", {"cwd": REPO})
         err = getattr(r, "is_error", None)
         err = getattr(r, "isError", False) if err is None else err
         check("Agents SDK tool call (reman_next) works", bool(r.content) and not err, r)

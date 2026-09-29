@@ -206,7 +206,9 @@ pub fn connect(id: &str, exe: &Path, hook: &Path) -> Result<String> {
             }
             backup(&p)?;
             std::fs::write(&p, new)?;
-            Ok(format!("[mcp_servers.reman] in {}", p.display()))
+            let hooks = codex_hooks_path().context("no Codex folder")?;
+            set_hooks(&hooks, Some(hook), "codex", "Bash|shell|local_shell")?;
+            Ok(format!("[mcp_servers.reman] in {} + capture hooks in {} (approve them once in Codex: /hooks)", p.display(), hooks.display()))
         }
         _ => {
             let mut m = load_json(&p)?;
@@ -243,7 +245,10 @@ pub fn disconnect(id: &str) -> Result<String> {
                 backup(&p)?;
                 std::fs::write(&p, toml_without_reman(&t) + "\n")?;
             }
-            Ok(format!("removed from {}", p.display()))
+            if let Some(hooks) = codex_hooks_path().filter(|h| h.exists()) {
+                set_hooks(&hooks, None, "codex", "")?;
+            }
+            Ok(format!("removed from {} and its capture hooks", p.display()))
         }
         _ => {
             if p.exists() {
@@ -260,11 +265,22 @@ pub fn disconnect(id: &str) -> Result<String> {
 
 /// Claude Code PostToolUse/PostToolUseFailure hooks -> reman-hook claude (None = remove ours).
 fn set_claude_hooks(hook: Option<&Path>) -> Result<()> {
-    let p = claude_settings();
-    let mut m = load_json(&p)?;
+    set_hooks(&claude_settings(), hook, "claude", "Bash|PowerShell")
+}
+
+/// Codex reads hooks from hooks.json next to its config.toml.
+fn codex_hooks_path() -> Option<PathBuf> {
+    config_path("codex").and_then(|p| p.parent().map(|d| d.join("hooks.json")))
+}
+
+/// Capture hooks in an agent's hook file (Claude Code's settings.json, Codex's hooks.json: the
+/// same format). PreToolUse marks when a command starts (for its duration); PostToolUse and
+/// PostToolUseFailure record it. None removes ours and keeps everything else the user has.
+fn set_hooks(p: &Path, hook: Option<&Path>, agent: &str, matcher: &str) -> Result<()> {
+    let mut m = load_json(p)?;
     let hooks = m.entry("hooks").or_insert_with(|| json!({}));
-    for ev in ["PostToolUse", "PostToolUseFailure"] {
-        let list = hooks.as_object_mut().context("settings.json `hooks` is not an object")?.entry(ev).or_insert_with(|| json!([]));
+    for ev in ["PreToolUse", "PostToolUse", "PostToolUseFailure"] {
+        let list = hooks.as_object_mut().context("`hooks` is not an object")?.entry(ev).or_insert_with(|| json!([]));
         let arr = list.as_array_mut().context("hook list is not an array")?;
         // drop any previous reman hook, keep everything else the user has
         for block in arr.iter_mut() {
@@ -274,7 +290,14 @@ fn set_claude_hooks(hook: Option<&Path>) -> Result<()> {
         }
         arr.retain(|b| b.get("hooks").and_then(Value::as_array).is_none_or(|h| !h.is_empty()));
         if let Some(h) = hook {
-            arr.push(json!({"matcher": "Bash|PowerShell", "hooks": [{"type": "command", "command": h.to_string_lossy().replace('\\', "/"), "args": ["claude"], "timeout": 5}]}));
+            let exe = h.to_string_lossy().replace('\\', "/");
+            // Claude takes the arguments apart; Codex runs one command line
+            let entry = if agent == "claude" {
+                json!({"type": "command", "command": exe, "args": [agent], "timeout": 5})
+            } else {
+                json!({"type": "command", "command": format!("\"{exe}\" {agent}"), "timeout": 5})
+            };
+            arr.push(json!({"matcher": matcher, "hooks": [entry]}));
         }
     }
     // leave no empty scaffolding behind on disconnect
@@ -284,7 +307,7 @@ fn set_claude_hooks(hook: Option<&Path>) -> Result<()> {
     if hooks.as_object().is_some_and(|o| o.is_empty()) {
         m.remove("hooks");
     }
-    save_json(&p, m)
+    save_json(p, m)
 }
 
 /// Roots precedence: --root flags, else config.json, else the old Claude Code env, else cwd.

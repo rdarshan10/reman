@@ -114,7 +114,7 @@ mod tests {
         for _ in 0..3 {
             for c in ["git add .", "git commit -m x", "git push"] {
                 t += 10;
-                let r = Run { cmd: c.into(), exit: Some(0), cwd: Some("C:/r".into()), session: "s1".into(), actor: "human".into(), ts: t, duration_ms: None };
+                let r = Run { cmd: c.into(), exit: Some(0), cwd: Some("C:/r".into()), session: "s1".into(), actor: "human".into(), ts: t, duration_ms: None, err: None };
                 let rec = db::record_run(&db, &r).unwrap();
                 s.apply_run(rec.command_id, rec.new_row, &r, None);
             }

@@ -220,7 +220,7 @@ pub fn unshared_folders(roots: &[String]) -> Vec<(String, u64)> {
     out
 }
 
-/// Directories matching a partial path (`D:\Pla` -> `D:\PlanetNaidu\`).
+/// Directories matching a partial path (`D:\Proj` -> `D:\Projects\`).
 pub(crate) fn dirs(cur: &str) -> Vec<Cand> {
     let cur = cur.trim_matches(['"', '\'']);
     let (base, prefix) = match cur.rfind(['/', '\\']) {
@@ -314,7 +314,7 @@ mod tests {
     #[test]
     fn splits_lines_like_a_shell() {
         assert_eq!(split_line(r#"reman forget 'git push --force' "#), ["forget", "git push --force"]);
-        assert_eq!(split_line(r"reman.exe connect --add-root D:\PlanetNaidu "), ["connect", "--add-root", r"D:\PlanetNaidu"]);
+        assert_eq!(split_line(r"reman.exe connect --add-root D:\Projects "), ["connect", "--add-root", r"D:\Projects"]);
         assert!(split_line("reman ").is_empty());
     }
 }

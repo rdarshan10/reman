@@ -27,8 +27,31 @@ __reman_preexec() {
   __reman_start=$EPOCHREALTIME
 }
 
+__reman_note() { # print JSON string field $2 of reply $1 as a dim reman line
+  [[ $1 =~ "\"$2\":\"(([^\"\\\\]|\\\\.)*)\"" ]] || return
+  local s=$match[1]
+  s=${s//\\\"/\"}; s=${s//\\\\/\\}
+  print -P -- "%F{8}  reman: ${s//\%/%%}%f" >&2
+}
+
+__reman_welcome() { # "last time here": asked when the folder changes (the daemon answers once)
+  [[ $PWD == $__reman_pwd ]] && return
+  __reman_pwd=$PWD
+  (( $+builtins[ztcp] )) || return
+  __reman_q "$PWD"; local qd=$REPLY
+  __reman_q "$REMAN_SESSION"; local qs=$REPLY
+  local reply= fd
+  ztcp 127.0.0.1 $__reman_port 2>/dev/null || return
+  fd=$REPLY
+  print -r -- "{\"op\":\"welcome\",\"cwd\":$qd,\"session\":$qs}" >&$fd
+  read -t 0.3 -r -u $fd reply
+  ztcp -c $fd
+  __reman_note "$reply" line
+}
+
 __reman_precmd() {
   local ec=$?
+  __reman_welcome
   [[ -z $__reman_cmd ]] && return
   local cmd=$__reman_cmd
   __reman_cmd=
@@ -52,9 +75,11 @@ __reman_precmd() {
     local fix=$match[1] lead="did you mean"
     fix=${fix//\\\"/\"}; fix=${fix//\\\\/\\}
     [[ $reply == *'"kind":"proven"'* ]] && lead="last time this failed you ran"
+    [[ $reply == *'"kind":"same_error"'* ]] && lead="the same error was fixed by"
     __reman_fix=$fix
     print -P -- "%F{8}  reman: $lead -> %F{6}${fix//\%/%%}%F{8}   (Alt-F inserts)%f" >&2
   fi
+  __reman_note "$reply" note   # it used to work here: what ran here since
 }
 add-zsh-hook preexec __reman_preexec
 add-zsh-hook precmd __reman_precmd

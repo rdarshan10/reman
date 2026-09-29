@@ -61,6 +61,7 @@ pub fn migrate(db: &Connection) -> Result<()> {
     add_column(db, "commands", "last_actor", "TEXT")?;
     add_column(db, "commands", "pinned", "INTEGER DEFAULT 0")?;
     add_column(db, "executions", "duration_ms", "INTEGER")?;
+    add_column(db, "executions", "err", "TEXT")?;
     db.execute_batch(
         "CREATE INDEX IF NOT EXISTS idx_cmd_text ON commands(cmd_text);
          CREATE INDEX IF NOT EXISTS idx_last_used ON commands(last_used);
@@ -108,6 +109,8 @@ pub struct Run {
     pub actor: String,
     pub ts: i64,
     pub duration_ms: Option<i64>,
+    /// what it printed when it failed (redacted, trimmed): agents' output, PowerShell's error
+    pub err: Option<String>,
 }
 
 impl Run {
@@ -157,8 +160,8 @@ pub fn record_run(db: &Connection, r: &Run) -> Result<Recorded> {
         }
     };
     db.execute(
-        "INSERT INTO executions (command_id, actor, exit, cwd, session, ts, duration_ms) VALUES (?,?,?,?,?,?,?)",
-        params![cid, r.actor, r.exit, r.cwd, r.session, r.ts, r.duration_ms],
+        "INSERT INTO executions (command_id, actor, exit, cwd, session, ts, duration_ms, err) VALUES (?,?,?,?,?,?,?,?)",
+        params![cid, r.actor, r.exit, r.cwd, r.session, r.ts, r.duration_ms, r.err],
     )?;
     Ok(Recorded { command_id: cid, new_row })
 }

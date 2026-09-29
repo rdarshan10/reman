@@ -110,6 +110,11 @@ check("`a` + a typed path shares that folder", any(os.path.normcase(r) == os.pat
 check("the strict-secrets switch can be selected", t.goto("Strict secrets"), t.selected().strip())
 t.keys("enter", wait=0.8)
 check("Enter flips it and saves", cfg().get("strict_secrets") is False)
+
+check("the language-model switch is there, on by default", t.goto("Use a language model") and "[x]" in t.selected(), t.selected().strip())
+check("it says where the model comes from", "auto: a model running on this machine" in t.text())
+t.keys("enter", wait=0.8)
+check("Enter turns it off and saves", (cfg().get("ai") or {}).get("enabled") is False, cfg().get("ai"))
 t.snap("after the changes")
 
 t.keys("esc", wait=1.0)

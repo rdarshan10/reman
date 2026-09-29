@@ -30,8 +30,29 @@ __reman_preexec() {
   __reman_ms; __reman_start=$REPLY
 }
 
+__reman_note() { # print JSON string field $2 of reply $1 as a dim reman line
+  [[ $1 =~ \"$2\":\"(([^\"\\]|\\.)*)\" ]] || return
+  local s=${BASH_REMATCH[1]}; s=${s//\\\"/\"}; s=${s//\\\\/\\}
+  printf '\e[90m  reman: %s\e[0m\n' "$s" >&2
+}
+
+__reman_welcome() { # "last time here": asked when the folder changes (the daemon answers once)
+  [[ $PWD == "$__reman_pwd" ]] && return
+  __reman_pwd=$PWD
+  __reman_q "$PWD"; local qd=$REPLY
+  __reman_q "$REMAN_SESSION"; local qs=$REPLY
+  local fd= reply=
+  { exec {fd}<>"/dev/tcp/127.0.0.1/$__reman_port"; } 2>/dev/null
+  [ -n "$fd" ] || return
+  printf '%s\n' "{\"op\":\"welcome\",\"cwd\":$qd,\"session\":$qs}" >&$fd
+  IFS= read -r -t 0.3 -u $fd reply
+  exec {fd}>&-
+  __reman_note "$reply" line
+}
+
 __reman_precmd() {
   local ec=$? start=$__reman_start line num cmd
+  __reman_welcome
   __reman_start=
   [ -z "$start" ] && return $ec
   builtin history 1 > "$__reman_histfile" 2>/dev/null || return $ec
@@ -59,9 +80,11 @@ __reman_precmd() {
     local fix=${BASH_REMATCH[1]} lead="did you mean"
     fix=${fix//\\\"/\"}; fix=${fix//\\\\/\\}
     [[ $reply == *'"kind":"proven"'* ]] && lead="last time this failed you ran"
+    [[ $reply == *'"kind":"same_error"'* ]] && lead="the same error was fixed by"
     __reman_fix=$fix
     printf '\e[90m  reman: %s -> \e[36m%s\e[90m   (Alt-F inserts)\e[0m\n' "$lead" "$fix" >&2
   fi
+  __reman_note "$reply" note   # it used to work here: what ran here since
   return $ec
 }
 

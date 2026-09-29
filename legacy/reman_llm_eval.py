@@ -19,14 +19,14 @@ import sys, subprocess, time, shutil, os
 import numpy as np
 from fastembed import TextEmbedding
 
-OLLAMA = shutil.which("ollama") or r"C:\Users\rdars\AppData\Local\Programs\Ollama\ollama.exe"
+OLLAMA = shutil.which("ollama") or os.path.expandvars(r"%LOCALAPPDATA%\Programs\Ollama\ollama.exe")
 MODEL_EMBED = "BAAI/bge-small-en-v1.5"
 
 # The three commands that FAILED the Phase-0 intent gate, with the intent that should match.
 CASES = [
     ("alembic upgrade head",                                  "run database migrations"),
     ("docker-compose down -v",                                "tear down containers and wipe volumes"),
-    ('scp -r "app" root@72.61.143.105:/opt/PlanetNaidu/',     "copy the app folder to the server over ssh"),
+    ('scp -r "app" deploy@server.example:/opt/app/',          "copy the app folder to the server over ssh"),
 ]
 
 PROMPT = ("In ONE short line (max 12 words), describe what this shell command does. "

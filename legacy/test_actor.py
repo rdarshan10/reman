@@ -29,21 +29,21 @@ if not all(t71.values()): fails.append("T7.1")
 
 # ---- T7.2: Claude Code PostToolUse hook (adapter #3) ----
 payload = {"tool_name": "Bash", "tool_input": {"command": "alembic upgrade head"},
-           "cwd": "D:\\PlanetNaidu", "session_id": "sess-abc",
+           "cwd": "D:\\Work", "session_id": "sess-abc",
            "tool_response": {"exit_code": 0}}
 import reman_hook_claude
 sys.stdin = io.StringIO(json.dumps(payload))
 reman_hook_claude.main()
 sys.stdin = sys.__stdin__
 row = db.execute("SELECT last_actor, last_exit, cwd, agent_runs FROM commands WHERE cmd_text='alembic upgrade head'").fetchone()
-t72 = row == ("agent:claude-code", 0, "D:\\PlanetNaidu", 1)
+t72 = row == ("agent:claude-code", 0, "D:\\Work", 1)
 print("\n== T7.2 Claude Code hook ==")
 print(f"  recorded: {row}")
 print(f"  {'ok ' if t72 else 'FAIL'} agent command captured with actor + exit + cwd (Atuin never saw it)")
 if not t72: fails.append("T7.2")
 
 # ---- T7.3: actor counts + log filter ----
-record_run(db, "git status", 0, "D:\\PlanetNaidu", "h1", "human")
+record_run(db, "git status", 0, "D:\\Work", "h1", "human")
 record_run(db, "eas build --platform android", 0, "D:\\app", "a1", "agent:claude-code")
 record_run(db, "npm run typecheck", 1, "D:\\app", "h2", "human")
 human = [r["command"] for r in actor_log(db, "human")]

@@ -80,12 +80,15 @@ struct Section {
     hide_oneoffs: bool,
 }
 
+/// the title of a search's results when none of them is a close match
+const NOTHING_CLOSE: &str = "nothing close in your history · loosely related";
+
 fn agent_oneoff(v: &Value) -> bool {
     v["actor"].as_str().is_some_and(|a| a.starts_with("agent")) && v["runs"].as_u64().unwrap_or(0) <= 1
 }
 
 /// A search hit that clearly matches: close in meaning, or the typed text really matches.
-fn strong_hit(v: &Value, mode: &str) -> bool {
+fn strong_hit(v: &Value) -> bool {
     if let Some(typo) = v["typo"].as_f64() {
         // did-you-mean: a proven fix, a near-typo, or clearly the same intent
         return v["proven"].as_bool() == Some(true) || typo >= 0.5 || v["intent_sim"].as_f64().unwrap_or(0.0) >= 0.75;
@@ -94,7 +97,8 @@ fn strong_hit(v: &Value, mode: &str) -> bool {
     if agent_oneoff(v) {
         return false;
     }
-    mode == "fuzzy" || mode == "manual" || v["similarity"].as_f64().unwrap_or(0.0) >= 0.64 || v["fuzzy"].as_f64().unwrap_or(0.0) >= 0.5
+    // the engine's verdict: close in meaning (with a shared word), or the typed text matches
+    v["close"].as_bool().unwrap_or(false)
 }
 
 #[derive(Clone, Default)]
@@ -249,10 +253,9 @@ fn worker(rx: Receiver<Job>, tx: Sender<Reply>) {
                                 Kind::List | Kind::Flows => {
                                     let mut items = if sec.kind == Kind::Flows { flows_of(&v) } else { list_of(&v) };
                                     if let Some(cap) = sec.strong {
-                                        let mode = v["mode"].as_str().unwrap_or("");
                                         // never lead with a command that only ever failed (unless failures are what you asked for)
                                         let want_fail = sec.req["status"] == "fail";
-                                        items.retain(|it| strong_hit(&it.meta, mode) && (want_fail || it.status != "fail"));
+                                        items.retain(|it| strong_hit(&it.meta) && (want_fail || it.status != "fail"));
                                         items.truncate(cap);
                                     }
                                     let mut title = sec.title;
@@ -263,6 +266,12 @@ fn worker(rx: Receiver<Job>, tx: Sender<Reply>) {
                                         if hidden > 0 {
                                             title = format!("{title} · {hidden} agent one-off{} hidden (F3 shows)", if hidden == 1 { "" } else { "s" });
                                         }
+                                    }
+                                    // a search with no close match says so, instead of passing the
+                                    // least-bad commands off as answers
+                                    let searched = sec.req["op"] == "search" && sec.req["query"].as_str().is_some_and(|q| !q.trim().is_empty());
+                                    if searched && !items.is_empty() && !items.iter().any(|it| it.meta["close"].as_bool() == Some(true)) {
+                                        title = NOTHING_CLOSE.to_string();
                                     }
                                     if sec.main {
                                         r.total = v["total"].as_u64().unwrap_or(items.len() as u64) as usize;
@@ -655,9 +664,45 @@ pub(crate) const BAD: Color = Color::Red;
 pub(crate) const WARN: Color = Color::Yellow;
 pub(crate) const INFO: Color = Color::Cyan;
 pub(crate) const MUTED: Color = Color::DarkGray;
+/// The logo's orange (xterm 202, #ff5f00): a 256-colour index, so macOS Terminal shows it too.
+pub(crate) const BRAND: Color = Color::Indexed(202);
 
 pub(crate) fn muted() -> Style {
     Style::default().fg(MUTED)
+}
+
+/// The logo, as on the website: "reman" hand-set on a 5x7 grid (lowercase, rows 2-6 of each
+/// glyph), then a 3-pixel-wide cursor on rows 1-6.
+const LOGO: [[&str; 5]; 5] = [
+    ["10110", "11001", "10000", "10000", "10000"], // r
+    ["01110", "10001", "11111", "10000", "01110"], // e
+    ["11010", "10101", "10101", "10101", "10101"], // m
+    ["01110", "00001", "01111", "10001", "01111"], // a
+    ["10110", "11001", "10001", "10001", "10001"], // n
+];
+pub(crate) const LOGO_W: u16 = 33;
+
+/// The logo in half blocks, two pixel rows per text row: 3 rows of (letters, cursor), 30 + 3 cells.
+pub(crate) fn logo_rows() -> [(String, String); 3] {
+    // pixel (x, y), y = 0 for grid row 1 (the cursor's top) .. 5 for row 6
+    let px = |x: usize, y: usize| -> bool {
+        if x >= 30 {
+            return true;
+        }
+        let (g, cx) = (x / 6, x % 6);
+        y > 0 && cx < 5 && LOGO[g][y - 1].as_bytes()[cx] == b'1'
+    };
+    let cell = |x: usize, row: usize| match (px(x, 2 * row), px(x, 2 * row + 1)) {
+        (true, true) => '█',
+        (true, false) => '▀',
+        (false, true) => '▄',
+        (false, false) => ' ',
+    };
+    std::array::from_fn(|row| ((0..30).map(|x| cell(x, row)).collect(), (30..33).map(|x| cell(x, row)).collect()))
+}
+
+pub(crate) fn logo_lines<'a>() -> Vec<Line<'a>> {
+    logo_rows().into_iter().map(|(letters, cursor)| Line::from(vec![Span::raw(letters), Span::styled(cursor, Style::default().fg(BRAND))])).collect()
 }
 
 fn glyph(it: &Item, walking: bool) -> (&'static str, Color) {
@@ -754,6 +799,9 @@ fn draw(buf: &mut Buffer, app: &App) -> ((u16, u16), Hits) {
     };
     draw_list(buf, app, &items, list, &mut hits);
     draw_card(buf, app, &items, card, wide);
+    if wide {
+        draw_logo_corner(buf, card);
+    }
     if app.help {
         draw_help(buf, area);
     }
@@ -832,7 +880,8 @@ fn hint_line<'a>(app: &App) -> Line<'a> {
 /// base of its stack (you read upward from the prompt). Returns (lines, line of the selection).
 fn list_rows<'a>(app: &App, items: &[&'a Item], w: usize) -> (Vec<(Line<'a>, Option<usize>)>, usize) {
     let walking = |it: &Item| it.step.is_some() && app.flow.is_none();
-    let headers = app.flow.is_some() || app.titles.len() > 1 || app.mode != Mode::Recall || items.first().is_some_and(|i| i.fix || i.predicted || walking(i));
+    // "nothing close" is news even over a single list
+    let headers = app.flow.is_some() || app.titles.len() > 1 || app.mode != Mode::Recall || app.titles.iter().any(|t| t == NOTHING_CLOSE) || items.first().is_some_and(|i| i.fix || i.predicted || walking(i));
     let mut lines: Vec<(Line, Option<usize>)> = Vec::new();
     let mut sel_row = 0;
     let mut cur: Option<usize> = None;
@@ -1040,18 +1089,29 @@ fn draw_card(buf: &mut Buffer, app: &App, items: &[&Item], r: Rect, wide: bool) 
                 (many, _) => format!("in {}  (+{} more)", many[0], many.len() - 1),
             };
             l.push(Line::styled(place, muted()));
+            // what it printed the last time it failed
+            if matches!(it.status.as_str(), "fail" | "mixed") {
+                if let Some(e) = m["last_error"].as_str().and_then(|e| e.lines().next()) {
+                    l.push(Line::from(vec![Span::styled("last error: ", Style::default().fg(BAD)), Span::styled(clean(e), muted())]));
+                }
+            }
         }
         // why it matched
         if !app.query.trim().is_empty() && app.mode == Mode::Recall {
             let sim = m["similarity"].as_f64().unwrap_or(-1.0);
             let fz = m["fuzzy"].as_f64().unwrap_or(0.0);
             let mut why = Vec::new();
-            // bge similarities run hot (unrelated text ~0.6), so speak in bands, not percentages
+            // the engine's verdict first; bge similarities run hot (unrelated text ~0.6), so
+            // within a close match speak in bands, not percentages
+            let close = m["close"].as_bool() == Some(true);
             match sim {
+                _ if !close && fz < 0.5 => why.push("only loosely related"),
                 s if s >= 0.8 => why.push("very close in meaning"),
-                s if s >= 0.7 => why.push("close in meaning"),
-                s if s >= 0.64 => why.push("related in meaning"),
+                s if s >= 0.67 => why.push("close in meaning"),
                 _ => {}
+            }
+            if m["words"].as_f64().unwrap_or(0.0) >= 0.5 && close {
+                why.push("shares your words");
             }
             if fz >= 0.5 {
                 why.push("the text matches what you typed");
@@ -1070,6 +1130,26 @@ fn draw_card(buf: &mut Buffer, app: &App, items: &[&Item], r: Rect, wide: bool) 
         p = p.wrap(Wrap { trim: false });
     }
     p.render(inner, buf);
+}
+
+/// The logo in the card column's bottom-right corner, just above the filters: only when the card
+/// left those rows (and one above them) blank, so it never covers text.
+fn draw_logo_corner(buf: &mut Buffer, card: Rect) {
+    if card.height < 12 || card.width < LOGO_W + 4 {
+        return;
+    }
+    let (x0, y0) = (card.x + 2, card.y + card.height - 4);
+    for y in y0..y0 + 4 {
+        for x in x0..card.x + card.width {
+            if buf[(x, y)].symbol() != " " {
+                return;
+            }
+        }
+    }
+    let x = card.x + card.width - LOGO_W - 1;
+    for (i, line) in logo_lines().into_iter().enumerate() {
+        buf.set_line(x, y0 + 1 + i as u16, &line, LOGO_W);
+    }
 }
 
 fn draw_help(buf: &mut Buffer, area: Rect) {

@@ -9,15 +9,15 @@ One fast Rust binary that remembers every command you and your AI agents run: wh
 ![Release](https://img.shields.io/github/v/release/rdarshan10/reman) ![Platforms](https://img.shields.io/badge/platforms-Windows%20%7C%20macOS%20%7C%20Linux-blue) ![Rust](https://img.shields.io/badge/built%20with-Rust-orange)
 
 ```
-   in this folder ─────────────────────────────────────────── │ docker compose exec web alembic upgrade head
- ▌✓ docker compose exec web alembic upgrade head   18×   6d  │ alembic: Upgrade the database to the latest
-  ✓ docker compose exec web alembic current          2×  2mo  │ revision
-  ~ docker-compose up --build -d                   488×   6d  │ ✓ worked every time (18 runs) · last 6 days ago
-   everywhere ─────────────────────────────────────────────── │ in D:\PlanetNaidu\planet_naidu_api
-  · alembic upgrade head                           324×  3mo  │ matched: close in meaning
-  · docker exec planet_naidu_api_web alembic upg…  132×  3mo  │
-   this folder first ←→  ·  by anyone F3  ·  any outcome F2                        31 results
- › run migrations                                                       Recall  Fixes  Flows
+   in this folder ─────────────────────────────────────────── │ docker compose down -v
+ ▌✓ docker compose down -v                          14×   2d  │ docker: Stop and remove containers, networks,
+  ✓ docker compose up -d                            20×   1h  │ images, and volumes created by `docker compose up`
+  ✓ docker system prune -af --volumes                3×   1w  │ ✓ worked every time (14 runs) · last 2 days ago
+   everywhere ─────────────────────────────────────────────── │ in ~/work/api
+  · docker compose logs -f api                      11×   3d  │ matched: close in meaning · shares your words
+  · docker images                                    4×   1w  │
+   this folder first ←→  ·  by anyone F3  ·  any outcome F2                        24 results
+ › tear down containers                                                 Recall  Fixes  Flows
 ```
 
 ## Why
@@ -33,14 +33,18 @@ reman closes that loop: every run is captured with its folder, exit code, durati
 
 ## Features
 
-- **Recall by meaning.** Semantic plus fuzzy search over your real history. `run migrations` finds `alembic upgrade head` even though the words don't match. Results from this folder come first, then everywhere; a folder with no good match never dead-ends.
+- **Recall by meaning.** Semantic plus fuzzy search over your real history. `run migrations` finds `alembic upgrade head` even though the words don't match. Results from this folder come first, then everywhere; a folder with no good match never dead-ends. When nothing in your history is close, it says so instead of passing off a guess.
 - **Proof of what worked.** Every command shows its track record: worked every time, failed every time, or the success rate. A command that only ever failed never leads a list.
 - **Fixes.** After a failure, reman prints what worked last time (`gti status` → `git status`), learned from what you actually ran next. `Alt+F` inserts it.
+- **The same error, a different command.** reman keeps what a failed command printed. When a *different* command fails with the same error (`npm ci` hitting the ERESOLVE that `npm install` hit last week), it offers what fixed the first one. Agents get it too by passing the error to `reman_fixes`.
 - **Flows.** Repeated sequences (`pull → install → test`) are detected. Open one, run its first step, and the next step waits on `↑`.
 - **Prediction.** An empty search shows what you usually run next in this folder.
+- **Last time here.** Open a terminal in a folder you left days ago and one line says what you did there: `docker compose up -d → alembic upgrade head → npm run dev`.
+- **What broke it?** When a command that kept working here starts failing, reman says how often it worked and what ran in this folder since (`git pull → npm install left-pad`). `reman why` tells the whole story.
+- **Runbook.** `reman runbook` writes how the project is run, by task (set up, run, test, lint, build, database, deploy), from the commands that actually worked there. With a language model available (a local one is found automatically), it adds a summary, a getting-started order and a note per command; the model only arranges your real commands, never invents one. Agents get the same through `reman_runbook`.
 - **Own capture, no Atuin.** Native hooks for PowerShell, bash, zsh and fish (0 to 5 ms per command), plus `r` / `rr` in Command Prompt.
 - **For AI agents.** A built-in MCP server and a local HTTP endpoint with a folder boundary and secret redaction. `reman connect all` wires Claude Code, Codex, Cursor, VS Code, Windsurf and Gemini CLI in one step.
-- **Private by default.** Everything stays in `~/.reman` on your machine. Commands typed with a leading space are never recorded; `Del Del` in the finder forgets one everywhere.
+- **Private by default.** Everything stays in `~/.reman` on your machine. Secrets are masked before anything is saved (`export API_TOKEN=***`), and a command whose secret can't be located isn't saved at all. Commands typed with a leading space are never recorded, nor anything matching your `ignore_commands` / `ignore_folders` patterns; `Del Del` in the finder forgets one everywhere. `reman scrub` masks secrets in history saved before.
 
 ## Install
 
@@ -49,6 +53,8 @@ reman closes that loop: every run is captured with its folder, exit code, durati
 ```powershell
 irm https://raw.githubusercontent.com/rdarshan10/reman/master/install.ps1 | iex
 ```
+
+Windows PowerShell blocks profile scripts by default on a fresh Windows 10/11 ("running scripts is disabled on this system"), and then reman can't load in new windows. Setup detects this and asks to allow your own scripts for your user only (`Set-ExecutionPolicy RemoteSigned -Scope CurrentUser`, the same step Scoop and oh-my-posh need). `reman doctor` reports it too.
 
 ### macOS and Linux
 
@@ -112,6 +118,10 @@ reman fixes "gti status"              # what worked instead
 reman next                            # what you usually run next here
 reman check "docker compose up -d"    # has this been run, and did it work?
 reman flows --here                    # sequences you repeat in this folder
+reman here                            # what you did in this folder last time
+reman why                             # it used to work: what ran here since (or: reman why npm test)
+reman runbook > RUNBOOK.md            # how this project is run, from what worked
+reman scrub                           # mask secrets in older history (dry run; --apply)
 reman stats
 ```
 
@@ -129,6 +139,22 @@ One page for everything setup configured. Every change is saved as you make it:
 - **Shells:** whether PowerShell, Command Prompt, or your zsh / bash / fish is wired; Enter wires one that isn't.
 - **reman:** daemon status, data folder, version.
 
+## Language model (optional)
+
+reman works fully without one. When one is available, `reman runbook` asks it to arrange and explain the project's commands.
+
+- **Found automatically on this machine:** Ollama (`localhost:11434`), LM Studio (`localhost:1234`) or a llama.cpp server (`localhost:8080`). Nothing leaves your machine.
+- **Any OpenAI-compatible endpoint, if you set one** in `~/.reman/config.json`. A remote endpoint is only used when set there:
+
+  ```json
+  "ai": { "endpoint": "https://api.openai.com/v1", "model": "gpt-4o-mini", "api_key_env": "OPENAI_API_KEY" }
+  ```
+
+  The key is read from that environment variable (default `REMAN_AI_KEY`) and never stored.
+- **What the model may do:** order, summarise, add a few words per command, and place commands no rule knows into a section. Every command in its answer must be one from your history, character for character, or it is dropped. Commands are redacted before they are sent.
+- **Speed:** the answer is cached per project until its commands change. Agents never wait on a model: they get the history-only runbook at once, and the fuller one on their next call.
+- **Off:** `reman settings` (Language model), or `reman runbook --static` for one run.
+
 ## AI agents
 
 ```sh
@@ -138,14 +164,14 @@ reman connect --add-root ~/projects/api
 reman connect http                    # local HTTP endpoint for the OpenAI Agents SDK, LangChain, curl
 ```
 
-Agents get seven tools: `reman_search`, `reman_check`, `reman_fixes`, `reman_recent`, `reman_failures`, `reman_flows` and `reman_next`. Every command they get back is one that really ran; reman never generates commands.
+Agents get eight tools: `reman_search`, `reman_check`, `reman_fixes`, `reman_recent`, `reman_failures`, `reman_flows`, `reman_next` and `reman_runbook` (how the project is run, from what worked there). Every command they get back is one that really ran; reman never generates commands. When nothing close is known, `reman_search` returns nothing rather than the least-bad guess.
 
 What agents can see:
 - **By default, only the project each agent is working in.** An agent started in `~/projects/api` sees commands run there and nothing else. One started in your home folder or at a drive root sees nothing.
 - **More, if you choose:** `reman connect --add-root <folder>` shares a folder with every agent; `reman connect` lists your busiest folders that aren't shared.
 - **Secrets are redacted**, and in strict mode (the default) anything still secret-looking is withheld.
 
-Commands your agents run are recorded too, tagged with the agent's name. For Claude Code that covers both its Bash and PowerShell tools.
+Commands your agents run are recorded too, tagged with the agent's name, with how long they took and, when they fail, what they printed. For Claude Code that covers both its Bash and PowerShell tools; Codex's commands are recorded through its hooks (approve them once in Codex with `/hooks`). Codex's hooks carry no exit code, so its runs are recorded with an unknown outcome rather than a guess.
 
 ## Performance
 
@@ -201,5 +227,6 @@ To run the tests:
 ```sh
 cd rust
 cargo test
+python e2e/search_quality.py           # search quality, and the website's examples
 python e2e/powershell_terminal.py      # real-terminal suites, see rust/e2e/README.md
 ```

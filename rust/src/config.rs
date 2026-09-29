@@ -95,9 +95,9 @@ mod tests {
     #[test]
     #[cfg(windows)]
     fn msys_paths_match_windows_paths() {
-        assert_eq!(norm_path("/c/Users/rdars/reman"), norm_path(r"C:\Users\rdars\reman"));
+        assert_eq!(norm_path("/c/Users/me/reman"), norm_path(r"C:\Users\me\reman"));
         assert_eq!(norm_path("/d"), norm_path(r"D:\"));
-        assert_eq!(norm_path("/cygdrive/d/PlanetNaidu/"), norm_path(r"D:\PlanetNaidu"));
+        assert_eq!(norm_path("/cygdrive/d/Projects/"), norm_path(r"D:\Projects"));
         assert_ne!(norm_path("/usr/bin"), norm_path(r"U:\sr\bin"));
     }
 }

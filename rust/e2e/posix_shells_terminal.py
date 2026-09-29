@@ -26,7 +26,7 @@ for k in ("CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "AGENT"):
 subprocess.run([EXE, "ping"], env=BASE_ENV, capture_output=True, timeout=60)
 
 KEY = {"enter": "\r", "up": "\x1b[A", "esc": "\x1b", "ctrl_r": "\x12", "ctrl_u": "\x15", "alt_f": "\x1bf", "ctrl_c": "\x03"}
-CWD = r"C:\Users\rdars\reman"
+CWD = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."))
 
 
 def daemon(req):

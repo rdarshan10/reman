@@ -11,6 +11,7 @@ use crate::embed::Embedder;
 use crate::fixpairs::{self, Tracker};
 use crate::flows;
 use crate::import;
+use crate::insight;
 use crate::mcp;
 use crate::predict;
 use crate::search::{self, Query, Rank};
@@ -32,6 +33,58 @@ pub struct Daemon {
     started: Instant,
     /// session -> a flow you're walking through (picked in the finder's Flows tab)
     flows_armed: Mutex<std::collections::HashMap<String, ArmedFlow>>,
+    /// (session, folder) pairs already given their "last time here" line
+    greeted: Mutex<std::collections::HashSet<(String, u32)>>,
+    /// an agent's command id -> when it started (PreToolUse), for its duration
+    agent_starts: Mutex<std::collections::HashMap<String, i64>>,
+    /// what is never recorded, from config.json (re-read when the file changes)
+    privacy: Mutex<Privacy>,
+}
+
+/// What is never recorded as-is: commands and folders matching the ignore patterns, and
+/// secrets (masked, or dropped when `"secrets": "drop"` or when the value can't be located).
+#[derive(Default)]
+struct Privacy {
+    stamp: Option<std::time::SystemTime>,
+    drop_secrets: bool,
+    commands: Vec<regex::Regex>,
+    folders: Vec<regex::Regex>,
+}
+
+impl Privacy {
+    fn refresh(&mut self) {
+        let stamp = std::fs::metadata(crate::settings::path()).and_then(|m| m.modified()).ok();
+        if stamp.is_some() && stamp == self.stamp {
+            return;
+        }
+        let s = crate::settings::load();
+        let compile = |pats: &[String]| -> Vec<regex::Regex> {
+            pats.iter()
+                .filter_map(|p| match regex::Regex::new(p) {
+                    Ok(r) => Some(r),
+                    Err(e) => {
+                        log(&format!("config.json: ignoring the pattern {p:?}: {e}"));
+                        None
+                    }
+                })
+                .collect()
+        };
+        *self = Privacy { stamp, drop_secrets: s.drop_secrets(), commands: compile(&s.ignore_commands), folders: compile(&s.ignore_folders) };
+    }
+
+    /// The run as it may be stored: None when it must not be recorded at all.
+    fn admit(&self, mut r: Run) -> Option<Run> {
+        if self.commands.iter().any(|x| x.is_match(&r.cmd)) || r.cwd.as_deref().is_some_and(|c| self.folders.iter().any(|x| x.is_match(c))) {
+            return None;
+        }
+        let masked = crate::redact::redact(&r.cmd);
+        let secret = masked != r.cmd;
+        if crate::redact::residual_secret(&masked) || (secret && self.drop_secrets) {
+            return None;
+        }
+        r.cmd = masked;
+        Some(r)
+    }
 }
 
 /// A flow being played back: `pos` is the next step to run. Running that step (from the same
@@ -58,11 +111,19 @@ impl ArmedFlow {
     }
 }
 
+/// Bumped whenever describe() or tldr_map.json changes what commands are described as; a daemon
+/// on an older db re-describes the affected commands once, in the background (`redescribe`).
+const DESCRIBE_VERSION: &str = "4";
+
 pub fn log(msg: &str) {
     let line = format!("[{}] {msg}\n", config::now());
     if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(config::log_path()) {
         let _ = f.write_all(line.as_bytes());
     }
+}
+
+fn now_ms() -> i64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or(0)
 }
 
 fn s<'a>(v: &'a Value, k: &str) -> Option<&'a str> {
@@ -91,6 +152,7 @@ pub fn run_from(v: &Value, default_actor: &str) -> Option<Run> {
         actor: s(v, "actor").unwrap_or(default_actor).to_string(),
         ts: v.get("ts").and_then(Value::as_i64).filter(|t| *t > 0).unwrap_or_else(config::now),
         duration_ms: v.get("duration_ms").and_then(Value::as_i64).filter(|d| *d >= 0),
+        err: s(v, "error").and_then(crate::errors::clean),
     })
 }
 
@@ -118,12 +180,22 @@ impl Daemon {
             embedder,
             started: Instant::now(),
             flows_armed: Mutex::new(std::collections::HashMap::new()),
+            greeted: Mutex::new(std::collections::HashSet::new()),
+            agent_starts: Mutex::new(std::collections::HashMap::new()),
+            privacy: Mutex::new(Privacy::default()),
         })
     }
 
     /// Write path for everything (hooks, spool, imports). Embeds new texts outside any lock,
     /// then one db transaction, then mirrors into memory. Returns (#new texts, per-run suggestion).
     pub fn ingest_runs(&self, runs: &[Run]) -> Result<(usize, Vec<Option<Value>>)> {
+        // what may be stored: ignored commands and folders out, secrets masked (or dropped)
+        let admitted: Vec<Run> = {
+            let mut p = self.privacy.lock();
+            p.refresh();
+            runs.iter().cloned().filter_map(|r| p.admit(r)).collect()
+        };
+        let runs = &admitted[..];
         if runs.is_empty() {
             return Ok((0, vec![]));
         }
@@ -215,15 +287,151 @@ impl Daemon {
                 armed.retain(|_, f| f.pos < f.steps.len());
             }
         }
-        let suggestions = runs.iter().map(|r| if r.failed() { self.suggest(&r.cmd, r.cwd.as_deref()) } else { None }).collect();
+        let suggestions = runs.iter().map(|r| if r.failed() { self.suggest_for(&r.cmd, r.cwd.as_deref(), r.err.as_deref()) } else { None }).collect();
         Ok((new_texts.len(), suggestions))
+    }
+
+    /// "Last time here": the first prompt of a session in a folder you last worked in a while
+    /// ago gets one line of what you did there. Once per session and folder.
+    pub fn welcome(&self, cwd: &str, session: &str) -> Option<String> {
+        const AWAY: i64 = 8 * 3600;
+        let st = self.store.read();
+        let c = st.cwd_index(cwd)?;
+        if !self.greeted.lock().insert((session.to_string(), c)) {
+            return None;
+        }
+        let v = insight::last_visit(&st, c, 4)?;
+        let now = config::now();
+        if now - v.last < AWAY {
+            return None;
+        }
+        let steps: Vec<String> = v.steps.iter().map(|&i| insight::short(&st.entries[i as usize].text, 40)).collect();
+        Some(format!("last time here ({}): {}", insight::ago(v.last, now), steps.join(" → ")))
+    }
+
+    /// "What broke it?": a command that kept working in this folder has just failed. One line:
+    /// how often it worked, when last, and what ran here since.
+    pub fn broke_note(&self, cmd: &str, cwd: &str) -> Option<String> {
+        let st = self.store.read();
+        let (c, (i, _)) = (st.cwd_index(cwd)?, st.entry(cmd)?);
+        let b = insight::what_broke(&st, i, c)?;
+        let since: Vec<String> = b.between.iter().take(3).map(|&j| insight::short(&st.entries[j as usize].text, 32)).collect();
+        let more = b.between.len().saturating_sub(3);
+        let tail = if since.is_empty() {
+            "nothing else ran here in between".to_string()
+        } else {
+            format!("since then here: {}{}", since.join(" → "), if more > 0 { format!(" (+{more} more)") } else { String::new() })
+        };
+        Some(format!("`{}` worked here {} times, last {}; {}   (reman why)", insight::short(cmd, 40), b.worked, insight::ago(b.last_ok, config::now()), tail))
+    }
+
+    /// A command other than `failed` that failed with this error signature and has a proven fix:
+    /// (that command, its fix). The most recently fixed first.
+    pub fn fix_for_error(&self, st: &Store, sig: &str, failed: &str) -> Option<(String, String)> {
+        let fixes = self.fixes.lock();
+        let mut best: Option<(i64, String, String)> = None;
+        for &ei in st.by_sig.get(sig)? {
+            let text = &st.entries[ei as usize].text;
+            if text == failed {
+                continue;
+            }
+            if let Some(p) = fixes.lookup(text, st).into_iter().next() {
+                let when = st.entries[ei as usize].rows.iter().map(|r| r.last_used).max().unwrap_or(0);
+                if best.as_ref().is_none_or(|b| when > b.0) {
+                    best = Some((when, text.clone(), p.fixed));
+                }
+            }
+        }
+        best.map(|b| (b.1, b.2))
+    }
+
+    /// `reman why [command]`: the story of a command that stopped working in this folder.
+    /// Without a command, the last one that failed here.
+    fn why_op(&self, req: &Value) -> Value {
+        let st = self.store.read();
+        let Some(c) = s(req, "cwd").and_then(|p| st.cwd_index(p)) else {
+            return json!({"found": false, "reason": "reman has no history for this folder yet."});
+        };
+        let target = match s(req, "command") {
+            Some(t) => st.entry(t.trim()).map(|e| e.0),
+            None => st.execs.iter().rev().find(|x| x.cwd == Some(c) && x.exit.is_some_and(|e| e != 0)).map(|x| x.entry),
+        };
+        let Some(i) = target else {
+            return json!({"found": false, "reason": "Nothing has failed in this folder."});
+        };
+        let e = &st.entries[i as usize];
+        let now = config::now();
+        let Some(b) = insight::what_broke(&st, i, c) else {
+            let a = st.agg(e, Scope::Folder(c));
+            let reason = match (a.ok, a.fail) {
+                (0, 0) => "It has no recorded outcome in this folder.".to_string(),
+                (0, f) => format!("It has never worked in this folder ({f} failure{}): nothing broke, it never ran right here. `reman fixes` shows what worked instead.", if f == 1 { "" } else { "s" }),
+                (_, 0) => "It has not failed in this folder.".to_string(),
+                (o, f) => format!("It worked {o} times and failed {f} times here, with no clear point where it broke (it needs 3+ successes, then 1-3 failures in a row)."),
+            };
+            return json!({"found": false, "command": e.text, "reason": reason});
+        };
+        let timeline: Vec<Value> = st
+            .execs
+            .iter()
+            .filter(|x| x.cwd == Some(c) && x.ts >= b.last_ok)
+            .filter(|x| x.entry == i || !insight::trivial(&st.entries[x.entry as usize]))
+            .take(40)
+            .map(|x| json!({"command": st.entries[x.entry as usize].text, "exit": x.exit, "ago": insight::ago(x.ts, now), "target": x.entry == i}))
+            .collect();
+        json!({"found": true, "command": e.text, "worked": b.worked, "last_ok": insight::ago(b.last_ok, now), "first_fail": insight::ago(b.first_fail, now),
+               "between": b.between.iter().map(|&j| st.entries[j as usize].text.clone()).collect::<Vec<_>>(), "timeline": timeline})
+    }
+
+    /// `reman here`: what you did here last time, however long ago.
+    fn here_op(&self, req: &Value) -> Value {
+        let st = self.store.read();
+        let v = s(req, "cwd").and_then(|p| st.cwd_index(p)).and_then(|c| insight::last_visit(&st, c, 10));
+        match v {
+            None => json!({"found": false}),
+            Some(v) => json!({"found": true, "ago": insight::ago(v.last, config::now()),
+                              "steps": v.steps.iter().map(|&i| st.entries[i as usize].text.clone()).collect::<Vec<_>>()}),
+        }
+    }
+
+    /// `reman runbook`: how this project is run (its repo, else this folder).
+    fn runbook_op(&self, req: &Value) -> Value {
+        let st = self.store.read();
+        let Some(cwd) = s(req, "cwd") else { return json!({"found": false}) };
+        let folder = st.cwd_index(cwd);
+        let scope = match st.scope_repo(cwd) {
+            Scope::Nothing => folder.map(Scope::Folder).unwrap_or(Scope::Nothing),
+            r => r,
+        };
+        if scope == Scope::Nothing {
+            return json!({"found": false});
+        }
+        let rb = insight::runbook_json(&st, scope, folder, &|i| Some(st.entries[i as usize].text.clone()), true);
+        // the model's fuller version, while the project's commands are the same ("fresh": the
+        // runbook from the history alone, with what only a model needs, to ask it again)
+        if b(req, "fresh", false) {
+            return rb;
+        }
+        match crate::ai::cached(&rb) {
+            Some((x, model)) => crate::ai::merge(&rb, &x, &model),
+            None => rb,
+        }
     }
 
     /// One-line hint after a failure: a proven fix, else a strong typo match that worked.
     pub fn suggest(&self, failed: &str, cwd: Option<&str>) -> Option<Value> {
+        self.suggest_for(failed, cwd, None)
+    }
+
+    /// After a failure: a proven fix for this command; else one for a DIFFERENT command that
+    /// failed with the same error (`err`, see errors.rs); else a strong typo match that worked.
+    pub fn suggest_for(&self, failed: &str, cwd: Option<&str>, err: Option<&str>) -> Option<Value> {
         let st = self.store.read();
         if let Some(p) = self.fixes.lock().lookup(failed, &st).into_iter().next() {
             return Some(json!({"command": p.fixed, "kind": "proven", "confidence": p.confidence, "times": p.count}));
+        }
+        if let Some((other, fix)) = err.and_then(crate::errors::signature).and_then(|sig| self.fix_for_error(&st, &sig, failed)) {
+            return Some(json!({"command": fix, "kind": "same_error", "failed": other}));
         }
         // prefer a strong typo match from this folder, else a strong one from anywhere
         const STRONG: f32 = 0.8;
@@ -261,6 +469,13 @@ impl Daemon {
         });
         if h.sim > -1.0 {
             v["similarity"] = json!((h.sim * 1000.0).round() / 1000.0);
+        }
+        v["close"] = json!(h.close);
+        if let Some(e) = st.last_err.get(&h.idx) {
+            v["last_error"] = json!(e);
+        }
+        if h.words > 0.0 {
+            v["words"] = json!((h.words * 100.0).round() / 100.0);
         }
         if h.fuzzy > 0.0 {
             v["fuzzy"] = json!((h.fuzzy * 1000.0).round() / 1000.0);
@@ -313,7 +528,7 @@ impl Daemon {
         let mut results: Vec<Value> = Vec::new();
         for p in self.fixes.lock().lookup(q, &st).into_iter().take(k) {
             let Some((i, _)) = st.entry(&p.fixed) else { continue };
-            let mut v = self.item(&st, &search::Hit { idx: i, score: 1.0, sim: -2.0, fuzzy: 0.0, variants: 1, matched_terms: 0 }, Scope::All);
+            let mut v = self.item(&st, &search::Hit { idx: i, score: 1.0, sim: -2.0, fuzzy: 0.0, variants: 1, matched_terms: 0, close: true, words: 0.0 }, Scope::All);
             v["proven"] = json!(true);
             v["fix_confidence"] = json!(p.confidence);
             v["similarity"] = json!(1.0);
@@ -324,7 +539,7 @@ impl Daemon {
             if results.len() >= k || results.iter().any(|r| r["command"] == json!(text)) {
                 continue;
             }
-            let mut v = self.item(&st, &search::Hit { idx: sg.idx, score: sg.score, sim: -2.0, fuzzy: 0.0, variants: 1, matched_terms: 0 }, Scope::All);
+            let mut v = self.item(&st, &search::Hit { idx: sg.idx, score: sg.score, sim: -2.0, fuzzy: 0.0, variants: 1, matched_terms: 0, close: true, words: 0.0 }, Scope::All);
             v["similarity"] = json!((sg.score * 1000.0).round() / 1000.0);
             v["typo"] = json!((sg.typo * 1000.0).round() / 1000.0);
             v["intent_sim"] = json!((sg.sem * 1000.0).round() / 1000.0);
@@ -347,7 +562,7 @@ impl Daemon {
             .enumerate()
             .map(|(i, cmd)| {
                 let mut v = match st.entry(cmd) {
-                    Some((idx, _)) => self.item(&st, &search::Hit { idx, score: 0.0, sim: -2.0, fuzzy: 0.0, variants: 1, matched_terms: 0 }, Scope::All),
+                    Some((idx, _)) => self.item(&st, &search::Hit { idx, score: 0.0, sim: -2.0, fuzzy: 0.0, variants: 1, matched_terms: 0, close: true, words: 0.0 }, Scope::All),
                     None => json!({"command": cmd, "status": "unknown", "actor": "human"}),
                 };
                 v["flow_step"] = json!(f.pos + i + 1);
@@ -394,7 +609,7 @@ impl Daemon {
             if let Some(sg) = self.suggest(&f, s(req, "cwd")) {
                 let st = self.store.read();
                 if let Some((i, _)) = st.entry(sg["command"].as_str().unwrap_or("")) {
-                    let mut v = self.item(&st, &search::Hit { idx: i, score: 1.0, sim: -2.0, fuzzy: 0.0, variants: 1, matched_terms: 0 }, Scope::All);
+                    let mut v = self.item(&st, &search::Hit { idx: i, score: 1.0, sim: -2.0, fuzzy: 0.0, variants: 1, matched_terms: 0, close: true, words: 0.0 }, Scope::All);
                     v["proven"] = json!(sg["kind"] == "proven");
                     v["times_fixed"] = sg["times"].clone();
                     out["fix"] = json!({"failed": f, "item": v});
@@ -420,7 +635,7 @@ impl Daemon {
         let results: Vec<Value> = preds
             .iter()
             .map(|p| {
-                let mut v = self.item(&st, &search::Hit { idx: p.idx, score: p.score, sim: -2.0, fuzzy: 0.0, variants: 1, matched_terms: 0 }, Scope::All);
+                let mut v = self.item(&st, &search::Hit { idx: p.idx, score: p.score, sim: -2.0, fuzzy: 0.0, variants: 1, matched_terms: 0, close: true, words: 0.0 }, Scope::All);
                 v["reason"] = json!(p.reason);
                 v["predicted"] = json!(true);
                 v
@@ -494,6 +709,13 @@ impl Daemon {
             let st = self.store.read();
             st.entries.iter().filter(|e| e.alive).map(|e| (e.text.clone(), e.rows.iter().map(|r| r.id).collect())).collect()
         };
+        self.embed_rows(&work)?;
+        self.reload()?;
+        Ok(work.len())
+    }
+
+    /// Embed each (command, its row ids) and its descriptions again, and save them.
+    fn embed_rows(&self, work: &[(String, Vec<i64>)]) -> Result<()> {
         for chunk in work.chunks(256) {
             let descs: Vec<describe::Description> = chunk.iter().map(|(t, _)| describe::describe(t)).collect();
             let mut batch: Vec<&str> = chunk.iter().map(|(t, _)| t.as_str()).collect();
@@ -512,21 +734,119 @@ impl Daemon {
             }
             tx.commit()?;
         }
-        self.reload()?;
-        Ok(work.len())
+        Ok(())
     }
 
-    /// One-time upgrade when describe() learns something new (v2: see through wrappers like
-    /// `docker exec web alembic ...`): re-describe and re-embed ONLY the affected commands'
-    /// descriptions, in the background, instead of asking the user for a full reindex.
-    pub fn redescribe(&self) -> Result<usize> {
-        const VERSION: &str = "2";
-        if db::meta_get(&self.db.lock(), "describe_version")?.as_deref() == Some(VERSION) {
-            return Ok(0);
+    /// `reman scrub`: history saved before secrets were masked at capture. A dry run by default
+    /// (how many would be masked or dropped, with examples); `apply` does it. A masked command
+    /// keeps its runs (merged into the masked one when that exists); one whose secret can't be
+    /// located is forgotten; learned fixes mentioning either go.
+    fn scrub(&self, apply: bool) -> Result<Value> {
+        let (mask, drop): (Vec<(String, String)>, Vec<String>) = {
+            let st = self.store.read();
+            let (mut m, mut d) = (Vec::new(), Vec::new());
+            for e in st.entries.iter().filter(|e| e.alive) {
+                let masked = crate::redact::redact(&e.text);
+                if crate::redact::residual_secret(&masked) {
+                    d.push(e.text.clone());
+                } else if masked != e.text {
+                    m.push((e.text.clone(), masked));
+                }
+            }
+            (m, d)
+        };
+        let examples: Vec<String> = mask.iter().take(5).map(|(_, m)| insight::short(m, 80)).collect();
+        let mut out = json!({"mask": mask.len(), "drop": drop.len(), "examples": examples, "applied": false});
+        if !apply || (mask.is_empty() && drop.is_empty()) {
+            return Ok(out);
         }
+        for t in &drop {
+            self.forget(t)?;
+        }
+        let mut masked_texts: Vec<String> = Vec::new();
+        {
+            let mut conn = self.db.lock();
+            let tx = conn.transaction()?;
+            for (orig, masked) in &mask {
+                let rows: Vec<(i64, Option<String>)> = {
+                    let mut q = tx.prepare("SELECT id, cwd FROM commands WHERE cmd_text=?")?;
+                    let r = q.query_map([orig], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<Result<Vec<_>, _>>()?;
+                    r
+                };
+                for (id, cwd) in rows {
+                    let hash = db::cmd_hash(masked, cwd.as_deref());
+                    let other: Option<i64> = tx.query_row("SELECT id FROM commands WHERE cmd_hash=?", [&hash], |r| r.get(0)).ok();
+                    match other {
+                        Some(x) if x != id => {
+                            // the masked command already has this folder's row: add the runs to it
+                            tx.execute(
+                                "UPDATE commands SET
+                                   run_count = COALESCE(run_count,0) + (SELECT COALESCE(run_count,0) FROM commands WHERE id=?2),
+                                   success_count = COALESCE(success_count,0) + (SELECT COALESCE(success_count,0) FROM commands WHERE id=?2),
+                                   fail_count = COALESCE(fail_count,0) + (SELECT COALESCE(fail_count,0) FROM commands WHERE id=?2),
+                                   human_runs = COALESCE(human_runs,0) + (SELECT COALESCE(human_runs,0) FROM commands WHERE id=?2),
+                                   agent_runs = COALESCE(agent_runs,0) + (SELECT COALESCE(agent_runs,0) FROM commands WHERE id=?2),
+                                   last_used = MAX(COALESCE(last_used,0), (SELECT COALESCE(last_used,0) FROM commands WHERE id=?2))
+                                 WHERE id=?1",
+                                rusqlite::params![x, id],
+                            )?;
+                            tx.execute("UPDATE executions SET command_id=? WHERE command_id=?", rusqlite::params![x, id])?;
+                            db::delete_command_rows(&tx, &[id])?;
+                        }
+                        _ => {
+                            tx.execute("UPDATE commands SET cmd_text=?, cmd_hash=? WHERE id=?", rusqlite::params![masked, hash, id])?;
+                        }
+                    }
+                }
+                tx.execute("DELETE FROM fix_pairs WHERE failed_text=? OR fixed_cmd=?", [orig, orig])?;
+                if !masked_texts.contains(masked) {
+                    masked_texts.push(masked.clone());
+                }
+            }
+            tx.commit()?;
+        }
+        self.reload()?;
+        // their vectors were computed from the text with the secret in it
         let work: Vec<(String, Vec<i64>)> = {
             let st = self.store.read();
-            st.entries.iter().filter(|e| e.alive && describe::wrapped(&e.text).is_some()).map(|e| (e.text.clone(), e.rows.iter().map(|r| r.id).collect())).collect()
+            masked_texts.iter().filter_map(|t| st.entry(t).map(|(_, e)| (t.clone(), e.rows.iter().map(|r| r.id).collect()))).collect()
+        };
+        self.embed_rows(&work)?;
+        // SQLite keeps old copies of changed pages (free pages, the WAL) until it compacts:
+        // without this, the secrets would still be in the file
+        {
+            let conn = self.db.lock();
+            conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE); VACUUM; PRAGMA wal_checkpoint(TRUNCATE);")?;
+        }
+        self.reload()?;
+        out["applied"] = json!(true);
+        Ok(out)
+    }
+
+    /// One-time upgrade when describe() learns something new (DESCRIBE_VERSION) (v2: see through wrappers like
+    /// `docker exec web alembic ...`; v3: two-level tools like `docker compose down`; v4: one
+    /// vector per description sentence):
+    /// re-describe and re-embed ONLY the affected commands' descriptions, in the background,
+    /// instead of asking the user for a full reindex.
+    pub fn redescribe(&self) -> Result<usize> {
+        let from = db::meta_get(&self.db.lock(), "describe_version")?;
+        if from.as_deref() == Some(DESCRIBE_VERSION) {
+            return Ok(0);
+        }
+        let before = |v: u32| from.as_deref().map_or(true, |f| f.parse::<u32>().unwrap_or(0) < v);
+        let v1 = before(2);
+        // v4 embeds each description sentence on its own: every described command, once
+        let every_described = before(4);
+        let work: Vec<(String, Vec<i64>)> = {
+            let st = self.store.read();
+            st.entries
+                .iter()
+                .filter(|e| {
+                    let d = describe::describe(&e.text);
+                    e.alive && ((v1 && describe::wrapped(&e.text).is_some()) || (every_described && !d.parts.is_empty()) || d.display != e.desc)
+                })
+                .map(|e| (e.text.clone(), e.rows.iter().map(|r| r.id).collect()))
+                .collect()
         };
         for chunk in work.chunks(128) {
             let descs: Vec<describe::Description> = chunk.iter().map(|(t, _)| describe::describe(t)).collect();
@@ -542,7 +862,7 @@ impl Daemon {
             }
             tx.commit()?;
         }
-        db::meta_set(&self.db.lock(), "describe_version", VERSION)?;
+        db::meta_set(&self.db.lock(), "describe_version", DESCRIBE_VERSION)?;
         if !work.is_empty() {
             self.reload()?;
         }
@@ -708,18 +1028,46 @@ impl Daemon {
         let op = s(req, "op").unwrap_or("");
         Ok(match op {
             "ping" => json!({"ok": true, "indexed": self.store.read().alive_count(), "version": config::VERSION,
-                              "pid": std::process::id(), "engine": "rust"}),
+                              "pid": std::process::id(), "engine": "rust",
+                              "descriptions_current": db::meta_get(&self.db.lock(), "describe_version").ok().flatten().as_deref() == Some(DESCRIBE_VERSION)}),
             "ingest" => match run_from(req, "agent:claude-code") {
                 None => json!({"ok": false, "skipped": "empty"}),
-                Some(r) => {
+                Some(mut r) => {
+                    // an agent's command: its duration from the PreToolUse start
+                    if r.duration_ms.is_none() {
+                        if let Some(t0) = s(req, "start_id").and_then(|id| self.agent_starts.lock().remove(id)) {
+                            r.duration_ms = Some((now_ms() - t0).max(0));
+                        }
+                    }
                     let (new, sug) = self.ingest_runs(std::slice::from_ref(&r))?;
                     let mut v = json!({"ok": true, "new": new > 0});
                     if let Some(Some(sg)) = sug.into_iter().next() {
                         v["suggest"] = sg;
                     }
+                    // a command that kept working here has just failed: what ran here since
+                    // (looked up as stored: a secret in it was masked)
+                    if r.failed() {
+                        let stored = crate::redact::redact(&r.cmd);
+                        if let Some(n) = r.cwd.as_deref().and_then(|c| self.broke_note(&stored, c)) {
+                            v["note"] = json!(n);
+                        }
+                    }
                     v
                 }
             },
+            "agent_start" => {
+                if let Some(id) = s(req, "id") {
+                    let mut m = self.agent_starts.lock();
+                    let now = now_ms();
+                    // commands whose PostToolUse never came don't pile up
+                    if m.len() > 1000 {
+                        m.retain(|_, t| now - *t < 3_600_000);
+                    }
+                    m.insert(id.to_string(), now);
+                }
+                json!({"ok": true})
+            }
+            "scrub" => self.scrub(b(req, "apply", false))?,
             "ingest_batch" => {
                 let runs: Vec<Run> = req.get("items").and_then(Value::as_array).map(|a| a.iter().filter_map(|v| run_from(v, "human")).collect()).unwrap_or_default();
                 let (new, _) = self.ingest_runs(&runs)?;
@@ -728,7 +1076,7 @@ impl Daemon {
             "search" => self.search_op(req, false)?,
             "recent" => self.search_op(req, true)?,
             "didyoumean" => self.dym_op(req)?,
-            "fixfor" => json!({"suggest": self.suggest(s(req, "command").unwrap_or(""), s(req, "cwd"))}),
+            "fixfor" => json!({"suggest": self.suggest_for(s(req, "command").unwrap_or(""), s(req, "cwd"), s(req, "error"))}),
             "next" => self.next_op(req),
             "folders" => self.folders_op(req),
             "flow_arm" => {
@@ -745,6 +1093,13 @@ impl Daemon {
             }
             "flow_stop" => json!({"ok": true, "stopped": self.flows_armed.lock().remove(s(req, "session").unwrap_or("")).is_some()}),
             "flows" => self.flows_op(req),
+            "welcome" => match (s(req, "cwd"), s(req, "session")) {
+                (Some(c), Some(sess)) => json!({"line": self.welcome(c, sess)}),
+                _ => json!({"line": null}),
+            },
+            "why" => self.why_op(req),
+            "here" => self.here_op(req),
+            "runbook" => self.runbook_op(req),
             "describe" => {
                 let st = self.store.read();
                 let d = s(req, "command").and_then(|c| st.entry(c)).and_then(|(_, e)| e.desc.clone()).unwrap_or_default();
@@ -755,7 +1110,7 @@ impl Daemon {
                 match s(req, "command").and_then(|c| st.entry(c)) {
                     None => json!({"found": false}),
                     Some((i, e)) => {
-                        let mut v = self.item(&st, &search::Hit { idx: i, score: 0.0, sim: -2.0, fuzzy: 0.0, variants: 1, matched_terms: 0 }, Scope::All);
+                        let mut v = self.item(&st, &search::Hit { idx: i, score: 0.0, sim: -2.0, fuzzy: 0.0, variants: 1, matched_terms: 0, close: true, words: 0.0 }, Scope::All);
                         let mut fl: Vec<(i64, String)> = e.rows.iter().filter_map(|r| r.cwd.map(|c| (r.last_used, st.cwd_name(c).to_string()))).collect();
                         fl.sort_by(|a, b| b.0.cmp(&a.0));
                         v["folder_list"] = json!(fl.into_iter().map(|x| x.1).take(5).collect::<Vec<_>>());
@@ -875,7 +1230,7 @@ pub fn serve(port: u16) -> Result<()> {
         let d = d.clone();
         std::thread::spawn(move || match d.redescribe() {
             Ok(0) => {}
-            Ok(n) => log(&format!("re-described {n} wrapped commands (docker exec / compose run / npx ...)")),
+            Ok(n) => log(&format!("re-described {n} commands whose description improved")),
             Err(e) => log(&format!("redescribe failed: {e}")),
         });
     }

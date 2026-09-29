@@ -1,6 +1,7 @@
 //! reman - semantic, provenance-aware shell history for humans and AI agents.
 //! One binary: daemon, capture hooks, native finder, MCP server, importers.
 mod capture;
+mod ai;
 mod client;
 mod complete;
 mod config;
@@ -10,10 +11,12 @@ mod db;
 mod describe;
 mod dym;
 mod embed;
+mod errors;
 mod fixpairs;
 mod flows;
 mod http;
 mod import;
+mod insight;
 mod mcp;
 mod predict;
 mod redact;
@@ -87,6 +90,28 @@ enum Cmd {
     },
     /// Has this command been run, and did it work?
     Check { command: Vec<String> },
+    /// What you did in this folder last time
+    Here,
+    /// Mask secrets in history saved before reman masked them at capture (a dry run without --apply)
+    Scrub {
+        #[arg(long)]
+        apply: bool,
+    },
+    /// A command that used to work here fails now: what ran here since it last worked
+    /// (default: the last command that failed here)
+    Why { command: Vec<String> },
+    /// How this project is run: the commands that worked here, by task, and the usual sequences
+    Runbook {
+        /// print JSON (what agents get from the reman_runbook tool)
+        #[arg(long)]
+        json: bool,
+        /// never ask a language model: the runbook from your history alone
+        #[arg(long = "static")]
+        no_ai: bool,
+        /// ask the model again, even if it already wrote this project's runbook
+        #[arg(long)]
+        refresh: bool,
+    },
     /// Record one executed command (called by shell hooks)
     Record {
         #[arg(long)]
@@ -333,6 +358,133 @@ fn real_main() -> Result<()> {
             print_rows(&results(&r));
             Ok(())
         }
+        Cmd::Scrub { apply } => {
+            let r = client::call(&json!({"op": "scrub", "apply": apply}))?;
+            let (mask, drop) = (r["mask"].as_u64().unwrap_or(0), r["drop"].as_u64().unwrap_or(0));
+            if mask + drop == 0 {
+                println!("No secrets found in your history.");
+                return Ok(());
+            }
+            let verb = if apply { "" } else { "would be " };
+            println!("{mask} command(s) {verb}kept with the secret masked, {drop} {verb}forgotten (a private key block: nothing worth keeping around it).");
+            for e in r["examples"].as_array().into_iter().flatten().filter_map(Value::as_str) {
+                println!("  {e}");
+            }
+            if !apply {
+                println!("\nRun `reman scrub --apply` to do it. New commands are already masked as they're recorded.");
+            }
+            Ok(())
+        }
+        Cmd::Here => {
+            let r = client::call(&json!({"op": "here", "cwd": cwd()}))?;
+            if r["found"] != json!(true) {
+                println!("reman has nothing you did in this folder yet.");
+                return Ok(());
+            }
+            println!("Last time here ({}):", r["ago"].as_str().unwrap_or("?"));
+            for (n, s) in r["steps"].as_array().into_iter().flatten().filter_map(Value::as_str).enumerate() {
+                println!("  {}. {s}", n + 1);
+            }
+            Ok(())
+        }
+        Cmd::Why { command } => {
+            let mut req = json!({"op": "why", "cwd": cwd()});
+            if !command.is_empty() {
+                req["command"] = json!(command.join(" "));
+            }
+            let r = client::call(&req)?;
+            if r["found"] != json!(true) {
+                if let Some(c) = r["command"].as_str() {
+                    println!("`{c}`");
+                }
+                println!("{}", r["reason"].as_str().unwrap_or("Nothing to explain."));
+                return Ok(());
+            }
+            let cmd = r["command"].as_str().unwrap_or("");
+            println!("`{cmd}` worked here {} times; last {}, then it failed {}.", r["worked"], r["last_ok"].as_str().unwrap_or("?"), r["first_fail"].as_str().unwrap_or("?"));
+            let between: Vec<&str> = r["between"].as_array().into_iter().flatten().filter_map(Value::as_str).collect();
+            if between.is_empty() {
+                println!("Nothing else ran in this folder in between: look outside it (a service, the network, files changed by another tool).");
+            } else {
+                println!("In between, in this folder (changes to dependencies, branch, schema and files first):");
+                for b in between {
+                    println!("  · {b}");
+                }
+            }
+            println!("\nSince its last success:");
+            for t in r["timeline"].as_array().into_iter().flatten() {
+                let mark = match t["exit"].as_i64() {
+                    Some(0) => "\x1b[32m✓\x1b[0m",
+                    Some(_) => "\x1b[31m✗\x1b[0m",
+                    None => "·",
+                };
+                let c = t["command"].as_str().unwrap_or("").lines().next().unwrap_or("");
+                let bold = if t["target"] == json!(true) { "\x1b[1m" } else { "" };
+                println!("  {mark} {bold}{c}\x1b[0m   \x1b[90m{}\x1b[0m", t["ago"].as_str().unwrap_or(""));
+            }
+            Ok(())
+        }
+        Cmd::Runbook { json: as_json, no_ai, refresh } => {
+            let mut r = client::call(&json!({"op": "runbook", "cwd": cwd(), "fresh": no_ai || refresh}))?;
+            let has_unplaced = r["unplaced"].as_array().is_some_and(|a| !a.is_empty());
+            // a language model, if one is available, arranges and explains (never invents)
+            if !no_ai && r.get("model").is_none() && (r["found"] == json!(true) || has_unplaced) {
+                if let Some(m) = ai::find() {
+                    eprintln!("\x1b[90mreman: asking {} to arrange the runbook (--static skips this)...\x1b[0m", m.label());
+                    match ai::runbook(&m, &r) {
+                        Ok(x) => {
+                            let _ = ai::save(&r, &x, &m.model);
+                            r = ai::merge(&r, &x, &m.model);
+                        }
+                        Err(e) => eprintln!("\x1b[90mreman: the model didn't answer usefully ({e:#}); here is the runbook from your history alone.\x1b[0m"),
+                    }
+                }
+            }
+            let r = ai::without_unplaced(r);
+            if as_json {
+                println!("{}", serde_json::to_string_pretty(&r)?);
+                return Ok(());
+            }
+            if r["found"] != json!(true) {
+                println!("reman doesn't know how this project is run yet: run it a few times first.");
+                return Ok(());
+            }
+            println!("# How this project is run\n");
+            if let Some(s) = r["summary"].as_str().filter(|s| !s.is_empty()) {
+                println!("{s}\n");
+            }
+            let first: Vec<&str> = r["getting_started"].as_array().into_iter().flatten().filter_map(Value::as_str).collect();
+            if !first.is_empty() {
+                println!("## Getting started\n");
+                for (n, c) in first.iter().enumerate() {
+                    println!("{}. `{c}`", n + 1);
+                }
+                println!();
+            }
+            for sec in r["sections"].as_array().into_iter().flatten() {
+                println!("## {}\n", sec["title"].as_str().unwrap_or(""));
+                for c in sec["commands"].as_array().into_iter().flatten() {
+                    let rec = if c["failed"].as_u64() == Some(0) { format!("worked {}x", c["worked"]) } else { format!("worked {} of {}", c["worked"], c["runs"]) };
+                    let note = c["note"].as_str().map(|n| format!(": {n}")).unwrap_or_default();
+                    println!("- `{}`{note} · {rec} · last {}", c["command"].as_str().unwrap_or("").replace('\n', " "), c["last_run"].as_str().unwrap_or("?"));
+                }
+                println!();
+            }
+            let flows: Vec<&Value> = r["flows"].as_array().into_iter().flatten().collect();
+            if !flows.is_empty() {
+                println!("## Usual sequences\n");
+                for f in flows {
+                    let steps: Vec<String> = f["steps"].as_array().into_iter().flatten().filter_map(Value::as_str).map(|s| format!("`{}`", s.replace('\n', " "))).collect();
+                    println!("- {} ({}x)", steps.join(" → "), f["count"]);
+                }
+                println!();
+            }
+            match r["model"].as_str() {
+                Some(m) => println!("_Arranged by {m} from commands that worked here. Every command is one that really ran; reman never generates them._"),
+                None => println!("_From reman: commands that worked here, most used first._"),
+            }
+            Ok(())
+        }
         Cmd::Check { command } => {
             let r = client::call(&json!({"op": "mcp", "tool": "reman_check", "args": {"command": command.join(" ")}, "allow_global": true}))?;
             println!("{}", serde_json::to_string_pretty(&r)?);
@@ -348,6 +500,7 @@ fn real_main() -> Result<()> {
         }
         Cmd::Hook { agent } => match agent.as_str() {
             "claude" | "claude-code" => capture::hook_claude(),
+            "codex" => capture::hook_agent("codex"),
             other => bail!("unknown agent hook {other:?} (supported: claude)"),
         },
         Cmd::Import { source, path } => {
@@ -723,6 +876,10 @@ fn doctor(fix_dupes: bool, clean: bool, rebuild_fixpairs: bool) -> Result<()> {
         let state = if txt.contains(">>> reman >>>") { "wired (rust)" } else if txt.contains("reman_init") { "LEGACY python wiring - run `reman setup`" } else { "not wired" };
         println!("  profile     : {} -> {state}{}", p.display(), if txt.contains("atuin init") { " (atuin still hooked)" } else { "" });
     }
+    for (exe, policy, locked) in ps_policy_blocks() {
+        let fix = if locked { "set by group policy: ask your administrator" } else { "run: Set-ExecutionPolicy RemoteSigned -Scope CurrentUser" };
+        println!("  scripts     : {} BLOCKS profile scripts ({policy}), so reman never loads there; {fix}", ps_name(exe));
+    }
     if fix_dupes {
         let r = client::call(&json!({"op": "fix_dupes"}))?;
         println!("  fix-dupes   : removed {} duplicate execution(s)", r["removed"]);
@@ -880,8 +1037,24 @@ fn clink_loader(exe: &Path) -> String {
     )
 }
 
+/// A title for plain output: the logo (orange cursor, xterm 202) with `what` beside its last row
+/// on a terminal; one plain line when the output is a file or pipe, or NO_COLOR is set.
+fn print_title(what: &str) {
+    use std::io::IsTerminal;
+    if std::io::stdout().is_terminal() && std::env::var_os("NO_COLOR").is_none() {
+        let rows = tui::logo_rows();
+        for (i, (letters, cursor)) in rows.iter().enumerate() {
+            let side = if i == rows.len() - 1 { format!("   \x1b[1m{what}\x1b[0m") } else { String::new() };
+            println!("  {letters}\x1b[38;5;202m{cursor}\x1b[0m{side}");
+        }
+        println!();
+    } else {
+        println!("reman {what}\n{}", "=".repeat(46));
+    }
+}
+
 fn setup(no_profile: bool, no_connect: bool) -> Result<()> {
-    println!("reman setup\n{}", "=".repeat(46));
+    print_title("setup");
     // 1. install a stable copy (a running daemon locks its exe on Windows; builds must not fight it)
     let me = std::env::current_exe()?;
     let bin = config::bin_dir();
@@ -943,6 +1116,8 @@ fn setup(no_profile: bool, no_connect: bool) -> Result<()> {
         for line in wire_ps_profiles(&installed)? {
             println!("  profile         : {line}");
         }
+        // a wired profile does nothing if PowerShell won't run it
+        check_ps_policy();
     }
     // 5. Command Prompt, through Clink (cmd.exe itself has no per-command hook or key bindings)
     if !no_profile && cfg!(windows) {
@@ -1011,6 +1186,79 @@ fn wire_ps_profiles(installed: &Path) -> Result<Vec<String>> {
         out.push(format!("WIRED {} (backup .reman-bak) -> open a new shell", p.display()));
     }
     Ok(out)
+}
+
+/// PowerShell runs no profile script under the "Restricted" or "AllSigned" execution policy, and
+/// Restricted is the default for Windows PowerShell on Windows 10/11. Then reman's profile line
+/// never runs and Up stays plain history. Per installed shell that blocks: (exe, policy, set by
+/// group policy so the user can't change it). Asked the way a NEW window sees it: without the
+/// Process scope this process may have inherited (PSExecutionPolicyPreference).
+fn ps_policy_blocks() -> Vec<(&'static str, String, bool)> {
+    let mut out = Vec::new();
+    if !cfg!(windows) {
+        return out;
+    }
+    let probe = "$g = ((Get-ExecutionPolicy -Scope MachinePolicy) -ne 'Undefined') -or ((Get-ExecutionPolicy -Scope UserPolicy) -ne 'Undefined'); \"$(Get-ExecutionPolicy)|$g\"";
+    for exe in ["powershell", "pwsh"] {
+        let Ok(o) = std::process::Command::new(exe).args(["-NoProfile", "-Command", probe]).env_remove("PSExecutionPolicyPreference").output() else { continue };
+        let s = String::from_utf8_lossy(&o.stdout).trim().to_string();
+        let Some((policy, locked)) = s.split_once('|') else { continue };
+        if matches!(policy, "Restricted" | "AllSigned") {
+            out.push((exe, policy.to_string(), locked.eq_ignore_ascii_case("true")));
+        }
+    }
+    out
+}
+
+fn ps_name(exe: &str) -> &'static str {
+    if exe == "pwsh" { "PowerShell 7" } else { "Windows PowerShell" }
+}
+
+/// Let this user's own scripts (the profile) run: RemoteSigned for the current user only, the
+/// setting Microsoft recommends for this and that Scoop and oh-my-posh also need.
+fn allow_ps_scripts(exe: &str) -> Result<()> {
+    let o = std::process::Command::new(exe)
+        .args(["-NoProfile", "-Command", "Set-ExecutionPolicy RemoteSigned -Scope CurrentUser -Force"])
+        .env_remove("PSExecutionPolicyPreference")
+        .output()?;
+    if !o.status.success() {
+        bail!("{}", String::from_utf8_lossy(&o.stderr).trim());
+    }
+    Ok(())
+}
+
+/// Setup: PowerShell profiles are wired, but will they run? If a shell blocks scripts, ask (in a
+/// terminal, default yes) to allow them for this user; otherwise say exactly what to run.
+fn check_ps_policy() {
+    use std::io::{IsTerminal, Write};
+    for (exe, policy, locked) in ps_policy_blocks() {
+        let name = ps_name(exe);
+        if locked {
+            println!("  script policy   : {name} blocks profile scripts ({policy}), set by group policy: reman can't load in it. Ask your administrator.");
+            continue;
+        }
+        let interactive = std::io::stdin().is_terminal() && std::io::stdout().is_terminal();
+        let yes = if std::env::var_os("REMAN_ALLOW_SCRIPTS").is_some() {
+            true
+        } else if interactive {
+            print!("\n  {name} is set to block profile scripts ({policy}), so reman can't start in new {name} windows.\n  Allow scripts you create for your user only (Set-ExecutionPolicy RemoteSigned -Scope CurrentUser)? [Y/n] ");
+            let _ = std::io::stdout().flush();
+            let mut a = String::new();
+            let _ = std::io::stdin().read_line(&mut a);
+            !a.trim().to_lowercase().starts_with('n')
+        } else {
+            false
+        };
+        if yes {
+            match allow_ps_scripts(exe) {
+                Ok(()) => println!("  script policy   : {name} now runs your own scripts (RemoteSigned, your user only) -> reman loads in new windows"),
+                Err(e) => println!("  script policy   : could not change it ({e}). Run: Set-ExecutionPolicy RemoteSigned -Scope CurrentUser"),
+            }
+        } else {
+            println!("  script policy   : {name} blocks profile scripts ({policy}); reman loads there once you run:");
+            println!("                    Set-ExecutionPolicy RemoteSigned -Scope CurrentUser");
+        }
+    }
 }
 
 /// Is PowerShell wired (a profile holds reman's managed block)?

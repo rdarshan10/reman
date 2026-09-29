@@ -66,7 +66,7 @@ The finder works like a command palette, bottom-up like the prompt it replaces:
 | you're walking through a flow | **flow in progress · 1 of 2 done**: the next step is selected, right above the prompt |
 | your last command just failed | **last command failed: gti status** → `git status` (a proven fix, or the closest command that worked) |
 | empty query | **likely next**: what you usually run after your last command, then **recent in this folder**. An agent's one-off exploration (`cd x && grep …`) is hidden, with a note saying how many; `F3` shows it |
-| you type | **this folder** (strong matches only), then **everywhere**, ranked by meaning plus text. A folder with no good match never dead-ends |
+| you type | **this folder** (strong matches only), then **everywhere**, ranked by meaning plus text. A folder with no good match never dead-ends; when nothing anywhere is close, the list says so ("nothing close in your history · loosely related") |
 | Fixes tab | commands that failed. The card shows *what worked instead*, and `Enter` inserts that fix |
 | Flows tab | step sequences you repeat (`a → b → c`) |
 
@@ -192,11 +192,16 @@ reman search <intent>        hybrid semantic + fuzzy search (--here, --semantic 
 reman fixes <failed cmd>     proven fixes first, then did-you-mean
 reman next                   what you usually run next here
 reman flows [--here]         recurring command sequences
+reman here                   what you did in this folder last time
+reman why [cmd]              a command that used to work here fails: what ran here since
+reman scrub [--apply]        mask secrets in history saved before they were masked at capture
+reman runbook [--json]       how this project is run, by task, from commands that worked
+   [--static] [--refresh]    (arranged by a language model if one is available; --static: never)
 reman check <cmd>            verified / failed / mixed / never_run
 reman stats | doctor | bench
 reman import atuin|psreadline|bash|zsh|fish
 reman forget <cmd> | pin <cmd> [--off] | export [--here --actor --status --query]
-reman mcp                    MCP stdio server (7 tools incl. reman_next)
+reman mcp                    MCP stdio server (8 tools incl. reman_next, reman_runbook)
 ```
 
 ## Storage

@@ -28,6 +28,8 @@ enum Row {
     AddFolder,
     Strict(bool),
     OldHistory(bool),
+    DropSecrets(bool),
+    Ai(bool),
     Shell { name: &'static str, wired: bool, detail: String },
     Info { label: &'static str, value: String },
 }
@@ -50,6 +52,8 @@ impl Row {
             Row::AddFolder => "↵ (or a) types a folder path to share. Tab completes.".into(),
             Row::Strict(_) => "Strict mode withholds any command that still looks like it holds a secret after redaction.".into(),
             Row::OldHistory(_) => "Old, imported history has no folder. When on, agents also get its generic commands (no paths, quotes or hosts).".into(),
+            Row::DropSecrets(_) => "A command holding a secret is recorded with the value masked (`export API_TOKEN=***`); on, it is not recorded at all. `reman scrub` cleans older history.".into(),
+            Row::Ai(_) => "A model only arranges and explains commands that really worked (runbooks), never invents one. Remote endpoints: set \"ai\" in config.json.".into(),
             Row::Shell { wired: true, name, .. } => format!("{name} is wired. To remove it, delete the reman block from the file shown."),
             Row::Shell { name, .. } => format!("↵ wires {name} so its commands are recorded and the finder keys work."),
             _ => String::new(),
@@ -98,11 +102,29 @@ fn build() -> Vec<Row> {
     r.push(Row::Header("Privacy"));
     r.push(Row::Strict(st.strict_secrets));
     r.push(Row::OldHistory(st.share_old_history));
+    r.push(Row::DropSecrets(st.drop_secrets()));
+    let (nc, nf) = (st.ignore_commands.len(), st.ignore_folders.len());
+    r.push(Row::Info { label: "never kept", value: if nc + nf == 0 { "commands typed with a leading space; add patterns as ignore_commands / ignore_folders in config.json".into() } else { format!("a leading space, {nc} command pattern(s), {nf} folder pattern(s) (config.json)") } });
+
+    r.push(Row::Header("Language model (optional)"));
+    r.push(Row::Ai(st.ai.as_ref().is_none_or(|a| a.enabled)));
+    let endpoint = match st.ai.as_ref().and_then(|a| a.endpoint.clone()) {
+        Some(e) => format!("{e}{}", st.ai.as_ref().and_then(|a| a.model.clone()).map(|m| format!("  (model {m})")).unwrap_or_default()),
+        None => "auto: a model running on this machine (Ollama, LM Studio, llama.cpp), if any".into(),
+    };
+    r.push(Row::Info { label: "endpoint", value: endpoint });
 
     r.push(Row::Header("Shells"));
     if cfg!(windows) {
         let ps = crate::ps_wired();
-        r.push(Row::Shell { name: "PowerShell", wired: ps.is_some(), detail: ps.map(|p| p.display().to_string()).unwrap_or_else(|| "not wired".into()) });
+        // wired but blocked (execution policy) is as good as not wired: Enter fixes it
+        let blocked: Vec<_> = crate::ps_policy_blocks().into_iter().filter(|b| !b.2).collect();
+        let detail = match (&ps, blocked.first()) {
+            (Some(_), Some((exe, policy, _))) => format!("wired, but {} blocks profile scripts ({policy}): Enter allows your own", crate::ps_name(exe)),
+            (Some(p), None) => p.display().to_string(),
+            (None, _) => "not wired".into(),
+        };
+        r.push(Row::Shell { name: "PowerShell", wired: ps.is_some() && blocked.is_empty(), detail });
         let auto = crate::cmd_autorun();
         let cmd = if auto.contains("cmd-macros.txt") {
             Some("r / rr macros (AutoRun)".to_string())
@@ -177,10 +199,33 @@ fn act(row: &Row) -> Result<(String, Color)> {
             settings::save(&st)?;
             (format!("old history {}", if st.share_old_history { "shared (generic commands only)" } else { "hidden from agents" }), OK)
         }
+        Row::DropSecrets(on) => {
+            let mut st = settings::load();
+            st.secrets = if *on { None } else { Some("drop".into()) };
+            settings::save(&st)?;
+            (if *on { "secrets are masked: the command is kept, the value hidden" } else { "commands holding a secret are no longer recorded" }.to_string(), OK)
+        }
+        Row::Ai(on) => {
+            let mut st = settings::load();
+            let mut ai = st.ai.clone().unwrap_or(settings::Ai { enabled: true, endpoint: None, model: None, api_key_env: None });
+            ai.enabled = !on;
+            st.ai = Some(ai);
+            settings::save(&st)?;
+            (format!("language model {}", if !on { "on: runbooks are arranged by a model when one is available" } else { "off: runbooks come from your history alone" }), OK)
+        }
         Row::Shell { wired: true, detail, .. } => (format!("already wired: {detail}"), MUTED),
         Row::Shell { name, .. } => {
             let msg = match *name {
-                "PowerShell" => crate::wire_ps_profiles(&exe)?.join("; "),
+                "PowerShell" => {
+                    let mut done = crate::wire_ps_profiles(&exe)?;
+                    for (sh, _, locked) in crate::ps_policy_blocks() {
+                        if !locked {
+                            crate::allow_ps_scripts(sh)?;
+                            done.push(format!("{} now runs your own scripts (RemoteSigned, your user only)", crate::ps_name(sh)));
+                        }
+                    }
+                    done.join("; ")
+                }
                 "Command Prompt" => format!("wired r / rr via {}", crate::wire_cmd_macros(&exe)?.display()),
                 _ => {
                     let (_, rc, _) = crate::wire_unix_rc(&exe)?;
@@ -246,6 +291,8 @@ fn row_line(row: &Row, sel: bool, w: usize) -> Line<'static> {
         Row::AddFolder => Line::from(vec![bar, Span::styled("  + share another folder…", name_st.fg(ACCENT))]),
         Row::Strict(on) => Line::from(vec![bar, check(*on), Span::styled("Strict secrets: withhold anything that still looks secret", name_st)]),
         Row::OldHistory(on) => Line::from(vec![bar, check(*on), Span::styled("Share generic commands from old, folder-less history", name_st)]),
+        Row::DropSecrets(on) => Line::from(vec![bar, check(*on), Span::styled("Drop commands holding a secret (off: mask the value)", name_st)]),
+        Row::Ai(on) => Line::from(vec![bar, check(*on), Span::styled("Use a language model to arrange runbooks", name_st)]),
         Row::Shell { name, wired, detail } => Line::from(vec![
             bar,
             check(*wired),
@@ -259,13 +306,27 @@ fn row_line(row: &Row, sel: bool, w: usize) -> Line<'static> {
 fn draw(buf: &mut Buffer, p: &mut Page) -> (u16, u16) {
     let area = buf.area;
     let (w, h) = (area.width as usize, area.height as usize);
-    Paragraph::new(Line::from(vec![
-        Span::styled(" reman settings", Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)),
-        Span::styled("   every change is saved as you make it", Style::default().fg(MUTED)),
-    ]))
-    .render(Rect::new(0, 0, area.width, 1), buf);
-    // list between the title (row 0, blank row 1) and the 3-line footer
-    let list_h = h.saturating_sub(5);
+    // title: the logo with "settings" beside its last row (one plain line on a short terminal),
+    // then a blank row
+    let subtitle = |lead: &'static str| {
+        Line::from(vec![
+            Span::styled(lead, Style::default().add_modifier(Modifier::BOLD)),
+            Span::styled("   every change is saved as you make it", Style::default().fg(MUTED)),
+        ])
+    };
+    let top = if h >= 18 && w >= tui::LOGO_W as usize + 50 {
+        for (i, line) in tui::logo_lines().into_iter().enumerate() {
+            buf.set_line(1, i as u16, &line, tui::LOGO_W);
+        }
+        let x = tui::LOGO_W + 3;
+        buf.set_line(x, 2, &subtitle("settings"), area.width - x);
+        4
+    } else {
+        buf.set_line(0, 0, &subtitle(" reman settings"), area.width);
+        2
+    };
+    // list between the title and the 3-line footer
+    let list_h = h.saturating_sub(top + 3);
     let lines: Vec<Line> = p.rows.iter().enumerate().map(|(i, r)| row_line(r, i == p.sel, w)).collect();
     // headers get a blank line above them
     let mut shown: Vec<(Line, usize)> = Vec::new();
@@ -282,7 +343,7 @@ fn draw(buf: &mut Buffer, p: &mut Page) -> (u16, u16) {
         p.scroll = sel_at + 1 - list_h;
     }
     for (y, (line, _)) in shown.into_iter().skip(p.scroll).take(list_h).enumerate() {
-        buf.set_line(0, 2 + y as u16, &line, area.width);
+        buf.set_line(0, (top + y) as u16, &line, area.width);
     }
     // footer: what Enter does here / the last result / the keys
     let help = p.rows.get(p.sel).map(Row::help).unwrap_or_default();

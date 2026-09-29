@@ -75,6 +75,7 @@ fn atuin(d: &Daemon, path: Option<PathBuf>, limit: i64) -> Result<Imported> {
             actor: "human".into(),
             ts: ts / 1_000_000_000,
             duration_ms: dur.filter(|d| *d > 0).map(|d| d / 1_000_000),
+            err: None,
         });
     }
     let mut new = 0;
@@ -113,6 +114,7 @@ fn file_runs(d: &Daemon, parsed: Vec<(Option<i64>, String)>) -> Result<Imported>
             actor: "human".into(),
             ts: ts.unwrap_or(now - 86400 - (n - i as i64)),
             duration_ms: None,
+            err: None,
         })
         .collect();
     let mut new = 0;

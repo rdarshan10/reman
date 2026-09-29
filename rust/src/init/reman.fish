@@ -44,6 +44,12 @@ function __reman_postexec --on-event fish_postexec
     end
 end
 
+# "last time here": asked when the folder changes (the daemon answers once per session and folder)
+function __reman_welcome --on-variable PWD
+    $__reman_hook welcome --cwd $PWD --session $REMAN_SESSION
+end
+__reman_welcome
+
 function __reman_find
     set -l scope $argv[1]
     set -l picked (env REMAN_FIND_QUERY=(commandline) $__reman_exe find --scope $scope --cwd $PWD)

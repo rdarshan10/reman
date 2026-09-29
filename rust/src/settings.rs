@@ -19,6 +19,44 @@ pub struct Settings {
     pub share_old_history: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub http: Option<Http>,
+    /// the optional language model (see ai.rs); absent = use a local one if one is running
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ai: Option<Ai>,
+    /// a command holding a secret, when recorded: "mask" keeps it with the value hidden
+    /// (`export API_TOKEN=***`, the default), "drop" doesn't record it at all
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub secrets: Option<String>,
+    /// regexes: commands that are never recorded (e.g. "^curl ", "vault ")
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ignore_commands: Vec<String>,
+    /// regexes: folders where nothing is recorded (e.g. "(?i)\\\\secret-project")
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ignore_folders: Vec<String>,
+}
+
+impl Settings {
+    /// Drop commands holding a secret instead of masking them.
+    pub fn drop_secrets(&self) -> bool {
+        self.secrets.as_deref() == Some("drop")
+    }
+}
+
+/// An OpenAI-compatible chat endpoint. Without `endpoint`, reman looks for a local server
+/// (Ollama, LM Studio, llama.cpp); a remote one is only ever used when set here.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct Ai {
+    #[serde(default = "yes")]
+    pub enabled: bool,
+    /// e.g. `http://localhost:11434/v1`, `https://api.openai.com/v1`
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub endpoint: Option<String>,
+    /// default: the endpoint's first chat model
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// the NAME of the environment variable holding the API key (default REMAN_AI_KEY); the key
+    /// itself is never stored
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_key_env: Option<String>,
 }
 
 fn yes() -> bool {

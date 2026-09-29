@@ -9,7 +9,9 @@ fn patterns() -> &'static [(Regex, &'static str)] {
     P.get_or_init(|| {
         [
             (
-                r"(?i)\b(password|passwd|pwd|secret|token|api[_-]?key|apikey|access[_-]?key|auth[_-]?token|client[_-]?secret)(\s*[=:]\s*)(\S+)",
+                // the secret word anywhere in a variable name: API_TOKEN, GITHUB_TOKEN, DB_PASSWORD,
+                // AWS_SECRET_ACCESS_KEY (a bare \b before it missed every one after an underscore)
+                r"(?i)\b([a-z0-9_]*?(?:password|passwd|pwd|secret|token|api[_-]?key|apikey|access[_-]?key|private[_-]?key|credentials?)[a-z0-9_]*)(\s*[=:]\s*)(\S+)",
                 "${1}${2}***",
             ),
             (r"(?i)(--password[=\s]+|--token[=\s]+)(\S+)", "${1}***"),
@@ -31,6 +33,37 @@ pub fn redact(text: &str) -> String {
     for (rx, repl) in patterns() {
         out = rx.replace_all(&out, *repl).into_owned();
     }
+    // a bare token (no `NAME=` in front) and a JWT: masked in place, the command kept
+    out = residual_regexes()[0].replace_all(&out, "***").into_owned();
+    mask_high_entropy(&out)
+}
+
+fn is_tok(c: char) -> bool {
+    // not `/` or `\`: a path is not a token, however long and mixed its parts
+    c.is_ascii_alphanumeric() || matches!(c, '+' | '=' | '_' | '-')
+}
+
+fn high_entropy_run(run: &str) -> bool {
+    run.len() >= 40 && run.chars().any(|c| c.is_ascii_lowercase()) && run.chars().any(|c| c.is_ascii_uppercase()) && run.chars().any(|c| c.is_ascii_digit())
+}
+
+/// Opaque tokens replaced by `***`, everything around them kept.
+fn mask_high_entropy(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut run = String::new();
+    let flush = |run: &mut String, out: &mut String| {
+        out.push_str(if high_entropy_run(run) { "***" } else { run });
+        run.clear();
+    };
+    for c in text.chars() {
+        if is_tok(c) {
+            run.push(c);
+        } else {
+            flush(&mut run, &mut out);
+            out.push(c);
+        }
+    }
+    flush(&mut run, &mut out);
     out
 }
 
@@ -45,15 +78,9 @@ fn residual_regexes() -> &'static [Regex] {
 }
 
 /// Opaque high-entropy token: a run of 40+ token chars mixing lower + upper + digit. Pure-hex SHAs
-/// and digests have no uppercase, UUIDs are shorter - both are spared.
+/// and digests have no uppercase, UUIDs are shorter, paths are split at `/` and `\` - all spared.
 fn high_entropy(text: &str) -> bool {
-    let is_tok = |c: char| c.is_ascii_alphanumeric() || matches!(c, '+' | '/' | '=' | '_' | '-');
-    text.split(|c: char| !is_tok(c)).any(|run| {
-        run.len() >= 40
-            && run.chars().any(|c| c.is_ascii_lowercase())
-            && run.chars().any(|c| c.is_ascii_uppercase())
-            && run.chars().any(|c| c.is_ascii_digit())
-    })
+    text.split(|c: char| !is_tok(c)).any(high_entropy_run)
 }
 
 pub fn residual_secret(text: &str) -> bool {
@@ -82,12 +109,37 @@ mod tests {
     }
 
     #[test]
+    fn secret_words_inside_variable_names() {
+        assert_eq!(redact("export API_TOKEN=abc123supersecret"), "export API_TOKEN=***");
+        assert_eq!(redact("export GITHUB_TOKEN=abc"), "export GITHUB_TOKEN=***");
+        assert_eq!(redact("DB_PASSWORD=hunter2 npm start"), "DB_PASSWORD=*** npm start");
+        assert_eq!(redact("export AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI"), "export AWS_SECRET_ACCESS_KEY=***");
+        assert_eq!(redact("set STRIPE_SECRET_KEY=abc"), "set STRIPE_SECRET_KEY=***");
+        assert_eq!(redact("$env:OPENAI_API_KEY=\"abc\""), "$env:OPENAI_API_KEY=***");
+        assert_eq!(redact("docker login --password-stdin"), "docker login --password-stdin");
+        assert_eq!(redact("cat token-file.txt"), "cat token-file.txt");
+    }
+
+    #[test]
     fn residual() {
         assert!(residual_secret("curl -d eyJhbGciOiJIUzI1.eyJzdWIiOiIxMjM0.SflKxwRJSMeKKF2QT4"));
         assert!(residual_secret("-----BEGIN RSA PRIVATE KEY"));
         assert!(residual_secret("x Ab3kL9mQ2pR7sT1vW5yZ8aC4dF6gH0jK2lN4pQ7rS9tU"));
         assert!(!residual_secret("git checkout 3f786850e387550fdab836ed7e6dc881de23001b"));
         assert!(!residual_secret("docker rm 123e4567-e89b-12d3-a456-426614174000"));
-        assert_eq!(safe_command("x Ab3kL9mQ2pR7sT1vW5yZ8aC4dF6gH0jK2lN4pQ7rS9tU", true), None);
+        assert!(residual_secret("-----BEGIN RSA PRIVATE KEY"));
+    }
+
+    #[test]
+    fn tokens_masked_in_place_paths_spared() {
+        // a bare token and a JWT are masked, the command kept
+        assert_eq!(redact("curl -H 'x-key: Ab3kL9mQ2pR7sT1vW5yZ8aC4dF6gH0jK2lN4pQ7rS9tU' https://x"), "curl -H 'x-key: ***' https://x");
+        assert_eq!(redact("curl -d eyJhbGciOiJIUzI1.eyJzdWIiOiIxMjM0.SflKxwRJSMeKKF2QT4 x"), "curl -d *** x");
+        assert!(safe_command("x Ab3kL9mQ2pR7sT1vW5yZ8aC4dF6gH0jK2lN4pQ7rS9tU", true).is_some());
+        // a long path is not a token
+        let p = "ls /Users/Dev1/AppData/Local/Temp/claude/c--Users-dev-reman/48361776-88a3-41ab-a8a9-31cdc8b91774/scratchpad";
+        assert_eq!(redact(p), p);
+        assert!(!residual_secret(p));
+        assert_eq!(redact(r"cd C:\Users\Dev1\AppData\Local\Programs\SomethingLongNamed2024Edition\bin"), r"cd C:\Users\Dev1\AppData\Local\Programs\SomethingLongNamed2024Edition\bin");
     }
 }

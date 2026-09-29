@@ -32,6 +32,9 @@ pub struct Entry {
     /// variants that differ only in data (messages, paths, ids) share a shape; the finder folds those
     pub shape: String,
     pub desc: Option<String>,
+    /// every description sentence (the tool's and the subcommand's), lowercased once: the
+    /// words search matches a query against, on every keystroke
+    pub desc_words: Option<String>,
     pub rows: Vec<Row>,
     pub pinned: bool,
     pub comment: bool,
@@ -148,6 +151,10 @@ pub struct Store {
     repos: Interner,
     sessions: Interner,
     pub execs: Vec<Exec>,
+    /// entry -> what it printed the last time it failed (redacted, short; see errors.rs)
+    pub last_err: HashMap<u32, String>,
+    /// error signature -> the entries that failed that way (errors::signature)
+    pub by_sig: HashMap<String, Vec<u32>>,
 }
 
 /// One bit per character class: a-z, 0-9, and the other printable ASCII folded into the rest.
@@ -292,7 +299,7 @@ impl Store {
         }
         drop(rows);
         drop(st);
-        let mut st = db.prepare("SELECT command_id, ts, cwd, session, exit FROM executions WHERE ts IS NOT NULL ORDER BY ts, id")?;
+        let mut st = db.prepare("SELECT command_id, ts, cwd, session, exit, err FROM executions WHERE ts IS NOT NULL ORDER BY ts, id")?;
         let mut rows = st.query([])?;
         while let Some(r) = rows.next()? {
             let cid: i64 = r.get(0)?;
@@ -307,6 +314,10 @@ impl Store {
                 session: s.sessions.intern(sess.as_deref().unwrap_or(""), sess.as_deref().unwrap_or("")),
                 exit: r.get(4)?,
             };
+            let err: Option<String> = r.get(5)?;
+            if let Some(e) = err.filter(|_| ex.exit.is_some_and(|x| x != 0)) {
+                s.note_error(ei, e);
+            }
             s.execs.push(ex);
         }
         for i in 0..s.entries.len() {
@@ -448,6 +459,7 @@ impl Store {
             mask: char_mask(text),
             gkey: describe::group_key(text),
             shape: describe::shape_key(text),
+            desc_words: Some(describe::describe(text).parts.iter().map(|p| p.1.to_lowercase()).collect::<Vec<_>>().join(" ; ")).filter(|w| !w.is_empty()),
             desc,
             rows: Vec::new(),
             pinned: false,
@@ -516,6 +528,9 @@ impl Store {
             r.last_actor = Some(run.actor.clone());
         }
         self.by_id.insert(command_id, ei);
+        if let Some(e) = run.err.clone().filter(|_| run.failed()) {
+            self.note_error(ei, e);
+        }
         let ex = Exec { ts: run.ts, entry: ei, row_id: command_id, cwd, session, exit: run.exit };
         // imports can arrive out of order; keep the log sorted by ts
         if self.execs.last().is_none_or(|l| l.ts <= ex.ts) {
@@ -525,6 +540,17 @@ impl Store {
             self.execs.insert(pos, ex);
         }
         ei
+    }
+
+    /// A failure's output: the entry's last error, and its signature in the index.
+    fn note_error(&mut self, ei: u32, err: String) {
+        if let Some(sig) = crate::errors::signature(&err) {
+            let v = self.by_sig.entry(sig).or_default();
+            if !v.contains(&ei) {
+                v.push(ei);
+            }
+        }
+        self.last_err.insert(ei, err);
     }
 
     /// Drop specific (command, cwd) rows (retention purge). Entry dies when its last row goes.
@@ -569,7 +595,7 @@ mod tests {
     use super::*;
 
     fn run(cmd: &str, exit: i64, cwd: &str, actor: &str, ts: i64) -> Run {
-        Run { cmd: cmd.into(), exit: Some(exit), cwd: Some(cwd.into()), session: "s".into(), actor: actor.into(), ts, duration_ms: None }
+        Run { cmd: cmd.into(), exit: Some(exit), cwd: Some(cwd.into()), session: "s".into(), actor: actor.into(), ts, duration_ms: None, err: None }
     }
 
     #[test]
@@ -624,7 +650,7 @@ mod self_ref_tests {
         assert!(is_self_ref(r#"& "C:\py\python.exe" "C:\x\reman_tui.py" --query q"#));
         assert!(is_self_ref(r#"for q in "a" "b"; do ~/.reman/bin/reman.exe search "$q"; done"#));
         assert!(is_self_ref("cd /c/x && reman stats"));
-        assert!(!is_self_ref("cd /c/Users/rdars/reman && cargo build --release"));
+        assert!(!is_self_ref("cd /c/Users/me/reman && cargo build --release"));
         assert!(!is_self_ref("git clone https://github.com/x/remanufacture"));
         assert!(!is_self_ref("docker-compose down"));
     }

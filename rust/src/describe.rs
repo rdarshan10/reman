@@ -185,6 +185,10 @@ pub fn wrapped(cmd: &str) -> Option<String> {
     (!inner.trim().is_empty()).then_some(inner)
 }
 
+/// command_desc_vec is keyed (command, kind): one kind per description sentence, max-blended
+const SPEC: [&str; 4] = ["spec", "spec2", "spec3", "spec4"];
+const WSPEC: [&str; 4] = ["wspec", "wspec2", "wspec3", "wspec4"];
+
 pub fn describe(cmd: &str) -> Description {
     let mut d = describe_one(cmd);
     // the wrapped command says what it's FOR (`alembic upgrade head` = migrations), so it leads
@@ -193,12 +197,41 @@ pub fn describe(cmd: &str) -> Description {
         if !i.parts.is_empty() {
             d.display = i.display.clone().or(d.display);
             // own kinds: command_desc_vec is keyed (command, kind)
-            let mut parts: Vec<(&'static str, String)> = i.parts.into_iter().map(|(k, t)| (if k == "gen" { "wgen" } else { "wspec" }, t)).collect();
+            let own = |k: &str| if k == "gen" { "wgen" } else { SPEC.iter().position(|s| *s == k).map_or("wspec", |i| WSPEC[i]) };
+            let mut parts: Vec<(&'static str, String)> = i.parts.into_iter().map(|(k, t)| (own(k), t)).collect();
             parts.extend(d.parts);
             d.parts = parts;
         }
     }
     d
+}
+
+/// The subcommand of a subcommand: the first bare word after `sub`, past any flags
+/// (`docker compose -f x.yml down` -> `down`). None when something else comes first.
+fn word_after(cmd: &str, sub: &str) -> Option<String> {
+    let mut toks = cmd.split_whitespace().map(str::to_lowercase).skip_while(|t| t != sub).skip(1);
+    toks.find(|t| !t.starts_with('-') && !t.contains('.')).filter(|t| is_bare_word(t))
+}
+
+fn add<'a>(spec: &mut Vec<&'a String>, g: Option<&'a String>) {
+    if let Some(g) = g {
+        if !spec.iter().any(|s| s.eq_ignore_ascii_case(g)) {
+            spec.push(g);
+        }
+    }
+}
+
+/// The argument after `word` (the program, or its subcommand): `git reset --soft HEAD~1` after
+/// `reset` is `--soft`.
+fn arg_after(cmd: &str, word: &str) -> Option<String> {
+    let norm = |t: &str| {
+        let t = t.trim_matches(|c| c == '"' || c == '\'').replace('\\', "/").to_lowercase();
+        let t = t.rsplit('/').next().unwrap_or("").to_string();
+        alias(t.strip_suffix(".exe").unwrap_or(&t)).to_string()
+    };
+    let mut toks = cmd.split_whitespace();
+    toks.find(|t| norm(t) == word)?;
+    toks.next().map(str::to_lowercase)
 }
 
 fn describe_one(cmd: &str) -> Description {
@@ -207,26 +240,51 @@ fn describe_one(cmd: &str) -> Description {
         return Description { display: None, parts: vec![] };
     };
     let m = tldr();
+    // what the first argument says: `git checkout main` "Switch to an existing local branch",
+    // `git reset --soft` "Undo the last commit...", `ipconfig /flushdns` "Remove all data from
+    // the local DNS cache" (tldr examples keyed by flag, switch, or `*` for a plain value)
+    let by_arg = |page: &str, after: &str| -> Option<&String> {
+        let arg = arg_after(cmd, after)?;
+        let key = if arg.starts_with('-') || arg.starts_with('/') { arg } else { "*".to_string() };
+        m.ex.get(&format!("{page}\0{key}"))
+    };
     let mut parts = Vec::new();
     if let Some(g) = m.cmd.get(&prog) {
         parts.push(("gen", format!("{prog}: {g}")));
     }
+    let mut spec: Vec<&String> = Vec::new();
+    // the words of the command the sentences describe: `docker compose down`
+    let mut label = prog.clone();
     if let Some(sub) = sub {
-        let mut spec: Vec<&String> = Vec::new();
-        if let Some(g) = m.cmd.get(&format!("{prog}-{sub}")) {
-            spec.push(g);
-        }
-        if let Some(g) = m.ex.get(&format!("{prog}\0{sub}")) {
-            if !spec.iter().any(|s| s.eq_ignore_ascii_case(g)) {
-                spec.push(g);
+        // two-level tools: `docker compose down` is about `down`, not "run and manage multi
+        // container applications" - use the deeper page when tldr has one
+        let page = format!("{prog}-{sub}");
+        if let Some(sub2) = word_after(cmd, &sub) {
+            add(&mut spec, m.cmd.get(&format!("{page}-{sub2}")));
+            add(&mut spec, m.ex.get(&format!("{page}\0{sub2}")));
+            if !spec.is_empty() {
+                label = format!("{prog} {sub} {sub2}");
             }
         }
-        if !spec.is_empty() {
-            let joined: Vec<&str> = spec.iter().map(|s| s.as_str()).collect();
-            parts.push(("spec", format!("{prog}: {}", joined.join("; "))));
+        if spec.is_empty() {
+            add(&mut spec, m.cmd.get(&page));
+            add(&mut spec, m.ex.get(&format!("{prog}\0{sub}")));
+            add(&mut spec, by_arg(&page, &sub));
+            label = format!("{prog} {sub}");
         }
+    } else {
+        add(&mut spec, by_arg(&prog, &prog));
     }
-    let display = parts.iter().find(|p| p.0 == "spec").or_else(|| parts.first()).map(|p| p.1.clone());
+    let display = if spec.is_empty() {
+        parts.first().map(|p| p.1.clone())
+    } else {
+        Some(format!("{prog}: {}", spec.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("; ")))
+    };
+    // each sentence embedded on its own, named by the command it describes: joined, or behind
+    // a bare "docker-compose:", it matches less ("tear down containers": 0.666 -> 0.709)
+    for (kind, s) in SPEC.iter().zip(&spec) {
+        parts.push((*kind, format!("{label}: {s}")));
+    }
     Description { display, parts }
 }
 
@@ -305,7 +363,7 @@ mod wrapper_tests {
 
     #[test]
     fn sees_through_wrappers() {
-        assert_eq!(wrapped("docker exec planet_web alembic upgrade head").as_deref(), Some("alembic upgrade head"));
+        assert_eq!(wrapped("docker exec api_web alembic upgrade head").as_deref(), Some("alembic upgrade head"));
         assert_eq!(wrapped("docker exec -it -u postgres db psql -U x").as_deref(), Some("psql -U x"));
         assert_eq!(wrapped("docker compose exec web alembic upgrade head").as_deref(), Some("alembic upgrade head"));
         assert_eq!(wrapped("docker-compose run --rm web pytest -q").as_deref(), Some("pytest -q"));
@@ -314,7 +372,7 @@ mod wrapper_tests {
         assert_eq!(wrapped("python -m pytest tests").as_deref(), Some("pytest tests"));
         assert_eq!(wrapped("docker compose up -d"), None);
         assert_eq!(wrapped("git status"), None);
-        let d = describe("docker exec planet_web alembic upgrade head");
+        let d = describe("docker exec api_web alembic upgrade head");
         assert!(d.parts.iter().any(|p| p.1.to_lowercase().contains("migration")), "{:?}", d.parts);
     }
 }

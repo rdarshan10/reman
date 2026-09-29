@@ -13,7 +13,7 @@ mod config;
 
 fn usage() -> ! {
     eprintln!(
-        "usage: reman-hook record [--exit N] [--cwd DIR] [--session ID] [--actor A] [--duration-ms MS] [--suggest] -- <command...>\n       reman-hook claude    (Claude Code hook payload on stdin)"
+        "usage: reman-hook record [--exit N] [--cwd DIR] [--session ID] [--actor A] [--duration-ms MS] [--suggest] -- <command...>\n       reman-hook welcome [--cwd DIR] [--session ID]\n       reman-hook claude    (Claude Code hook payload on stdin)"
     );
     std::process::exit(2)
 }
@@ -22,6 +22,19 @@ fn main() {
     let mut args = std::env::args().skip(1);
     let result = match args.next().as_deref() {
         Some("claude") | Some("hook") => capture::hook_claude(),
+        Some("codex") => capture::hook_agent("codex"),
+        // fish, on arriving in a folder: "last time here" (once per session and folder)
+        Some("welcome") => {
+            let (mut cwd, mut session) = (None, None);
+            while let Some(x) = args.next() {
+                match x.as_str() {
+                    "--cwd" => cwd = args.next(),
+                    "--session" => session = args.next(),
+                    _ => usage(),
+                }
+            }
+            capture::welcome(cwd, session)
+        }
         Some("record") => {
             let mut a = capture::RecordArgs { command: String::new(), exit: None, cwd: None, session: None, actor: None, duration_ms: None, suggest: false, print_fix: false };
             let mut rest: Vec<String> = Vec::new();

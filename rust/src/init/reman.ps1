@@ -39,7 +39,7 @@ $env:REMAN_SESSION = $global:__RemanSessionId
 # One JSON line to the daemon. $waitMs > 0 waits (bounded) for the reply. If the daemon is down the
 # run goes to the spool file (drained on next start) and the daemon is started in the background.
 function global:__RemanSend {
-  param($obj, [int]$waitMs = 0)
+  param($obj, [int]$waitMs = 0, [bool]$spool = $true)
   $json = ($obj | ConvertTo-Json -Compress)
   try {
     $c = New-Object Net.Sockets.TcpClient
@@ -57,6 +57,7 @@ function global:__RemanSend {
     $c.Close()
     return $resp
   } catch {
+    if (-not $spool) { return $null }
     try { [IO.File]::AppendAllText("__SPOOL__", $json + "`n", (New-Object Text.UTF8Encoding($false))) } catch { }
     $now = [DateTime]::UtcNow
     if (-not $global:__RemanSpawned -or ($now - $global:__RemanSpawned).TotalSeconds -gt 30) {
@@ -92,6 +93,18 @@ try {
 
 # Record the command that just finished (once: repeated prompts see the same history id).
 # $trusted = we read `$?` first. Otherwise judge from what the command left behind.
+function global:__RemanWelcome {
+  # "last time here": asked when the folder changes; the daemon answers once per session and
+  # folder, and only after a while away
+  try {
+    $here = (Get-Location).Path
+    if ($here -eq $global:__RemanPwd) { return }
+    $global:__RemanPwd = $here
+    $r = __RemanSend @{ op = 'welcome'; cwd = $here; session = $env:REMAN_SESSION } 300 $false
+    if ($r -and $r.line) { Write-Host "  reman: $($r.line)" -ForegroundColor DarkGray }
+  } catch { }
+}
+
 function global:__RemanCapture {
   param([bool]$ok, $code, [bool]$trusted)
   try {
@@ -99,8 +112,8 @@ function global:__RemanCapture {
     $h = Get-History -Count 1
     if ($h -and $h.Id -ne $global:__RemanLastHistId) {
       $global:__RemanLastHistId = $h.Id
+      $newErr = $e0 -and -not [object]::ReferenceEquals($e0, $global:__RemanErr0)
       if (-not $trusted) {
-        $newErr = $e0 -and -not [object]::ReferenceEquals($e0, $global:__RemanErr0)
         $ok = ($h.ExecutionStatus -eq 'Completed') -and -not $newErr -and -not ($code -and $code -ne $global:__RemanPrevCode)
       }
       $cmd = $h.CommandLine
@@ -110,14 +123,18 @@ function global:__RemanCapture {
         $req = @{ op = 'ingest'; command = $cmd; exit = $exit; cwd = (Get-Location).Path;
                   session = $env:REMAN_SESSION; actor = 'human'; duration_ms = $dur }
         if ($exit -ne 0) {
+          # what it printed, when PowerShell kept it (cmdlets; a native program's stderr isn't)
+          if ($newErr) { try { $req.error = [string]$e0.Exception.Message } catch { } }
           $r = __RemanSend $req 400
           if ($r -and $r.suggest -and $r.suggest.command) {
             $global:__RemanFix = [string]$r.suggest.command
-            $lead = if ($r.suggest.kind -eq 'proven') { 'last time this failed you ran' } else { 'did you mean' }
+            $lead = switch ($r.suggest.kind) { 'proven' { 'last time this failed you ran' } 'same_error' { 'the same error was fixed by' } default { 'did you mean' } }
             Write-Host "  reman: $lead -> " -NoNewline -ForegroundColor DarkGray
             Write-Host $global:__RemanFix -NoNewline -ForegroundColor Cyan
             Write-Host '   (Alt+F inserts)' -ForegroundColor DarkGray
           }
+          # it used to work here: what ran here since
+          if ($r -and $r.note) { Write-Host "  reman: $($r.note)" -ForegroundColor DarkGray }
         } else { [void](__RemanSend $req 0) }
       }
     }
@@ -166,12 +183,19 @@ $global:__RemanPrompt = {
     $global:__RemanLevels = @($levels | Select-Object -First ($k + 1))
   }
   __RemanCapture $ok $code $trusted
+  __RemanWelcome
   if ($trusted) { __RemanAutoReload }
   $global:__RemanDepth = 0
   try {
     $global:LASTEXITCODE = $code
     if (-not $ok) { Write-Error 'reman: the last command failed' -ErrorAction Ignore }
-    if (@($global:__RemanChain).Count) { & @($global:__RemanChain)[0] } else { __RemanBasePrompt }
+    $p = if (@($global:__RemanChain).Count) { & @($global:__RemanChain)[0] } else { __RemanBasePrompt }
+    if ($global:__RemanOsc) {
+      # OSC 133: the last command ended (with its code), a prompt starts, input starts
+      $esc = [char]27; $bel = [char]7
+      $d = if ($ok) { 0 } elseif ($code) { $code } else { 1 }
+      "$esc]133;D;$d$bel$esc]133;A$bel" + ($p -join '') + "$esc]133;B$bel"
+    } else { $p }
   } finally {
     $global:__RemanDepth = $null
     if (-not $trusted) {
@@ -195,6 +219,26 @@ $function:global:prompt = [scriptblock]::Create($global:__RemanPrompt.ToString()
 if ($global:__RemanLevels.Count) { $global:__RemanLevels[$global:__RemanLevels.Count - 1] = $function:global:prompt }
 else { $global:__RemanLevels = @($function:global:prompt) }
 $global:__RemanExeTime = try { [IO.File]::GetLastWriteTimeUtc($global:__RemanExe) } catch { $null }
+
+# OSC 133 prompt marks, for terminals that show them (Windows Terminal, WezTerm): jump between
+# commands, see each one's exit code. VS Code adds its own; REMAN_NO_OSC133 turns ours off.
+$global:__RemanOsc = (-not $env:REMAN_NO_OSC133) -and ($env:TERM_PROGRAM -ne 'vscode') -and ($env:WT_SESSION -or $env:TERM_PROGRAM -eq 'WezTerm')
+
+# PSReadLine reads each command line through PSConsoleHostReadLine. Wrapping it (as Atuin does)
+# is a safety net for capture: if something replaced the prompt without calling reman's, the
+# last command is still recorded here (__RemanCapture skips one it already has). It also marks
+# where a command starts, for OSC 133.
+if ((Get-Command PSConsoleHostReadLine -ErrorAction Ignore) -and -not $global:__RemanReadLine) {
+  $global:__RemanReadLine = ${function:PSConsoleHostReadLine}
+}
+if ($global:__RemanReadLine) {
+  function global:PSConsoleHostReadLine {
+    try { __RemanCapture $true $global:LASTEXITCODE $false } catch { }
+    $line = & $global:__RemanReadLine
+    if ($global:__RemanOsc) { [Console]::Write("$([char]27)]133;C$([char]7)") }
+    $line
+  }
+}
 
 # Native finder. The query travels via env (Windows PowerShell 5.1 drops empty native args and
 # mangles embedded quotes); the pick comes back through a temp file.

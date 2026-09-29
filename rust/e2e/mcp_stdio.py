@@ -33,7 +33,7 @@ async def main():
             ok = ({"reman_search", "reman_recent", "reman_fixes", "reman_check", "reman_flows", "reman_failures", "reman_next"} <= set(names)
                   and "alembic" in text and '"generated": false' in text and denied)
             print("\nMCP over-the-wire AC (rust):", "PASS" if ok else "FAIL")
-            sys.exit(0 if ok else 1)
+            return ok  # exit outside the client: SystemExit inside it becomes an ExceptionGroup
 
 
-asyncio.run(main())
+sys.exit(0 if asyncio.run(main()) else 1)

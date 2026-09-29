@@ -47,7 +47,8 @@ pub fn spool(req: &Value) -> Result<()> {
     Ok(())
 }
 
-/// Push one ingest; returns the daemon's suggestion for a failed command when `want_reply`.
+/// Push one ingest; returns the daemon's reply (the suggestion and note for a failed command)
+/// when `want_reply`.
 pub fn push(mut req: Value, want_reply: bool) -> Option<Value> {
     if req.get("ts").is_none() {
         req["ts"] = json!(config::now());
@@ -56,7 +57,7 @@ pub fn push(mut req: Value, want_reply: bool) -> Option<Value> {
         Ok(mut c) => {
             if want_reply {
                 c.set_timeout(Some(Duration::from_millis(1500)));
-                c.call(&req).ok().and_then(|v| v.get("suggest").cloned())
+                c.call(&req).ok()
             } else {
                 let _ = c.send(&req);
                 None
@@ -93,12 +94,38 @@ pub fn record(a: RecordArgs) -> Result<()> {
         "actor": a.actor.unwrap_or_else(detect_actor), "duration_ms": a.duration_ms,
     });
     let failed = a.exit.is_some_and(|e| e > 0);
-    if let Some(sg) = push(req, a.suggest && failed) {
-        print_suggestion(&sg);
-        if a.print_fix {
-            if let Some(c) = sg.get("command").and_then(Value::as_str) {
-                println!("{c}");
+    if let Some(reply) = push(req, a.suggest && failed) {
+        if let Some(sg) = reply.get("suggest") {
+            print_suggestion(sg);
+            if a.print_fix {
+                if let Some(c) = sg.get("command").and_then(Value::as_str) {
+                    println!("{c}");
+                }
             }
+        }
+        print_note(&reply);
+    }
+    Ok(())
+}
+
+/// The daemon's one-line note (what broke a command that used to work here; last time here).
+pub fn print_note(reply: &Value) {
+    for k in ["note", "line"] {
+        if let Some(n) = reply.get(k).and_then(Value::as_str).filter(|n| !n.is_empty()) {
+            eprintln!("\x1b[90m  reman: {n}\x1b[0m");
+        }
+    }
+}
+
+/// "Last time here": asked once when a shell arrives in a folder (fish, via reman-hook).
+#[allow(dead_code)] // only reman-hook calls it
+pub fn welcome(cwd: Option<String>, session: Option<String>) -> Result<()> {
+    let cwd = cwd.or_else(|| std::env::current_dir().ok().map(|p| p.to_string_lossy().into_owned()));
+    let session = session.or_else(|| std::env::var("REMAN_SESSION").ok()).unwrap_or_default();
+    if let Ok(mut c) = Client::connect_timeout(Duration::from_millis(150)) {
+        c.set_timeout(Some(Duration::from_millis(300)));
+        if let Ok(reply) = c.call(&json!({"op": "welcome", "cwd": cwd, "session": session})) {
+            print_note(&reply);
         }
     }
     Ok(())
@@ -106,37 +133,91 @@ pub fn record(a: RecordArgs) -> Result<()> {
 
 pub fn print_suggestion(sg: &Value) {
     let Some(cmd) = sg.get("command").and_then(Value::as_str) else { return };
-    let lead = if sg.get("kind").and_then(Value::as_str) == Some("proven") { "last time this failed you ran" } else { "did you mean" };
+    let lead = match sg.get("kind").and_then(Value::as_str) {
+        Some("proven") => "last time this failed you ran",
+        Some("same_error") => "the same error was fixed by",
+        _ => "did you mean",
+    };
     eprintln!("\x1b[90m  reman: {lead} \u{2192} \x1b[36m{cmd}\x1b[0m");
 }
 
 /// Claude Code PostToolUse / PostToolUseFailure hook: payload JSON on stdin.
 pub fn hook_claude() -> Result<()> {
+    hook_agent("claude-code")
+}
+
+/// Coding-agent hooks, payload JSON on stdin. Claude Code and Codex share the format:
+/// PreToolUse marks when a command starts (so it gets a duration), PostToolUse and
+/// PostToolUseFailure record it. Claude reports failures; Codex hands hooks only the output
+/// text, with no exit code, so its runs are recorded with an unknown outcome, never a guess.
+pub fn hook_agent(agent: &str) -> Result<()> {
     let mut buf = String::new();
     std::io::stdin().read_to_string(&mut buf)?;
     let Ok(data) = serde_json::from_str::<Value>(&buf) else { return Ok(()) };
-    // Claude Code runs commands through its Bash tool, and on Windows also its PowerShell tool
-    if !matches!(data.get("tool_name").and_then(Value::as_str), Some("Bash" | "PowerShell")) {
+    // shell commands: Claude's Bash (and on Windows PowerShell) tool, Codex's Bash / shell tool
+    if !matches!(data.get("tool_name").and_then(Value::as_str), Some("Bash" | "PowerShell" | "shell" | "local_shell")) {
         return Ok(());
     }
-    let cmd = data.pointer("/tool_input/command").and_then(Value::as_str).unwrap_or("").trim().to_string();
+    let cmd = match data.pointer("/tool_input/command") {
+        Some(Value::String(s)) => s.trim().to_string(),
+        // older Codex: ["bash", "-lc", "the command"]
+        Some(Value::Array(a)) => {
+            let parts: Vec<&str> = a.iter().filter_map(Value::as_str).collect();
+            match parts.as_slice() {
+                [_, flag, script] if flag.starts_with('-') && flag.contains('c') => script.trim().to_string(),
+                _ => parts.join(" "),
+            }
+        }
+        _ => String::new(),
+    };
     if cmd.is_empty() {
         return Ok(());
     }
-    let cwd = data.get("cwd").and_then(Value::as_str).map(str::to_string).or_else(|| std::env::current_dir().ok().map(|p| p.to_string_lossy().into_owned()));
-    let session = data.get("session_id").and_then(Value::as_str).map(str::to_string).or_else(|| std::env::var("CLAUDE_CODE_SESSION_ID").ok()).unwrap_or_default();
     let event = data.get("hook_event_name").and_then(Value::as_str).unwrap_or("");
+    let id = data.get("tool_use_id").and_then(Value::as_str).unwrap_or("").to_string();
+    if event == "PreToolUse" {
+        // only the start time: fire and forget, and never spooled (a stale start is useless)
+        if !id.is_empty() {
+            if let Ok(mut c) = Client::connect_timeout(Duration::from_millis(150)) {
+                let _ = c.send(&json!({"op": "agent_start", "id": id}));
+            }
+        }
+        return Ok(());
+    }
+    let cwd = data.get("cwd").and_then(Value::as_str).map(str::to_string).or_else(|| std::env::current_dir().ok().map(|p| p.to_string_lossy().into_owned()));
+    let session = data
+        .get("session_id")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .or_else(|| std::env::var("CLAUDE_CODE_SESSION_ID").ok())
+        .unwrap_or_default();
     let resp = data.get("tool_response").cloned().unwrap_or(Value::Null);
-    let mut exit: i64 = ["exit_code", "exitCode", "returncode", "code"].iter().find_map(|k| resp.get(*k).and_then(Value::as_i64)).unwrap_or(0);
+    let code = ["exit_code", "exitCode", "returncode", "code"].iter().find_map(|k| resp.get(*k).and_then(Value::as_i64));
     let flag = |k: &str| resp.get(k).and_then(Value::as_bool).unwrap_or(false);
-    if (flag("is_error") || flag("interrupted")) && exit == 0 {
-        exit = 1;
+    let exit: Option<i64> = if event == "PostToolUseFailure" || flag("is_error") || flag("interrupted") {
+        Some(code.filter(|c| *c != 0).unwrap_or(1))
+    } else if code.is_some() {
+        code
+    } else if agent == "codex" {
+        None // Codex gives no exit code: outcome unknown
+    } else {
+        Some(0) // Claude: a failure would have fired PostToolUseFailure
+    };
+    // what it printed, when it failed: the error, else stderr, else its output
+    let err = exit.filter(|e| *e != 0).and_then(|_| {
+        [data.get("error"), resp.get("stderr"), resp.get("stdout"), Some(&resp)]
+            .into_iter()
+            .flatten()
+            .find_map(|v| v.as_str().filter(|s| !s.trim().is_empty()).map(str::to_string))
+    });
+    let mut req = json!({"op": "ingest", "command": cmd, "exit": exit, "cwd": cwd, "session": session, "actor": format!("agent:{agent}")});
+    if !id.is_empty() {
+        req["start_id"] = json!(id);
     }
-    // a failed Bash command fires PostToolUseFailure, not PostToolUse
-    if event == "PostToolUseFailure" && exit == 0 {
-        exit = 1;
+    if let Some(e) = err {
+        req["error"] = json!(e);
     }
-    push(json!({"op": "ingest", "command": cmd, "exit": exit, "cwd": cwd, "session": session, "actor": "agent:claude-code"}), false);
+    push(req, false);
     Ok(())
 }
 

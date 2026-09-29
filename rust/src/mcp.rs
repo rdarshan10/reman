@@ -162,10 +162,11 @@ pub fn call_tool(d: &Daemon, name: &str, args: &Value, pol: &Policy) -> Result<V
         "reman_search" => tool_search(d, args, pol, cwd),
         "reman_recent" => Ok(tool_recent(d, args, pol, cwd, false)),
         "reman_failures" => Ok(tool_recent(d, args, pol, cwd, true)),
-        "reman_fixes" => tool_fixes(d, arg_s(args, "failed_command").unwrap_or(""), pol, cwd, 3),
+        "reman_fixes" => tool_fixes_for(d, arg_s(args, "failed_command").unwrap_or(""), arg_s(args, "error"), pol, cwd, 3),
         "reman_check" => tool_check(d, arg_s(args, "command").unwrap_or(""), pol, cwd),
         "reman_flows" => Ok(tool_flows(d, args, pol)),
         "reman_next" => Ok(tool_next(d, args, pol, cwd)),
+        "reman_runbook" => Ok(tool_runbook(d, pol, cwd)),
         other => Err(anyhow!("unknown tool {other}")),
     }
 }
@@ -180,13 +181,8 @@ fn tool_search(d: &Daemon, a: &Value, pol: &Policy, cwd: Option<&str>) -> Result
     let q = Query { text: intent, k: 400, offset: 0, scope: Scope::All, actor: None, status: worked.then_some("ok"), group: true, rank: Rank::Hybrid, here: cwd.and_then(|c| st.cwd_index(c)) };
     let out = search::search(&st, &q, qv.as_deref().map(|v| v.as_slice()));
     let mut res: Vec<(Value, u32)> = Vec::new();
-    // relevance floor: an empty answer ("nothing known") beats the least-bad unrelated command.
-    // Fuzzy evidence only counts for command-like queries - for a sentence it's letter soup.
-    let cmd_like = search::command_like(&st, intent);
-    for h in &out.hits {
-        if out.mode != "manual" && h.sim < search::WEAK_SIM && !(cmd_like && h.fuzzy >= 0.5) {
-            continue;
-        }
+    // relevance floor: an empty answer ("nothing known") beats the least-bad unrelated command
+    for h in out.hits.iter().filter(|h| h.close) {
         let e = &st.entries[h.idx as usize];
         let rows = visible(&st, e, pol, cwd);
         if rows.is_empty() {
@@ -250,6 +246,30 @@ fn tool_recent(d: &Daemon, a: &Value, pol: &Policy, cwd: Option<&str>, failures:
     }
     items.sort_by(|a, b| b.0.cmp(&a.0));
     Value::Array(items.into_iter().take(n).map(|x| x.1).collect())
+}
+
+/// reman_fixes with the error the command printed: first what fixed a DIFFERENT command that
+/// failed with the same error, then the usual fixes for this one.
+fn tool_fixes_for(d: &Daemon, failed: &str, error: Option<&str>, pol: &Policy, cwd: Option<&str>, k: usize) -> Result<Value> {
+    let mut out: Vec<Value> = Vec::new();
+    if let Some(sig) = error.and_then(crate::errors::signature) {
+        let st = d.store.read();
+        if let Some((other, fix)) = d.fix_for_error(&st, &sig, failed) {
+            let seen = |t: &str| st.entry(t).is_some_and(|(_, e)| !visible(&st, e, pol, cwd).is_empty());
+            if seen(&fix) && seen(&other) {
+                if let (Some(f), Some(o)) = (pol.safe(&fix), pol.safe(&other)) {
+                    out.push(json!({"fixed_command": f, "proven": true, "same_error": true, "was_fixing": o,
+                                    "note": "Another command failed with this same error; this is what fixed it. Adapt it to your command.", "generated": false}));
+                }
+            }
+        }
+    }
+    for v in tool_fixes(d, failed, pol, cwd, k)?.as_array().into_iter().flatten() {
+        if out.len() < k && !out.iter().any(|o| o["fixed_command"] == v["fixed_command"]) {
+            out.push(v.clone());
+        }
+    }
+    Ok(Value::Array(out))
 }
 
 fn tool_fixes(d: &Daemon, failed: &str, pol: &Policy, cwd: Option<&str>, k: usize) -> Result<Value> {
@@ -332,7 +352,34 @@ fn tool_check(d: &Daemon, command: &str, pol: &Policy, cwd: Option<&str>) -> Res
     if cwd.is_none() {
         out["folders"] = json!(folders);
     }
+    // it used to work here and has just started failing: what ran in this folder in between
+    if verdict == "mixed" {
+        if let Some(c) = cwd {
+            let st = d.store.read();
+            if let (Some(ci), Some((i, _))) = (st.cwd_index(c), st.entry(cmd)) {
+                if let Some(b) = crate::insight::what_broke(&st, i, ci) {
+                    let between: Vec<String> = b
+                        .between
+                        .iter()
+                        .map(|&j| &st.entries[j as usize])
+                        .filter(|e| !visible(&st, e, pol, None).is_empty())
+                        .filter_map(|e| pol.safe(&e.text))
+                        .collect();
+                    out["stopped_working"] = json!({"worked_before": b.worked, "last_worked": config::age(b.last_ok), "ran_here_since": between});
+                    out["advice"] = json!(format!("This worked {} times here and has just started failing. Look at what ran here since it last worked (ran_here_since) before changing the command.", b.worked));
+                }
+            }
+        }
+    }
     if verdict == "failed" || verdict == "mixed" {
+        // what it printed the last time it failed (redacted when it was recorded)
+        let last = {
+            let st = d.store.read();
+            st.entry(cmd).and_then(|(i, _)| st.last_err.get(&i).cloned())
+        };
+        if let Some(e) = last {
+            out["last_error"] = json!(e);
+        }
         let fixes = tool_fixes(d, cmd, pol, cwd, 1)?;
         if let Some(f) = fixes.as_array().and_then(|a| a.first()).filter(|f| f["proven"] == json!(true)) {
             out["known_fix"] = f["fixed_command"].clone();
@@ -359,6 +406,40 @@ fn tool_flows(d: &Daemon, a: &Value, pol: &Policy) -> Value {
         }
     }
     Value::Array(out)
+}
+
+/// How this project is run: per task (set up, run, test, lint, build, database, deploy) the
+/// commands that worked, and the usual sequences. For `cwd`, else the project the agent runs in.
+fn tool_runbook(d: &Daemon, pol: &Policy, cwd: Option<&str>) -> Value {
+    let Some(folder) = cwd.map(str::to_string).or_else(|| pol.roots.first().cloned()) else {
+        return json!({"found": false, "reason": "No project folder: pass cwd.", "generated": false});
+    };
+    let st = d.store.read();
+    let fi = st.cwd_index(&folder);
+    let scope = match st.scope_repo(&folder) {
+        Scope::Nothing => fi.map(Scope::Folder).unwrap_or(Scope::Nothing),
+        r => r,
+    };
+    if scope == Scope::Nothing {
+        return json!({"found": false, "reason": "No history in this folder yet.", "generated": false});
+    }
+    // only what this agent may see, redacted
+    let show = |i: u32| {
+        let e = &st.entries[i as usize];
+        if visible(&st, e, pol, None).is_empty() { None } else { pol.safe(&e.text) }
+    };
+    let seen = crate::insight::runbook_json(&st, scope, fi, &show, true);
+    // a model's fuller version when one was written; else this one now, and the fuller one in
+    // the background for next time (an agent never waits on a local model)
+    let full = crate::insight::runbook_json(&st, scope, fi, &|i| Some(st.entries[i as usize].text.clone()), true);
+    drop(st);
+    match crate::ai::cached(&full) {
+        Some((x, model)) => crate::ai::merge(&seen, &x, &model),
+        None => {
+            crate::ai::generate_in_background(full);
+            crate::ai::without_unplaced(seen)
+        }
+    }
 }
 
 fn tool_next(d: &Daemon, a: &Value, pol: &Policy, cwd: Option<&str>) -> Value {
@@ -400,13 +481,16 @@ pub fn tools() -> Value {
         {"name": "reman_failures", "description": "Recent commands that only ever FAILED (real non-zero exit), newest first. Unknown-exit commands are not failures.",
          "inputSchema": {"type": "object", "properties": {"cwd": cwd, "n": {"type": "integer", "default": 20}}}},
         {"name": "reman_fixes", "description": "For a failed command: first the PROVEN fixes (what the user actually ran next that worked), then similar commands from their successes. Real commands only.",
-         "inputSchema": {"type": "object", "properties": {"failed_command": {"type": "string"}, "cwd": cwd}, "required": ["failed_command"]}},
+         "inputSchema": {"type": "object", "properties": {"failed_command": {"type": "string"}, "cwd": cwd,
+                         "error": {"type": "string", "description": "What the command printed when it failed. reman then also offers what fixed a DIFFERENT command that failed with the same error."}}, "required": ["failed_command"]}},
         {"name": "reman_check", "description": "Vet a command before running it: has this user run it, did it work, who ran it, where. Verdicts: verified | failed | mixed | ran_unknown | never_run (with nearest known commands).",
          "inputSchema": {"type": "object", "properties": {"command": {"type": "string"}, "cwd": cwd}, "required": ["command"]}},
         {"name": "reman_flows", "description": "Recurring command SEQUENCES the user runs (workflow memory), e.g. add -> commit -> push.",
          "inputSchema": {"type": "object", "properties": {"cwd": cwd, "n": {"type": "integer", "default": 15}}}},
         {"name": "reman_next", "description": "Predict the user's likely NEXT commands in a folder, from what they usually run after the last (or given) command there.",
-         "inputSchema": {"type": "object", "properties": {"cwd": cwd, "last_command": {"type": "string"}, "n": {"type": "integer", "default": 5}}}}
+         "inputSchema": {"type": "object", "properties": {"cwd": cwd, "last_command": {"type": "string"}, "n": {"type": "integer", "default": 5}}}},
+        {"name": "reman_runbook", "description": "How this project is run, from what actually worked here: per task (set up, run, test, lint and format, build, database, deploy and release) the user's real commands with their success record, plus the usual command sequences. Call it first in an unfamiliar project instead of guessing how to install, run or test it.",
+         "inputSchema": {"type": "object", "properties": {"cwd": {"type": "string", "description": "The project folder (default: the folder the agent runs in). Must be inside the allowed root."}}}}
     ])
 }
 
@@ -521,9 +605,9 @@ mod tests {
     fn boundary() {
         // Windows paths compare case-insensitively; Unix paths don't
         let (root, sub, evil, other) = if cfg!(windows) {
-            (r"D:\PlanetNaidu", r"d:\planetnaidu\api", r"D:\PlanetNaiduEvil", r"C:\Users")
+            (r"D:\Work", r"d:\work\api", r"D:\WorkEvil", r"C:\Users")
         } else {
-            ("/home/u/PlanetNaidu", "/home/u/PlanetNaidu/api", "/home/u/PlanetNaiduEvil", "/home/u")
+            ("/home/u/Work", "/home/u/Work/api", "/home/u/WorkEvil", "/home/u")
         };
         let p = Policy { roots: vec![config::norm_path(root)], allow_global: false, strict: false, old_history: false };
         assert!(p.within(Some(root)));
@@ -536,7 +620,7 @@ mod tests {
     #[test]
     fn old_history_is_opt_in_and_generic_only() {
         use crate::db::Run;
-        let mk = |cmd: &str, cwd: Option<&str>| Run { cmd: cmd.into(), exit: None, cwd: cwd.map(Into::into), session: "s".into(), actor: "human".into(), ts: 1, duration_ms: None };
+        let mk = |cmd: &str, cwd: Option<&str>| Run { cmd: cmd.into(), exit: None, cwd: cwd.map(Into::into), session: "s".into(), actor: "human".into(), ts: 1, duration_ms: None, err: None };
         let mut st = Store::default();
         st.apply_run(1, true, &mk("docker ps", None), None);
         st.apply_run(2, true, &mk("docker ps", Some("unknown")), None);
@@ -564,7 +648,7 @@ mod rpc_tests {
         assert_eq!(init["result"]["protocolVersion"], "2025-03-26");
         assert!(rpc(&json!({"jsonrpc": "2.0", "method": "notifications/initialized"}), &mut call).is_none());
         let list = rpc(&json!({"jsonrpc": "2.0", "id": 2, "method": "tools/list"}), &mut call).unwrap();
-        assert_eq!(list["result"]["tools"].as_array().unwrap().len(), 7);
+        assert_eq!(list["result"]["tools"].as_array().unwrap().len(), 8);
         let res = rpc(&json!({"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {"name": "reman_next", "arguments": {}}}), &mut call).unwrap();
         assert_eq!(res["result"]["structuredContent"]["result"][0]["command"], "reman_next");
         assert_eq!(rpc(&json!({"jsonrpc": "2.0", "id": 4, "method": "nope"}), &mut call).unwrap()["error"]["code"], -32601);
