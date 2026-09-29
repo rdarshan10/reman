@@ -20,6 +20,7 @@ mod redact;
 mod search;
 mod settings;
 mod store;
+mod settings_ui;
 mod tui;
 
 use anyhow::{Context, Result, bail};
@@ -117,11 +118,17 @@ enum Cmd {
     },
     /// Print shell integration: powershell | bash | zsh | fish | cmd (via Clink)
     Init { shell: String },
-    /// Install the binary, import Atuin once, wire your shell profile
+    /// One-step onboarding: install, start the daemon, wire your shells, connect your coding tools
     Setup {
+        /// leave shell profiles / rc files alone
         #[arg(long)]
         no_profile: bool,
+        /// don't connect coding tools (Claude Code, Codex, Cursor, VS Code, ...)
+        #[arg(long)]
+        no_connect: bool,
     },
+    /// Settings page: coding tools, shared folders, privacy, shells
+    Settings,
     /// MCP stdio server for AI agents
     Mcp,
     /// Dump commands, one per line
@@ -361,7 +368,8 @@ fn real_main() -> Result<()> {
             print!("{}", init_script(&shell, &std::env::current_exe()?)?);
             Ok(())
         }
-        Cmd::Setup { no_profile } => setup(no_profile),
+        Cmd::Setup { no_profile, no_connect } => setup(no_profile, no_connect),
+        Cmd::Settings => settings_ui::run(),
         Cmd::Mcp => mcp::serve_stdio(),
         Cmd::Export { here, actor, status, query } => {
             let mut req = if query.trim().is_empty() { json!({"op": "recent", "k": 0}) } else { json!({"op": "search", "query": query, "k": 200}) };
@@ -598,7 +606,8 @@ fn connect_cmd(targets: &[String], roots: &[String], add: &[String], remove: &[S
     Ok(())
 }
 
-fn connect_http(st: &mut settings::Settings, port: Option<u16>) -> Result<()> {
+/// Turn the local HTTP endpoint on (keeps an existing port/token). Returns the port.
+fn enable_http(st: &mut settings::Settings, port: Option<u16>) -> Result<u16> {
     let prev = st.http.clone();
     let port = port.or(prev.as_ref().map(|h| h.port)).unwrap_or(8777);
     let token = prev.map(|h| h.token).unwrap_or_else(settings::new_token);
@@ -608,6 +617,20 @@ fn connect_http(st: &mut settings::Settings, port: Option<u16>) -> Result<()> {
     if r["ok"].as_bool() != Some(true) {
         bail!("daemon could not start the endpoint: {}", r["error"].as_str().unwrap_or("?"));
     }
+    Ok(port)
+}
+
+/// Turn it off: requests are refused immediately. Returns whether it was on.
+fn disable_http(st: &mut settings::Settings) -> Result<bool> {
+    let was = st.http.take().is_some();
+    if was {
+        settings::save(st)?;
+    }
+    Ok(was)
+}
+
+fn connect_http(st: &mut settings::Settings, port: Option<u16>) -> Result<()> {
+    let port = enable_http(st, port)?;
     let url = format!("http://127.0.0.1:{port}");
     println!("  \x1b[32m+\x1b[0m HTTP endpoint                 {url}/mcp   (token in {})", settings::path().display());
     println!(
@@ -632,9 +655,7 @@ fn disconnect_cmd(targets: &[String]) -> Result<()> {
     };
     for id in &ids {
         if id == "http" {
-            let mut st = settings::load();
-            if st.http.take().is_some() {
-                settings::save(&st)?;
+            if disable_http(&mut settings::load())? {
                 println!("  - HTTP endpoint disabled (requests are refused immediately)");
             }
             continue;
@@ -859,7 +880,7 @@ fn clink_loader(exe: &Path) -> String {
     )
 }
 
-fn setup(no_profile: bool) -> Result<()> {
+fn setup(no_profile: bool, no_connect: bool) -> Result<()> {
     println!("reman setup\n{}", "=".repeat(46));
     // 1. install a stable copy (a running daemon locks its exe on Windows; builds must not fight it)
     let me = std::env::current_exe()?;
@@ -919,25 +940,8 @@ fn setup(no_profile: bool) -> Result<()> {
     println!("  fix-pairs       : {} found in history", r["pairs"]);
     // 4. shell profile
     if !no_profile && cfg!(windows) {
-        for p in profile_paths() {
-            let raw = std::fs::read(&p).unwrap_or_default();
-            if raw.iter().take(400).any(|b| *b == 0) {
-                println!("  profile         : {} looks UTF-16 - add `& \"{}\" init powershell | Out-String | Invoke-Expression` manually", p.display(), installed.display());
-                continue;
-            }
-            let text = String::from_utf8_lossy(raw.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(&raw)).into_owned();
-            let new = rewire_profile(&text, &installed);
-            if new == text {
-                println!("  profile         : already wired ({})", p.display());
-                continue;
-            }
-            if p.exists() {
-                std::fs::copy(&p, p.with_extension("ps1.reman-bak"))?;
-            } else if let Some(d) = p.parent() {
-                std::fs::create_dir_all(d)?;
-            }
-            std::fs::write(&p, new)?;
-            println!("  profile         : WIRED {} (backup .reman-bak; atuin hook removed) -> open a new shell", p.display());
+        for line in wire_ps_profiles(&installed)? {
+            println!("  profile         : {line}");
         }
     }
     // 5. Command Prompt, through Clink (cmd.exe itself has no per-command hook or key bindings)
@@ -955,15 +959,114 @@ fn setup(no_profile: bool) -> Result<()> {
             },
         }
     }
-    if !cfg!(windows) {
-        let shell = std::env::var("SHELL").unwrap_or_default();
-        let kind = ["zsh", "fish"].into_iter().find(|s| shell.contains(s)).unwrap_or("bash");
-        println!("  shell ({kind})    : add to your rc file:  eval \"$({} init {kind})\"", installed.display());
+    // 5b. zsh / bash / fish: one marked line in the rc file of the login shell
+    if !no_profile && !cfg!(windows) {
+        match wire_unix_rc(&installed) {
+            Ok((kind, rc, true)) => println!("  shell ({kind})    : WIRED {} -> open a new terminal", rc.display()),
+            Ok((kind, rc, false)) => println!("  shell ({kind})    : already wired ({})", rc.display()),
+            Err(e) => println!("  shell           : {e:#}"),
+        }
     }
-    println!("  claude code     : hook   -> \"{}\" claude", hook_exe(&installed).display());
-    println!("                    mcp    -> claude mcp add reman -- \"{}\" mcp   (env REMAN_MCP_ROOT=<project dirs>)", installed.display());
-    println!("\n  done.");
+    // 6. coding tools: plug into every one that's installed (backups kept; `reman disconnect all` undoes)
+    if !no_connect && std::env::var_os("REMAN_NO_CONNECT").is_none() {
+        let hook = hook_exe(&installed);
+        let found: Vec<(&str, &str)> = connect::AGENTS.iter().copied().filter(|(id, _)| connect::installed(id)).collect();
+        if found.is_empty() {
+            println!("  coding tools    : none found (connect one later: reman settings)");
+        }
+        for (id, name) in found {
+            match connect::connect(id, &installed, &hook) {
+                Ok(_) => println!("  coding tools    : connected {name}"),
+                Err(e) => println!("  coding tools    : {name} failed: {e:#}"),
+            }
+        }
+        println!("                    agents see {}", connect::roots_line(&settings::load().mcp_roots));
+    }
+    println!("\n  done. Change any of this later with: reman settings");
     Ok(())
+}
+
+/// PowerShell: put reman's managed block in every profile (backup `.reman-bak`). One status line
+/// per profile.
+fn wire_ps_profiles(installed: &Path) -> Result<Vec<String>> {
+    let mut out = Vec::new();
+    for p in profile_paths() {
+        let raw = std::fs::read(&p).unwrap_or_default();
+        if raw.iter().take(400).any(|b| *b == 0) {
+            out.push(format!("{} looks UTF-16 - add `& \"{}\" init powershell | Out-String | Invoke-Expression` manually", p.display(), installed.display()));
+            continue;
+        }
+        let text = String::from_utf8_lossy(raw.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(&raw)).into_owned();
+        let new = rewire_profile(&text, installed);
+        if new == text {
+            out.push(format!("already wired ({})", p.display()));
+            continue;
+        }
+        if p.exists() {
+            std::fs::copy(&p, p.with_extension("ps1.reman-bak"))?;
+        } else if let Some(d) = p.parent() {
+            std::fs::create_dir_all(d)?;
+        }
+        std::fs::write(&p, new)?;
+        out.push(format!("WIRED {} (backup .reman-bak) -> open a new shell", p.display()));
+    }
+    Ok(out)
+}
+
+/// Is PowerShell wired (a profile holds reman's managed block)?
+fn ps_wired() -> Option<PathBuf> {
+    profile_paths().into_iter().find(|p| std::fs::read_to_string(p).is_ok_and(|t| t.contains(">>> reman >>>")))
+}
+
+/// cmd.exe's AutoRun value ("" when unset).
+fn cmd_autorun() -> String {
+    std::process::Command::new("reg")
+        .args(["query", r"HKCU\Software\Microsoft\Command Processor", "/v", "AutoRun"])
+        .output()
+        .ok()
+        .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
+        .and_then(|s| s.lines().find_map(|l| l.split_once("REG_SZ").or_else(|| l.split_once("REG_EXPAND_SZ")).map(|(_, v)| v.trim().to_string())))
+        .unwrap_or_default()
+}
+
+/// Is the login shell's rc file wired (zsh / bash / fish)?
+fn unix_rc_wired() -> Option<(&'static str, PathBuf)> {
+    let home = dirs::home_dir()?;
+    let shell = std::env::var("SHELL").unwrap_or_default();
+    let (kind, rc) = if shell.ends_with("zsh") {
+        ("zsh", home.join(".zshrc"))
+    } else if shell.ends_with("fish") {
+        ("fish", home.join(".config").join("fish").join("config.fish"))
+    } else {
+        ("bash", home.join(".bashrc"))
+    };
+    std::fs::read_to_string(&rc).ok().filter(|t| t.contains("# reman shell integration")).map(|_| (kind, rc))
+}
+
+/// zsh / bash / fish: add `eval "$(reman init <shell>)"` (fish: `| source`) to the login shell's rc
+/// file, once. Returns (shell, rc file, whether it was added now).
+fn wire_unix_rc(exe: &Path) -> Result<(&'static str, PathBuf, bool)> {
+    let home = dirs::home_dir().context("no home folder")?;
+    let shell = std::env::var("SHELL").unwrap_or_default();
+    let (kind, rc, line) = if shell.ends_with("zsh") {
+        ("zsh", home.join(".zshrc"), format!("eval \"$(\"{}\" init zsh)\"", exe.display()))
+    } else if shell.ends_with("fish") {
+        ("fish", home.join(".config").join("fish").join("config.fish"), format!("\"{}\" init fish | source", exe.display()))
+    } else {
+        ("bash", home.join(".bashrc"), format!("eval \"$(\"{}\" init bash)\"", exe.display()))
+    };
+    const MARK: &str = "# reman shell integration";
+    let text = std::fs::read_to_string(&rc).unwrap_or_default();
+    if text.contains(MARK) {
+        return Ok((kind, rc, false));
+    }
+    if let Some(d) = rc.parent() {
+        std::fs::create_dir_all(d)?;
+    }
+    let mut f = std::fs::OpenOptions::new().create(true).append(true).open(&rc)?;
+    use std::io::Write as _;
+    writeln!(f, "\n{line}  {MARK}")?;
+    Ok((kind, rc, true))
 }
 
 #[cfg(test)]

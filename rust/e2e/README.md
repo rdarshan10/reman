@@ -5,6 +5,7 @@ The terminal suites run on an isolated daemon (port 8768) against a *copy* of `~
 
 | suite | what it drives | needs |
 |---|---|---|
+| `settings_terminal.py` | `reman settings` in a real terminal, against a sandbox (temp configs, so your setup is untouched). It connects and disconnects a coding tool, shares a suggested and a typed folder, and flips a privacy switch, checking each change on disk | nothing extra |
 | `cmd_terminal.py` | a real, plain Command Prompt (no add-ons). It checks that the `r` / `rr` macros load from AutoRun without errors, that the pick is typed onto the prompt and not run, that Enter runs it with quotes, `&`, `|`, `%` and `^` intact, and that Esc clears it | `reman setup` |
 | `cmd_clink_terminal.py` | a real Command Prompt with Clink. It checks capture with the real `%ERRORLEVEL%`, that `if errorlevel` still works, text cmd can't quote, the fix suggestion and Alt+F, the finder on ↑ and Ctrl+R, and Tab completion for reman | Clink, plus `reman setup` |
 | `powershell_wrappers.py` | exit-code capture when something wraps the prompt after reman: a Python venv's `Activate.ps1` (and `deactivate`), VS Code's shell integration. Also checks that open shells reload reman after an update | the above, plus a venv at `<repo>/.venv` |

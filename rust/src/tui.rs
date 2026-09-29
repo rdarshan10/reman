@@ -324,6 +324,8 @@ struct App {
     hits: Hits,
     /// the other tabs' queries, restored when you switch back
     queries: [String; 3],
+    /// F10: close the finder and open `reman settings`
+    open_settings: bool,
 }
 
 struct FlowView {
@@ -529,7 +531,7 @@ impl App {
 /// Display-safe text: control characters become spaces, newlines a visible `↵`, and zero-width
 /// characters (combining marks, joiners, variation selectors) are dropped - terminals disagree
 /// on how wide those clusters are, and a disagreement shifts the rest of the line.
-fn clean(s: &str) -> String {
+pub(crate) fn clean(s: &str) -> String {
     use unicode_width::UnicodeWidthChar;
     let mut out = String::with_capacity(s.len());
     for c in s.trim_end().chars() {
@@ -550,7 +552,7 @@ fn one_line(s: &str) -> String {
 }
 
 /// Pad or cut to exactly `w` display columns.
-fn fit(s: &str, w: usize) -> String {
+pub(crate) fn fit(s: &str, w: usize) -> String {
     let mut out = String::new();
     let mut used = 0;
     let total = UnicodeWidthStr::width(s);
@@ -647,14 +649,14 @@ fn who(actor: &str) -> String {
 
 // Named ANSI colours only: the terminal's theme maps them, so the finder reads the same on a
 // dark or a light background (RGB pastels vanish on white).
-const ACCENT: Color = Color::Blue;
-const OK: Color = Color::Green;
-const BAD: Color = Color::Red;
-const WARN: Color = Color::Yellow;
-const INFO: Color = Color::Cyan;
-const MUTED: Color = Color::DarkGray;
+pub(crate) const ACCENT: Color = Color::Blue;
+pub(crate) const OK: Color = Color::Green;
+pub(crate) const BAD: Color = Color::Red;
+pub(crate) const WARN: Color = Color::Yellow;
+pub(crate) const INFO: Color = Color::Cyan;
+pub(crate) const MUTED: Color = Color::DarkGray;
 
-fn muted() -> Style {
+pub(crate) fn muted() -> Style {
     Style::default().fg(MUTED)
 }
 
@@ -1087,6 +1089,7 @@ fn draw_help(buf: &mut Buffer, area: Rect) {
         ("^X", "stop the flow in progress"),
         ("^U  ^W", "clear the query / delete a word"),
         ("mouse", "click a tab or a row, wheel to scroll"),
+        ("F10", "settings: coding tools, shared folders, privacy"),
         ("esc", "back / close"),
     ];
     let bw = (area.width as usize).min(78) as u16;
@@ -1115,18 +1118,18 @@ fn draw_help(buf: &mut Buffer, area: Rect) {
 /// when the terminal and we disagree on a character's width the damage is limited to that line
 /// and cleared on its next change - no stale fragments (the cell-diff renderer could leave some).
 /// One buffered write per frame; autowrap is off so an over-wide line can never scroll the view.
-struct Screen {
-    out: std::io::BufWriter<std::fs::File>,
-    prev: Vec<String>,
+pub(crate) struct Screen {
+    pub(crate) out: std::io::BufWriter<std::fs::File>,
+    pub(crate) prev: Vec<String>,
 }
 
 impl Screen {
-    fn invalidate(&mut self) {
+    pub(crate) fn invalidate(&mut self) {
         self.prev.clear();
         let _ = self.out.write_all(b"\x1b[0m\x1b[2J");
     }
 
-    fn frame(&mut self, buf: &Buffer, cursor: (u16, u16)) -> std::io::Result<()> {
+    pub(crate) fn frame(&mut self, buf: &Buffer, cursor: (u16, u16)) -> std::io::Result<()> {
         let a = buf.area;
         self.prev.resize(a.height as usize, String::from("\u{0}"));
         self.out.write_all(b"\x1b[?25l")?;
@@ -1212,17 +1215,17 @@ fn row_ansi(buf: &Buffer, y: u16) -> String {
 /// The terminal itself, never a std stream. Callers capture stdout (`$(reman find)`) and Windows
 /// PowerShell 5.1 also redirects a native command's stderr inside PSReadLine key handlers, so
 /// drawing on either can land in a pipe. CONOUT$ / /dev/tty always reach the screen.
-fn tty() -> Result<std::fs::File> {
+pub(crate) fn tty() -> Result<std::fs::File> {
     let path = if cfg!(windows) { "CONOUT$" } else { "/dev/tty" };
     Ok(std::fs::OpenOptions::new().read(true).write(true).open(path)?)
 }
 
 /// Console output code page -> UTF-8 while the finder is up (the frame is UTF-8; a legacy OEM
 /// code page turns `»` into `Γ├`), restored on drop.
-struct Utf8Console(#[allow(dead_code)] u32);
+pub(crate) struct Utf8Console(#[allow(dead_code)] u32);
 
 impl Utf8Console {
-    fn enable() -> Self {
+    pub(crate) fn enable() -> Self {
         #[cfg(windows)]
         unsafe {
             let prev = win::GetConsoleOutputCP();
@@ -1312,6 +1315,7 @@ pub fn run(o: Opts) -> Result<()> {
         flow: None,
         hits: Hits::default(),
         queries: Default::default(),
+        open_settings: false,
     };
     app.refresh();
 
@@ -1338,6 +1342,9 @@ pub fn run(o: Opts) -> Result<()> {
     let _ = out.write_all(b"\x1b[?7h");
     execute!(out, DisableMouseCapture, LeaveAlternateScreen, cursor::Show)?;
     let chosen = chosen?;
+    if app.open_settings {
+        return crate::settings_ui::run();
+    }
     if let Some(c) = chosen {
         match o.result_file {
             Some(p) => std::fs::write(p, c)?,
@@ -1543,6 +1550,10 @@ fn event_loop(screen: &mut Screen, app: &mut App, replies: &Receiver<Reply>) -> 
             KeyCode::F(1) => {
                 app.help = true;
                 Act::None
+            }
+            KeyCode::F(10) => {
+                app.open_settings = true;
+                Act::Quit
             }
             // bottom-up: ↑ goes further back, ↓ comes toward the prompt
             KeyCode::Up => {

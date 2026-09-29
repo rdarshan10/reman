@@ -54,12 +54,12 @@ irm https://raw.githubusercontent.com/rdarshan10/reman/master/install.ps1 | iex
 curl -fsSL https://raw.githubusercontent.com/rdarshan10/reman/master/install.sh | sh
 ```
 
-Both scripts:
-1. download the latest release and verify its SHA-256 checksum;
-2. run `reman setup`, which copies reman into `~/.reman/bin`, starts its background daemon, and wires your shell (PowerShell profile, Command Prompt macros, or your zsh / bash / fish config);
-3. connect every AI agent they find (`reman connect all`). Each agent config gets a `.reman-bak` backup, and `reman disconnect all` undoes it. Skip this step with `REMAN_NO_CONNECT=1`.
+Both scripts download the latest release, verify its SHA-256 checksum, and run `reman setup`. Setup is the whole onboarding, with nothing to configure by hand:
+1. copies reman into `~/.reman/bin` and starts its background daemon;
+2. wires your shells: the PowerShell profile and Command Prompt on Windows, your zsh / bash / fish config on macOS and Linux;
+3. connects every coding tool it finds: Claude Code, Claude Desktop, Codex CLI, Cursor, VS Code, Windsurf and Gemini CLI. Each config gets a `.reman-bak` backup first.
 
-The first start downloads the embedding model, about 130 MB, once.
+Everything it set up can be changed later on one page: `reman settings`. To skip connecting coding tools, set `REMAN_NO_CONNECT=1` (or run `reman setup --no-connect`). The first start downloads the embedding model, about 130 MB, once.
 
 ### Manual download
 
@@ -98,6 +98,7 @@ Open a new terminal after installing.
 | `Enter` | put the command on your prompt (it never runs by itself) |
 | `Alt+F` | insert the fix suggested after a failed command |
 | `F1` inside the finder | every key |
+| `F10` inside the finder | settings |
 
 In **Command Prompt**, type `r` (this folder), `r docker` (start with a query), or `rr` (everywhere).
 
@@ -111,6 +112,20 @@ reman check "docker compose up -d"    # has this been run, and did it work?
 reman flows --here                    # sequences you repeat in this folder
 reman stats
 ```
+
+## Settings
+
+```sh
+reman settings        # or press F10 inside the finder
+```
+
+One page for everything setup configured. Every change is saved as you make it:
+
+- **Coding tools:** connect or disconnect each one with Enter, and turn the local HTTP endpoint (for SDKs and scripts) on or off.
+- **What agents can see:** share or unshare folders. Your busiest folders are suggested, with their run counts, and `a` types in any other folder.
+- **Privacy:** strict secret redaction, and whether generic commands from old, folder-less history are shared.
+- **Shells:** whether PowerShell, Command Prompt, or your zsh / bash / fish is wired; Enter wires one that isn't.
+- **reman:** daemon status, data folder, version.
 
 ## AI agents
 

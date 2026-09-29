@@ -221,7 +221,7 @@ pub fn unshared_folders(roots: &[String]) -> Vec<(String, u64)> {
 }
 
 /// Directories matching a partial path (`D:\Pla` -> `D:\PlanetNaidu\`).
-fn dirs(cur: &str) -> Vec<Cand> {
+pub(crate) fn dirs(cur: &str) -> Vec<Cand> {
     let cur = cur.trim_matches(['"', '\'']);
     let (base, prefix) = match cur.rfind(['/', '\\']) {
         Some(i) => (&cur[..=i], &cur[i + 1..]),

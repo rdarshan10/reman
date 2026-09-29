@@ -41,14 +41,12 @@ try {
     Copy-Item $exe, (Join-Path $tmp "reman-hook.exe") $bin -Force
     Write-Host "Installed to $bin (setup skipped)."
   } else {
-    & $exe setup
+    # setup does all of onboarding: install, daemon, shells, and connecting every coding tool it
+    # finds (each config gets a .reman-bak backup; `reman disconnect all` undoes it)
+    $setupArgs = @("setup")
+    if ($NoConnect -or $env:REMAN_NO_CONNECT) { $setupArgs += "--no-connect" }
+    & $exe @setupArgs
     if ($LASTEXITCODE -ne 0) { throw "reman setup failed (exit $LASTEXITCODE)." }
-    # plug into every AI agent that's installed (Claude Code, Codex, Cursor, VS Code, ...). Each
-    # config file gets a .reman-bak backup; `reman disconnect all` undoes it.
-    if (-not $NoConnect -and -not $env:REMAN_NO_CONNECT) {
-      Write-Host ""
-      & (Join-Path $bin "reman.exe") connect all
-    }
   }
 
   # `reman` on the user PATH, so new terminals of any kind can run it
@@ -62,7 +60,7 @@ try {
   Write-Host "reman is installed. Open a new terminal, then:" -ForegroundColor Green
   Write-Host "  PowerShell      press Up for the finder, Ctrl+R to search everywhere"
   Write-Host "  Command Prompt  type r (this folder) or rr (everywhere)"
-  Write-Host "  AI agents       reman connect   (see what's connected; reman disconnect all to undo)"
+  Write-Host "  Settings        reman settings  (coding tools, shared folders, privacy)"
 } finally {
   Remove-Item $tmp -Recurse -Force -ErrorAction SilentlyContinue
 }
