@@ -33,6 +33,14 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
+      - name: Stamp the version from the tag
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        run: |
+          # the package's own version line only (the first one), on every OS's runner
+          V="${GITHUB_REF_NAME#v}" perl -pi -e 'if (!$d && s/^version = ".*"/version = "$ENV{V}"/) { $d = 1 }' Cargo.toml
+          grep -m1 '^version' Cargo.toml
+
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: rust
