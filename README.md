@@ -2,6 +2,8 @@
 
 **Your shell history, searchable by meaning, with proof of what worked. For you and your AI agents.**
 
+**Website: [rdarshan10.github.io/reman](https://rdarshan10.github.io/reman)**
+
 One fast Rust binary that remembers every command you and your AI agents run: where it ran, whether it worked, and what fixed it when it didn't. Find anything by describing it ("tear down containers", "run migrations"), not by remembering the exact text.
 
 ![Release](https://img.shields.io/github/v/release/rdarshan10/reman) ![Platforms](https://img.shields.io/badge/platforms-Windows%20%7C%20macOS%20%7C%20Linux-blue) ![Rust](https://img.shields.io/badge/built%20with-Rust-orange)
