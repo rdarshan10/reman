@@ -6,6 +6,8 @@
 # zsh / bash / fish config. Options (environment variables):
 #   REMAN_VERSION=v0.1.0   install that release instead of the latest
 #   REMAN_NO_RC=1          don't touch your shell config
+#   REMAN_NO_CONNECT=1     don't connect AI agents (otherwise: `reman connect all`, undo with
+#                          `reman disconnect all`)
 set -eu
 
 REPO="rdarshan10/reman"
@@ -15,8 +17,11 @@ os=$(uname -s)
 arch=$(uname -m)
 case "$os-$arch" in
   Darwin-arm64) name=reman-macos-arm64 ;;
-  Darwin-x86_64) name=reman-macos-x64 ;;
   Linux-x86_64) name=reman-linux-x64 ;;
+  Darwin-x86_64)
+    echo "reman: Intel Macs aren't supported (ONNX Runtime, which reman's search uses, publishes no build for them). Apple Silicon Macs are." >&2
+    exit 1
+    ;;
   *)
     echo "reman: no prebuilt binary for $os $arch yet. Build from source: https://github.com/$REPO#from-source" >&2
     exit 1
@@ -53,6 +58,13 @@ tar -xzf "$tmp/$name.tar.gz" -C "$tmp"
 
 bin="$HOME/.reman/bin"
 
+# plug into every AI agent that's installed (Claude Code, Codex, Cursor, VS Code, ...). Each config
+# file gets a .reman-bak backup; `reman disconnect all` undoes it.
+if [ "${REMAN_NO_CONNECT:-0}" != 1 ]; then
+  echo ""
+  "$bin/reman" connect all
+fi
+
 # shell integration: one marked line per rc file, added once
 add_line() {
   rc="$1"
@@ -79,4 +91,4 @@ fi
 echo ""
 echo "reman is installed. Open a new terminal, then:"
 echo "  press Up for the finder, Ctrl+R to search everywhere"
-echo "  AI agents: reman connect all"
+echo "  AI agents: reman connect   (see what's connected; reman disconnect all to undo)"

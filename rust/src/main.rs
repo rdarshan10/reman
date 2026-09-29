@@ -550,7 +550,7 @@ fn connect_cmd(targets: &[String], roots: &[String], add: &[String], remove: &[S
         }
         let http = st.http.as_ref().map(|h| format!("\x1b[32mon\x1b[0m  http://127.0.0.1:{}/mcp", h.port)).unwrap_or_else(|| "off".into());
         println!("  {:<15} {:<30} {http}", "http", "HTTP endpoint (any agent/SDK)");
-        println!("\n  agents may see commands from: {}", st.mcp_roots.join("  |  "));
+        println!("\n  agents may see commands from: {}", connect::roots_line(&st.mcp_roots));
         println!("                                {old_line}");
         let hidden = unshared_folders(&st.mcp_roots);
         if !hidden.is_empty() {
@@ -573,7 +573,7 @@ fn connect_cmd(targets: &[String], roots: &[String], add: &[String], remove: &[S
     } else {
         targets.to_vec()
     };
-    println!("agents may see commands from: {}\n                              {old_line}\n", st.mcp_roots.join("  |  "));
+    println!("agents may see commands from: {}\n                              {old_line}\n", connect::roots_line(&st.mcp_roots));
     for id in &ids {
         if id == "http" {
             connect_http(&mut st, port)?;

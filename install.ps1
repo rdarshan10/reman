@@ -2,11 +2,13 @@
 #   irm https://raw.githubusercontent.com/rdarshan10/reman/master/install.ps1 | iex
 # Downloads the latest release, checks its SHA-256, and runs `reman setup`, which copies reman into
 # ~\.reman\bin, starts the background daemon, and wires PowerShell and Command Prompt.
-# To pin a version or skip setup, download this file and run:
-#   .\install.ps1 -Version v0.1.0 -NoSetup
+# It then connects every AI agent it finds (`reman connect all`; undo with `reman disconnect all`).
+# To pin a version, skip setup, or skip connecting agents, download this file and run:
+#   .\install.ps1 -Version v0.1.0 -NoSetup -NoConnect      ($env:REMAN_NO_CONNECT=1 also skips it)
 param(
   [string]$Version = "latest",
-  [switch]$NoSetup
+  [switch]$NoSetup,
+  [switch]$NoConnect
 )
 $ErrorActionPreference = "Stop"
 $ProgressPreference = "SilentlyContinue"   # Invoke-WebRequest is many times faster without the bar
@@ -41,6 +43,12 @@ try {
   } else {
     & $exe setup
     if ($LASTEXITCODE -ne 0) { throw "reman setup failed (exit $LASTEXITCODE)." }
+    # plug into every AI agent that's installed (Claude Code, Codex, Cursor, VS Code, ...). Each
+    # config file gets a .reman-bak backup; `reman disconnect all` undoes it.
+    if (-not $NoConnect -and -not $env:REMAN_NO_CONNECT) {
+      Write-Host ""
+      & (Join-Path $bin "reman.exe") connect all
+    }
   }
 
   # `reman` on the user PATH, so new terminals of any kind can run it
@@ -54,7 +62,7 @@ try {
   Write-Host "reman is installed. Open a new terminal, then:" -ForegroundColor Green
   Write-Host "  PowerShell      press Up for the finder, Ctrl+R to search everywhere"
   Write-Host "  Command Prompt  type r (this folder) or rr (everywhere)"
-  Write-Host "  AI agents       reman connect all"
+  Write-Host "  AI agents       reman connect   (see what's connected; reman disconnect all to undo)"
 } finally {
   Remove-Item $tmp -Recurse -Force -ErrorAction SilentlyContinue
 }

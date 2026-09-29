@@ -1,4 +1,4 @@
-# Builds reman for Windows, macOS (Apple Silicon + Intel) and Linux, runs the tests, and publishes
+# Builds reman for Windows, macOS (Apple Silicon) and Linux, runs the tests, and publishes
 # the archives to a GitHub Release when a version tag (v*) is pushed. Run it by hand (Actions tab,
 # "Run workflow") to build and test without releasing.
 name: release
@@ -19,8 +19,8 @@ jobs:
       matrix:
         include:
           - { os: windows-latest, target: x86_64-pc-windows-msvc, name: reman-windows-x64, test: true }
+          # Apple Silicon only: ONNX Runtime publishes no prebuilt library for Intel Macs
           - { os: macos-latest, target: aarch64-apple-darwin, name: reman-macos-arm64, test: true }
-          - { os: macos-latest, target: x86_64-apple-darwin, name: reman-macos-x64, test: false }
           - { os: ubuntu-latest, target: x86_64-unknown-linux-gnu, name: reman-linux-x64, test: true }
     runs-on: ${{ matrix.os }}
     defaults:

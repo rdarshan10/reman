@@ -115,7 +115,8 @@ pub fn hook_claude() -> Result<()> {
     let mut buf = String::new();
     std::io::stdin().read_to_string(&mut buf)?;
     let Ok(data) = serde_json::from_str::<Value>(&buf) else { return Ok(()) };
-    if data.get("tool_name").and_then(Value::as_str) != Some("Bash") {
+    // Claude Code runs commands through its Bash tool, and on Windows also its PowerShell tool
+    if !matches!(data.get("tool_name").and_then(Value::as_str), Some("Bash" | "PowerShell")) {
         return Ok(());
     }
     let cmd = data.pointer("/tool_input/command").and_then(Value::as_str).unwrap_or("").trim().to_string();

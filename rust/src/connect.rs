@@ -274,7 +274,7 @@ fn set_claude_hooks(hook: Option<&Path>) -> Result<()> {
         }
         arr.retain(|b| b.get("hooks").and_then(Value::as_array).is_none_or(|h| !h.is_empty()));
         if let Some(h) = hook {
-            arr.push(json!({"matcher": "Bash", "hooks": [{"type": "command", "command": h.to_string_lossy().replace('\\', "/"), "args": ["claude"], "timeout": 5}]}));
+            arr.push(json!({"matcher": "Bash|PowerShell", "hooks": [{"type": "command", "command": h.to_string_lossy().replace('\\', "/"), "args": ["claude"], "timeout": 5}]}));
         }
     }
     // leave no empty scaffolding behind on disconnect
@@ -303,7 +303,19 @@ pub fn resolve_roots(cli: &[String]) -> Vec<String> {
     if let Some(l) = legacy {
         return l.split(settings::roots_sep()).filter(|s| !s.trim().is_empty()).map(str::to_string).collect();
     }
-    vec![std::env::current_dir().map(|p| p.to_string_lossy().into_owned()).unwrap_or_default()]
+    // nothing chosen: no shared list. Each agent then sees only the project it was started in
+    // (mcp::Policy::from_env). Never the folder `connect` happened to run from - for a new user
+    // that is their home folder, i.e. everything.
+    Vec::new()
+}
+
+/// One line saying what agents can see, for `reman connect` output.
+pub fn roots_line(roots: &[String]) -> String {
+    if roots.is_empty() {
+        "each agent sees only the project folder it's working in (reman connect --add-root <dir> to share more)".into()
+    } else {
+        roots.join("  |  ")
+    }
 }
 
 /// Paste-able config for agents we don't know about.

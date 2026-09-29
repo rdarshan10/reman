@@ -27,6 +27,17 @@ pub struct Policy {
     pub old_history: bool,
 }
 
+/// No shared folder list: the agent sees the project it launched us in - unless that "project" is
+/// the home folder or a drive root, which would be everything; then it sees nothing.
+fn project_root() -> Vec<String> {
+    let Ok(cwd) = std::env::current_dir() else { return vec![] };
+    let is_home = dirs::home_dir().is_some_and(|h| config::norm_path(&h.to_string_lossy()) == config::norm_path(&cwd.to_string_lossy()));
+    if is_home || cwd.parent().is_none() {
+        return vec![];
+    }
+    vec![config::norm_path(&cwd.to_string_lossy())]
+}
+
 impl Policy {
     /// Server config comes from the MCP process env - never from tool arguments (an agent can pass
     /// any cwd, so cwd is untrusted input).
@@ -38,7 +49,7 @@ impl Policy {
         let roots: Vec<String> = match std::env::var("REMAN_MCP_ROOT").ok().filter(|s| !s.trim().is_empty()) {
             Some(raw) => raw.split(sep).filter(|p| !p.trim().is_empty()).map(config::norm_path).collect(),
             None if !st.mcp_roots.is_empty() => st.mcp_roots.iter().map(|r| config::norm_path(r)).collect(),
-            None => vec![config::norm_path(&std::env::current_dir().map(|p| p.to_string_lossy().into_owned()).unwrap_or_default())],
+            None => project_root(),
         };
         Self {
             roots,
@@ -508,11 +519,17 @@ mod tests {
 
     #[test]
     fn boundary() {
-        let p = Policy { roots: vec![config::norm_path(r"D:\PlanetNaidu")], allow_global: false, strict: false, old_history: false };
-        assert!(p.within(Some(r"D:\PlanetNaidu")));
-        assert!(p.within(Some(r"d:\planetnaidu\api")));
-        assert!(!p.within(Some(r"D:\PlanetNaiduEvil")));
-        assert!(!p.within(Some(r"C:\Users")));
+        // Windows paths compare case-insensitively; Unix paths don't
+        let (root, sub, evil, other) = if cfg!(windows) {
+            (r"D:\PlanetNaidu", r"d:\planetnaidu\api", r"D:\PlanetNaiduEvil", r"C:\Users")
+        } else {
+            ("/home/u/PlanetNaidu", "/home/u/PlanetNaidu/api", "/home/u/PlanetNaiduEvil", "/home/u")
+        };
+        let p = Policy { roots: vec![config::norm_path(root)], allow_global: false, strict: false, old_history: false };
+        assert!(p.within(Some(root)));
+        assert!(p.within(Some(sub)));
+        assert!(!p.within(Some(evil)));
+        assert!(!p.within(Some(other)));
         assert!(!p.within(None));
     }
 

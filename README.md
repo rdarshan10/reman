@@ -54,7 +54,12 @@ irm https://raw.githubusercontent.com/rdarshan10/reman/master/install.ps1 | iex
 curl -fsSL https://raw.githubusercontent.com/rdarshan10/reman/master/install.sh | sh
 ```
 
-Both scripts download the latest release, verify its SHA-256 checksum, and run `reman setup`. That copies reman into `~/.reman/bin`, starts its background daemon, and wires your shell (PowerShell profile, Command Prompt macros, or your zsh / bash / fish config). The first start downloads the embedding model, about 130 MB, once.
+Both scripts:
+1. download the latest release and verify its SHA-256 checksum;
+2. run `reman setup`, which copies reman into `~/.reman/bin`, starts its background daemon, and wires your shell (PowerShell profile, Command Prompt macros, or your zsh / bash / fish config);
+3. connect every AI agent they find (`reman connect all`). Each agent config gets a `.reman-bak` backup, and `reman disconnect all` undoes it. Skip this step with `REMAN_NO_CONNECT=1`.
+
+The first start downloads the embedding model, about 130 MB, once.
 
 ### Manual download
 
@@ -63,9 +68,10 @@ Pick your file from the [latest release](https://github.com/rdarshan10/reman/rel
 | platform | file |
 |---|---|
 | Windows 10/11, x64 | `reman-windows-x64.zip` |
-| macOS, Apple Silicon | `reman-macos-arm64.tar.gz` |
-| macOS, Intel | `reman-macos-x64.tar.gz` |
+| macOS, Apple Silicon (M1 and later) | `reman-macos-arm64.tar.gz` |
 | Linux, x64 | `reman-linux-x64.tar.gz` |
+
+Intel Macs aren't supported: ONNX Runtime, which reman's search uses, publishes no build for them.
 
 Unpack it and run `reman setup` (`reman.exe setup` on Windows). On macOS, a file downloaded through a browser may be quarantined; clear that with `xattr -d com.apple.quarantine reman reman-hook`.
 
@@ -115,7 +121,14 @@ reman connect --add-root ~/projects/api
 reman connect http                    # local HTTP endpoint for the OpenAI Agents SDK, LangChain, curl
 ```
 
-Agents get seven tools: `reman_search`, `reman_check`, `reman_fixes`, `reman_recent`, `reman_failures`, `reman_flows` and `reman_next`. They only see commands from the folders you share, secrets are redacted, and every command they get back is one that really ran; reman never generates commands.
+Agents get seven tools: `reman_search`, `reman_check`, `reman_fixes`, `reman_recent`, `reman_failures`, `reman_flows` and `reman_next`. Every command they get back is one that really ran; reman never generates commands.
+
+What agents can see:
+- **By default, only the project each agent is working in.** An agent started in `~/projects/api` sees commands run there and nothing else. One started in your home folder or at a drive root sees nothing.
+- **More, if you choose:** `reman connect --add-root <folder>` shares a folder with every agent; `reman connect` lists your busiest folders that aren't shared.
+- **Secrets are redacted**, and in strict mode (the default) anything still secret-looking is withheld.
+
+Commands your agents run are recorded too, tagged with the agent's name. For Claude Code that covers both its Bash and PowerShell tools.
 
 ## Performance
 

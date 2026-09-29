@@ -586,7 +586,8 @@ mod tests {
             let (_, e) = st.entry("git status").unwrap();
             let all = st.agg(e, Scope::All);
             assert_eq!((all.runs, all.ok, all.fail, all.status()), (2, 1, 1, "mixed"));
-            let fa = st.scope_folder("c:\\a");
+            // spelled as recorded: folder case only folds on Windows
+            let fa = st.scope_folder("C:/a");
             assert_eq!(st.agg(e, fa).status(), "ok");
             assert_eq!(st.execs.len(), 3);
         }
