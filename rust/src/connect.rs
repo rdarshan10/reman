@@ -21,7 +21,7 @@ pub const AGENTS: &[(&str, &str)] = &[
 ];
 
 /// REMAN_CONNECT_HOME redirects every config path (tests / dry runs never touch real configs).
-fn sandbox() -> Option<PathBuf> {
+pub(crate) fn sandbox() -> Option<PathBuf> {
     std::env::var_os("REMAN_CONNECT_HOME").map(PathBuf::from)
 }
 
@@ -158,6 +158,38 @@ pub fn status(id: &str, exe: &Path) -> Option<bool> {
     let m = load_json(&p).ok()?;
     let e = m.get(mcp_key(id))?.get("reman")?;
     Some(e.get("command").and_then(Value::as_str).is_some_and(|c| Path::new(c) == exe))
+}
+
+/// Uninstall: reman out of every coding tool's config (its MCP entry, its capture hooks), and
+/// out of hook files left without an entry. What it did, or would do when `dry`.
+pub fn remove_everywhere(exe: &Path, dry: bool) -> Result<Vec<String>> {
+    let mut out = Vec::new();
+    for (id, name) in AGENTS {
+        if status(id, exe).is_some() {
+            if !dry {
+                disconnect(id)?;
+            }
+            let hooks = if matches!(*id, "claude-code" | "codex") { " and its capture hooks" } else { "" };
+            out.push(format!("{name}: reman's MCP server{hooks}"));
+        }
+    }
+    let has_reman = |p: &Path| std::fs::read_to_string(p).is_ok_and(|t| t.contains("reman"));
+    let cs = claude_settings();
+    if has_reman(&cs) && !out.iter().any(|l| l.starts_with("Claude Code")) && load_json(&cs).ok().and_then(|m| m.get("hooks").cloned()).is_some_and(|h| h.to_string().contains("reman")) {
+        if !dry {
+            set_claude_hooks(None)?;
+        }
+        out.push("Claude Code: reman's capture hooks".into());
+    }
+    if let Some(h) = codex_hooks_path().filter(|h| has_reman(h)) {
+        if !out.iter().any(|l| l.starts_with("OpenAI Codex")) {
+            if !dry {
+                set_hooks(&h, None, "codex", "")?;
+            }
+            out.push("OpenAI Codex CLI: reman's capture hooks".into());
+        }
+    }
+    Ok(out)
 }
 
 fn claude_cli_available() -> bool {

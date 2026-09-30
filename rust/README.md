@@ -195,6 +195,7 @@ reman flows [--here]         recurring command sequences
 reman here                   what you did in this folder last time
 reman why [cmd]              a command that used to work here fails: what ran here since
 reman scrub [--apply]        mask secrets in history saved before they were masked at capture
+reman uninstall [--purge]    remove reman everywhere (lists first; --dry-run, --yes)
 reman runbook [--json]       how this project is run, by task, from commands that worked
    [--static] [--refresh]    (arranged by a language model if one is available; --static: never)
 reman check <cmd>            verified / failed / mixed / never_run

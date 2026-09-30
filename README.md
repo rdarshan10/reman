@@ -94,6 +94,15 @@ cargo build --release
 ./target/release/reman setup
 ```
 
+### Uninstall
+
+```sh
+reman uninstall            # lists everything it will remove, then asks
+reman uninstall --purge    # also delete your history, settings and the search model
+```
+
+It takes reman out of every coding tool (MCP entries, capture hooks, the HTTP endpoint), your PowerShell profile, your zsh / bash / fish config, Command Prompt's `r` / `rr` and your PATH, each by reman's own marker, so everything else in those files stays as it was. Then it stops the daemon and deletes the program. Your history stays in `~/.reman` unless you pass `--purge`. `--dry-run` only lists; `--yes` skips the question.
+
 ## Getting started
 
 Open a new terminal after installing.

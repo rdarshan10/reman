@@ -6,8 +6,9 @@ pub const HOST: &str = "127.0.0.1";
 pub const DEFAULT_PORT: u16 = 8765;
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
+/// ~/.reman. REMAN_HOME moves it (tests point it at a temp folder).
 pub fn home() -> PathBuf {
-    dirs::home_dir().unwrap_or_else(|| PathBuf::from(".")).join(".reman")
+    std::env::var_os("REMAN_HOME").map(PathBuf::from).unwrap_or_else(|| dirs::home_dir().unwrap_or_else(|| PathBuf::from(".")).join(".reman"))
 }
 
 /// REMAN_DB overrides (tests point this at a temp file), same env var the Python code honoured.
