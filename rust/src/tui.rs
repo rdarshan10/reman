@@ -731,7 +731,7 @@ fn draw(buf: &mut Buffer, app: &App) -> ((u16, u16), Hits) {
     let (w, h) = (area.width as usize, area.height);
     let mut hits = Hits::default();
     if w < 24 || h < 7 {
-        Paragraph::new("reman: terminal too small").render(area, buf);
+        Paragraph::new("reman: terminal too small").wrap(Wrap { trim: true }).render(area, buf);
         return ((0, 0), hits);
     }
     let items = app.visible_items();

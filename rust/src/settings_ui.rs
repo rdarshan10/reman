@@ -12,7 +12,8 @@ use ratatui::crossterm::{cursor, execute};
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Paragraph, Widget};
+use ratatui::widgets::{Paragraph, Widget, Wrap};
+use unicode_width::UnicodeWidthStr;
 use serde_json::json;
 use std::io::Write;
 use std::path::PathBuf;
@@ -258,21 +259,23 @@ fn check(on: bool) -> Span<'static> {
 fn row_line(row: &Row, sel: bool, w: usize) -> Line<'static> {
     let bar = Span::styled(if sel { " ▌ " } else { "   " }, Style::default().fg(ACCENT));
     let name_st = if sel { Style::default().add_modifier(Modifier::BOLD) } else { Style::default() };
-    let label_w = 34.min(w.saturating_sub(24));
-    let state = |s: String, c: Color| Span::styled(s, Style::default().fg(c));
+    // names give up room first, so a state like "installed, not connected" stays whole
+    let label_w = w.saturating_sub(31).clamp(16, 34);
+    let label = |s: &str| format!("{} ", tui::fit(s, label_w.saturating_sub(1)));
+    let state = |s: String, c: Color| Span::styled(tui::fit(&s, w.saturating_sub(7 + label_w)), Style::default().fg(c));
     match row {
         Row::Header(t) => Line::from(vec![Span::raw(" "), Span::styled(t.to_string(), Style::default().fg(ACCENT).add_modifier(Modifier::BOLD))]),
         Row::Note(t) => Line::styled(format!("     {t}"), Style::default().fg(MUTED).add_modifier(Modifier::ITALIC)),
         Row::Agent { name, installed, connected, .. } => Line::from(vec![
             bar,
             check(*connected),
-            Span::styled(tui::fit(name, label_w), if *installed { name_st } else { name_st.fg(MUTED) }),
+            Span::styled(label(name), if *installed { name_st } else { name_st.fg(MUTED) }),
             if *connected { state("connected".into(), OK) } else if *installed { state("installed, not connected".into(), WARN) } else { state("not installed".into(), MUTED) },
         ]),
         Row::Http { port } => Line::from(vec![
             bar,
             check(port.is_some()),
-            Span::styled(tui::fit("HTTP endpoint (SDKs, scripts)", label_w), name_st),
+            Span::styled(label("HTTP endpoint (SDKs, scripts)"), name_st),
             match port {
                 Some(p) => state(format!("on · http://127.0.0.1:{p}/mcp"), OK),
                 None => state("off".into(), MUTED),
@@ -281,7 +284,7 @@ fn row_line(row: &Row, sel: bool, w: usize) -> Line<'static> {
         Row::Folder { path, shared, runs } => Line::from(vec![
             bar,
             check(*shared),
-            Span::styled(tui::fit(path, label_w), name_st),
+            Span::styled(label(path), name_st),
             match (shared, runs) {
                 (true, _) => state("shared with agents".into(), OK),
                 (false, Some(n)) => state(format!("{n} runs, not shared"), MUTED),
@@ -296,7 +299,7 @@ fn row_line(row: &Row, sel: bool, w: usize) -> Line<'static> {
         Row::Shell { name, wired, detail } => Line::from(vec![
             bar,
             check(*wired),
-            Span::styled(tui::fit(name, label_w), name_st),
+            Span::styled(label(name), name_st),
             state(detail.clone(), if *wired { OK } else { WARN }),
         ]),
         Row::Info { label, value } => Line::from(vec![Span::raw("       "), Span::styled(format!("{label:<10}"), Style::default().fg(MUTED)), Span::raw(value.clone())]),
@@ -308,21 +311,23 @@ fn draw(buf: &mut Buffer, p: &mut Page) -> (u16, u16) {
     let (w, h) = (area.width as usize, area.height as usize);
     // title: the logo with "settings" beside its last row (one plain line on a short terminal),
     // then a blank row
-    let subtitle = |lead: &'static str| {
-        Line::from(vec![
-            Span::styled(lead, Style::default().add_modifier(Modifier::BOLD)),
-            Span::styled("   every change is saved as you make it", Style::default().fg(MUTED)),
-        ])
+    let subtitle = |lead: &'static str, room: usize| {
+        let tag = "   every change is saved as you make it";
+        let mut l = vec![Span::styled(lead, Style::default().add_modifier(Modifier::BOLD))];
+        if lead.chars().count() + tag.len() <= room {
+            l.push(Span::styled(tag, Style::default().fg(MUTED)));
+        }
+        Line::from(l)
     };
     let top = if h >= 18 && w >= tui::LOGO_W as usize + 50 {
         for (i, line) in tui::logo_lines().into_iter().enumerate() {
             buf.set_line(1, i as u16, &line, tui::LOGO_W);
         }
         let x = tui::LOGO_W + 3;
-        buf.set_line(x, 2, &subtitle("settings"), area.width - x);
+        buf.set_line(x, 2, &subtitle("settings", (area.width - x) as usize), area.width - x);
         4
     } else {
-        buf.set_line(0, 0, &subtitle(" reman settings"), area.width);
+        buf.set_line(0, 0, &subtitle(" reman settings", w), area.width);
         2
     };
     // list between the title and the 3-line footer
@@ -347,25 +352,32 @@ fn draw(buf: &mut Buffer, p: &mut Page) -> (u16, u16) {
     }
     // footer: what Enter does here / the last result / the keys
     let help = p.rows.get(p.sel).map(Row::help).unwrap_or_default();
-    Paragraph::new(Line::styled(format!(" {help}"), Style::default().fg(INFO))).render(Rect::new(0, (h - 3) as u16, area.width, 1), buf);
+    Paragraph::new(Line::styled(tui::fit(&format!(" {help}"), w), Style::default().fg(INFO))).render(Rect::new(0, (h - 3) as u16, area.width, 1), buf);
     let mut cursor = (0, 0);
     if let Some(text) = &p.input {
         let prompt = " folder to share › ";
-        Paragraph::new(Line::from(vec![Span::styled(prompt, Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)), Span::raw(text.clone())]))
+        // a path longer than the line shows its end, where the typing is
+        let room = w.saturating_sub(prompt.chars().count() + 1);
+        let n = text.chars().count();
+        let shown: String = if n > room { text.chars().skip(n - room).collect() } else { text.clone() };
+        Paragraph::new(Line::from(vec![Span::styled(prompt, Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)), Span::raw(shown.clone())]))
             .render(Rect::new(0, (h - 2) as u16, area.width, 1), buf);
-        cursor = ((prompt.chars().count() + text.chars().count()).min(w - 1) as u16, (h - 2) as u16);
+        cursor = ((prompt.chars().count() + UnicodeWidthStr::width(shown.as_str())).min(w - 1) as u16, (h - 2) as u16);
     } else if let Some((m, c)) = &p.message {
-        Paragraph::new(Line::styled(format!(" {m}"), Style::default().fg(*c))).render(Rect::new(0, (h - 2) as u16, area.width, 1), buf);
+        Paragraph::new(Line::styled(tui::fit(&format!(" {m}"), w), Style::default().fg(*c))).render(Rect::new(0, (h - 2) as u16, area.width, 1), buf);
     }
     let keys = if p.input.is_some() {
-        vec![("↵", "share"), ("tab", "complete"), ("esc", "cancel")]
+        vec![("↵", "share", "share"), ("tab", "complete", "complete"), ("esc", "cancel", "cancel")]
     } else {
-        vec![("↑↓", "move"), ("↵ / space", "change"), ("a", "share a folder"), ("esc", "close")]
+        vec![("↑↓", "move", "move"), ("↵ / space", "change", "change"), ("a", "share a folder", "share"), ("esc", "close", "close")]
     };
+    let long: usize = keys.iter().map(|(k, what, _)| UnicodeWidthStr::width(*k) + what.len() + 4).sum::<usize>() + 1;
+    let fits = long <= w;
     let mut sp = vec![Span::raw(" ")];
-    for (k, what) in keys {
+    for (k, what, short) in keys {
+        let k = if fits { k.to_string() } else { k.replace(" / space", "") };
         sp.push(Span::styled(k, Style::default().add_modifier(Modifier::BOLD)));
-        sp.push(Span::styled(format!(" {what}   "), Style::default().fg(MUTED)));
+        sp.push(Span::styled(if fits { format!(" {what}   ") } else { format!(" {short}  ") }, Style::default().fg(MUTED)));
     }
     Paragraph::new(Line::from(sp)).render(Rect::new(0, (h - 1) as u16, area.width, 1), buf);
     cursor
@@ -408,7 +420,7 @@ fn page_loop(screen: &mut Screen) -> Result<()> {
     loop {
         let mut buf = Buffer::empty(Rect::new(0, 0, size.0, size.1));
         if size.0 < 40 || size.1 < 12 {
-            Paragraph::new("reman settings: make the terminal a little bigger").render(buf.area, &mut buf);
+            Paragraph::new("reman settings: make the terminal a little bigger").wrap(Wrap { trim: true }).render(buf.area, &mut buf);
             screen.frame(&buf, (0, 0))?;
         } else {
             let cur = draw(&mut buf, &mut p);
