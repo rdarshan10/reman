@@ -5,3 +5,6 @@ tldr.zip
 atuin_history.tsv
 --help.txt
 rust/target/
+
+# PowerShell module cache written when tests run with a sandboxed LOCALAPPDATA
+Microsoft/
