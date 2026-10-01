@@ -3,11 +3,20 @@
 # expansion, and the run goes straight to the daemon over bash's own /dev/tcp. Only when the
 # daemon is down is the slim reman-hook spawned (it spools the run and starts the daemon).
 #   Up = finder (this folder)   Ctrl-R = finder (all folders)   Alt-F = insert suggested fix
+#   Alt-N on an empty line = what you usually run next here (again: the next idea)
 #   Tab on an empty line = finder (Tab after text is normal completion)
 __reman_exe="__REMAN__"
 __reman_hook="__HOOK__"
 __reman_port=__PORT__
 reman() { "$__reman_exe" "$@"; }
+# rcd <words>: go to the folder where you ran what the words describe (or whose path has them).
+# `rcd alembic 2` takes the second match; `rcd` lists where you were lately, `rcd 3` goes there.
+rcd() {
+  local p
+  p=$("$__reman_exe" goto "$@") && [ -n "$p" ] || return
+  command -v cygpath >/dev/null 2>&1 && p=$(cygpath -u "$p")
+  cd -- "$p"
+}
 # one session per shell: the id lives in an unexported variable, so a child shell makes its own
 [ -z "$__reman_sid" ] && __reman_sid="bash-$$-$RANDOM$RANDOM"
 export REMAN_SESSION=$__reman_sid
@@ -61,6 +70,7 @@ __reman_precmd() {
   num=${BASH_REMATCH[1]}; cmd=${BASH_REMATCH[2]}; cmd=${cmd%$'\n'}
   [ "$num" = "$__reman_last_num" ] && return $ec
   __reman_last_num=$num
+  __reman_fix=   # a fix is offered for the command just run, until the next one
   [ -z "$cmd" ] && return $ec
   __reman_ms; local dur=$(( REPLY - start ))
   __reman_q "$cmd"; local qc=$REPLY
@@ -82,7 +92,10 @@ __reman_precmd() {
     [[ $reply == *'"kind":"proven"'* ]] && lead="last time this failed you ran"
     [[ $reply == *'"kind":"same_error"'* ]] && lead="the same error was fixed by"
     __reman_fix=$fix
-    printf '\e[90m  reman: %s -> \e[36m%s\e[90m   (Alt-F inserts)\e[0m\n' "$lead" "$fix" >&2
+    # what it changes, when it's a variant of what failed (adds --build, gti -> git)
+    local how="Alt-F inserts"
+    if [[ $reply =~ \"diff\":\"(([^\"\\]|\\.)*)\" ]]; then how="${BASH_REMATCH[1]}; $how"; fi
+    printf '\e[90m  reman: %s -> \e[36m%s\e[90m   (%s)\e[0m\n' "$lead" "$fix" "$how" >&2
   fi
   __reman_note "$reply" note   # it used to work here: what ran here since
   return $ec
@@ -95,14 +108,50 @@ __reman_find() {
   local scope=${1:-all} picked
   picked=$(REMAN_FIND_QUERY="$READLINE_LINE" "$__reman_exe" find --scope "$scope" --cwd "$PWD")
   if [ -n "$picked" ]; then
-    READLINE_LINE="$picked"
+    READLINE_LINE="${picked//$'\x01'/}"
     READLINE_POINT=${#READLINE_LINE}
+    # a command with a blank: \x01 marks where the cursor goes
+    if [[ $picked == *$'\x01'* ]]; then
+      local pre=${picked%%$'\x01'*}
+      READLINE_POINT=${#pre}
+    fi
   fi
 }
 __reman_insert_fix() {
-  [ -n "$__reman_fix" ] || return
+  if [ -z "$__reman_fix" ]; then
+    # no fix waiting: readline's forward-word (bind -x can't call it, so it's done here)
+    local rest=${READLINE_LINE:READLINE_POINT}
+    local skip=${rest%%[[:alnum:]]*}
+    rest=${rest:${#skip}}
+    local word=${rest%%[^[:alnum:]]*}
+    READLINE_POINT=$((READLINE_POINT + ${#skip} + ${#word}))
+    return
+  fi
   READLINE_LINE="$__reman_fix"
   READLINE_POINT=${#READLINE_LINE}
+}
+# Alt-N on an empty line: what you'd run next here, ready to edit (Alt-N again: the next idea, up
+# to 3)
+__reman_nextup() {
+  local i=0 fd= reply=
+  if [ -n "${READLINE_LINE//[[:space:]]/}" ]; then
+    [ -n "$__reman_next" ] && [ "$READLINE_LINE" = "$__reman_next" ] || return
+    i=$(( __reman_next_i + 1 ))
+  fi
+  __reman_q "$PWD"; local qd=$REPLY
+  __reman_q "$REMAN_SESSION"; local qs=$REPLY
+  { exec {fd}<>"/dev/tcp/127.0.0.1/$__reman_port"; } 2>/dev/null || return
+  printf '%s\n' "{\"op\":\"nextup\",\"cwd\":$qd,\"session\":$qs,\"index\":$i}" >&$fd
+  IFS= read -r -t 0.4 -u $fd reply
+  exec {fd}>&-
+  if [[ $reply =~ \"command\":\"(([^\"\\]|\\.)*)\" ]]; then
+    local c=${BASH_REMATCH[1]}
+    c=${c//\\\"/\"}; c=${c//\\\\/\\}
+    __reman_next=$c
+    [[ $reply =~ \"index\":([0-9]+) ]] && __reman_next_i=${BASH_REMATCH[1]}
+    READLINE_LINE=$c
+    READLINE_POINT=${#READLINE_LINE}
+  fi
 }
 # Tab on an EMPTY line opens the finder (readline's empty-line completion hook); Tab after text
 # stays normal completion.
@@ -110,7 +159,8 @@ __reman_tab_empty() {
   local picked
   picked=$("$__reman_exe" find --scope folder --cwd "$PWD")
   COMPREPLY=()
-  [ -n "$picked" ] && COMPREPLY=("$picked")
+  # (completion can't place the cursor: a blank's marker is just dropped)
+  [ -n "$picked" ] && COMPREPLY=("${picked//$'\x01'/}")
 }
 complete -o nospace -E -F __reman_tab_empty 2>/dev/null
 
@@ -136,3 +186,4 @@ complete -F __reman_complete reman reman.exe
 bind -x '"\C-r": __reman_find all'
 bind -x '"\e[A": __reman_find folder'
 bind -x '"\ef": __reman_insert_fix'
+bind -x '"\en": __reman_nextup'

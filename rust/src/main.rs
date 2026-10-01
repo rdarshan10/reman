@@ -13,18 +13,23 @@ mod dym;
 mod embed;
 mod errors;
 mod fixpairs;
+mod git;
 mod flows;
 mod http;
 mod import;
 mod insight;
 mod mcp;
+mod notify;
 mod predict;
 mod redact;
 mod search;
 mod settings;
 mod store;
+mod timewords;
 mod settings_ui;
 mod tui;
+mod unwrap;
+mod verdict;
 
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
@@ -115,6 +120,26 @@ enum Cmd {
     /// A command that used to work here fails now: what ran here since it last worked
     /// (default: the last command that failed here)
     Why { command: Vec<String> },
+    /// The folder where you ran what the words describe (or whose path has them): prints it, for
+    /// `rcd` to go there. A number last picks another match (`goto alembic 2`); no words lists
+    /// where you were lately
+    Goto { words: Vec<String> },
+    /// What you ran yesterday, by project: the commands, failures and what fixed them, agents
+    Yesterday,
+    /// What you ran today, by project
+    Today,
+    /// What you ran on a day: a weekday (monday) or a date (2026-09-28)
+    Day { day: String },
+    /// What your coding agents ran: runs, failures, time lost to failures, and commands an agent
+    /// kept retrying the same way while they failed each time
+    Agents {
+        /// how many days back (default 7)
+        #[arg(long, default_value_t = 7)]
+        days: i64,
+        /// print JSON
+        #[arg(long)]
+        json: bool,
+    },
     /// How this project is run: the commands that worked here, by task, and the usual sequences
     Runbook {
         /// print JSON (what agents get from the reman_runbook tool)
@@ -403,6 +428,90 @@ fn real_main() -> Result<()> {
             }
             Ok(())
         }
+        Cmd::Goto { mut words } => {
+            // a number last picks that match: `rcd alembic 2`, `rcd 3`
+            let pick = words.last().and_then(|w| w.parse::<usize>().ok()).filter(|n| (1..=20).contains(n));
+            if pick.is_some() {
+                words.pop();
+            }
+            let r = client::call(&json!({"op": "goto", "query": words.join(" ")}))?;
+            let found = r["results"].as_array().cloned().unwrap_or_default();
+            let line = |n: usize, f: &Value| {
+                let why = match (f["because"].as_str(), f["ago"].as_str()) {
+                    (Some(b), Some(a)) => format!("   \x1b[90m({}, {a})\x1b[0m", b.lines().next().unwrap_or("")),
+                    (None, Some(a)) => format!("   \x1b[90m(last here {a})\x1b[0m"),
+                    _ => String::new(),
+                };
+                format!("{n}. {}{why}", f["folder"].as_str().unwrap_or(""))
+            };
+            if found.is_empty() {
+                eprintln!("reman knows no folder for `{}`.", words.join(" "));
+                std::process::exit(1);
+            }
+            // no words and no number: where you were lately, to pick from
+            if words.is_empty() && pick.is_none() {
+                for (i, f) in found.iter().enumerate() {
+                    eprintln!("{}", line(i + 1, f));
+                }
+                eprintln!("\x1b[90mrcd <number> goes there\x1b[0m");
+                std::process::exit(1);
+            }
+            let i = pick.unwrap_or(1) - 1;
+            let Some(f) = found.get(i) else {
+                eprintln!("only {} match{}.", found.len(), if found.len() == 1 { "" } else { "es" });
+                std::process::exit(1);
+            };
+            eprintln!("\x1b[36m→\x1b[0m {}", line(i + 1, f).split_once(". ").map(|x| x.1).unwrap_or(""));
+            for (j, g) in found.iter().enumerate().filter(|(j, _)| *j != i) {
+                eprintln!("  \x1b[90m{}\x1b[0m", line(j + 1, g));
+            }
+            println!("{}", f["folder"].as_str().unwrap_or(""));
+            Ok(())
+        }
+        Cmd::Yesterday => print_day("yesterday"),
+        Cmd::Today => print_day("today"),
+        Cmd::Day { day } => print_day(&day),
+        Cmd::Agents { days, json: as_json } => {
+            let r = client::call(&json!({"op": "agents", "days": days}))?;
+            if as_json {
+                println!("{}", serde_json::to_string_pretty(&r)?);
+                return Ok(());
+            }
+            let actors = r["actors"].as_array().cloned().unwrap_or_default();
+            println!("The last {} day{}:", days, if days == 1 { "" } else { "s" });
+            if actors.is_empty() {
+                println!("  nothing ran.");
+                return Ok(());
+            }
+            for a in &actors {
+                let (runs, failed, unknown) = (a["runs"].as_u64().unwrap_or(0), a["failed"].as_u64().unwrap_or(0), a["unknown"].as_u64().unwrap_or(0));
+                let mut line = format!("  {:<14} {runs:>5} run{}", a["actor"].as_str().unwrap_or("?"), if runs == 1 { " " } else { "s" });
+                if runs > unknown {
+                    line.push_str(&format!("   {failed:>4} failed ({}%)", (failed * 100 + (runs - unknown) / 2) / (runs - unknown)));
+                }
+                if unknown > 0 {
+                    line.push_str(&format!("   {unknown} with no result reported"));
+                }
+                let lost = a["lost_ms"].as_i64().unwrap_or(0) / 1000;
+                if lost >= 60 {
+                    line.push_str(&format!("   \x1b[90m{}m {}s spent on runs that failed\x1b[0m", lost / 60, lost % 60));
+                }
+                println!("{line}");
+            }
+            let loops = r["loops"].as_array().cloned().unwrap_or_default();
+            if loops.is_empty() {
+                println!("\nNo agent retried a command the same way 4+ times while it kept failing.");
+            } else {
+                println!("\nRetried the same way 4+ times, failing the same way each time:");
+                for l in loops {
+                    let c = l["command"].as_str().unwrap_or("").lines().next().unwrap_or("");
+                    let c = if c.chars().count() > 60 { format!("{}…", c.chars().take(59).collect::<String>()) } else { c.to_string() };
+                    let at = l["folder"].as_str().map(|f| format!(" in {f}")).unwrap_or_default();
+                    println!("  \x1b[31m✗\x1b[0m {c}   \x1b[90m{} · {}x · {}{at}\x1b[0m", l["actor"].as_str().unwrap_or("?"), l["times"], l["ago"].as_str().unwrap_or(""));
+                }
+            }
+            Ok(())
+        }
         Cmd::Why { command } => {
             let mut req = json!({"op": "why", "cwd": cwd()});
             if !command.is_empty() {
@@ -418,6 +527,9 @@ fn real_main() -> Result<()> {
             }
             let cmd = r["command"].as_str().unwrap_or("");
             println!("`{cmd}` worked here {} times; last {}, then it failed {}.", r["worked"], r["last_ok"].as_str().unwrap_or("?"), r["first_fail"].as_str().unwrap_or("?"));
+            if let Some(a) = r["git"]["advice"].as_str() {
+                println!("{a}");
+            }
             let between: Vec<&str> = r["between"].as_array().into_iter().flatten().filter_map(Value::as_str).collect();
             if between.is_empty() {
                 println!("Nothing else ran in this folder in between: look outside it (a service, the network, files changed by another tool).");
@@ -428,7 +540,17 @@ fn real_main() -> Result<()> {
                 }
             }
             println!("\nSince its last success:");
+            let mut branch: Option<&str> = None;
             for t in r["timeline"].as_array().into_iter().flatten() {
+                // the branch, where it changes
+                let b = t["branch"].as_str();
+                let on = match b {
+                    Some(b) if branch.is_some_and(|p| p != b) => format!("   \x1b[33mon {b}\x1b[0m"),
+                    _ => String::new(),
+                };
+                if b.is_some() {
+                    branch = b;
+                }
                 let mark = match t["exit"].as_i64() {
                     Some(0) => "\x1b[32m✓\x1b[0m",
                     Some(_) => "\x1b[31m✗\x1b[0m",
@@ -436,7 +558,7 @@ fn real_main() -> Result<()> {
                 };
                 let c = t["command"].as_str().unwrap_or("").lines().next().unwrap_or("");
                 let bold = if t["target"] == json!(true) { "\x1b[1m" } else { "" };
-                println!("  {mark} {bold}{c}\x1b[0m   \x1b[90m{}\x1b[0m", t["ago"].as_str().unwrap_or(""));
+                println!("  {mark} {bold}{c}\x1b[0m   \x1b[90m{}\x1b[0m{on}", t["ago"].as_str().unwrap_or(""));
             }
             Ok(())
         }
@@ -445,15 +567,21 @@ fn real_main() -> Result<()> {
             let has_unplaced = r["unplaced"].as_array().is_some_and(|a| !a.is_empty());
             // a language model, if one is available, arranges and explains (never invents)
             if !no_ai && r.get("model").is_none() && (r["found"] == json!(true) || has_unplaced) {
-                if let Some(m) = ai::find() {
-                    eprintln!("\x1b[90mreman: asking {} to arrange the runbook (--static skips this)...\x1b[0m", m.label());
-                    match ai::runbook(&m, &r) {
-                        Ok(x) => {
-                            let _ = ai::save(&r, &x, &m.model);
-                            r = ai::merge(&r, &x, &m.model);
+                match ai::find() {
+                    Some(m) => {
+                        eprintln!("\x1b[90mreman: asking {} to arrange the runbook (--static skips this)...\x1b[0m", m.label());
+                        match ai::runbook(&m, &r) {
+                            Ok(x) => {
+                                let _ = ai::save(&r, &x, &m.model);
+                                r = ai::merge(&r, &x, &m.model);
+                            }
+                            Err(e) => eprintln!("\x1b[90mreman: the model didn't answer usefully ({e:#}); here is the runbook from your history alone.\x1b[0m"),
                         }
-                        Err(e) => eprintln!("\x1b[90mreman: the model didn't answer usefully ({e:#}); here is the runbook from your history alone.\x1b[0m"),
                     }
+                    None if !as_json && !ai::turned_off() => eprintln!(
+                        "\x1b[90mreman: no language model is running here (Ollama, LM Studio or llama.cpp). With one, the runbook also gets a summary and a getting-started order.\x1b[0m"
+                    ),
+                    None => {}
                 }
             }
             let r = ai::without_unplaced(r);
@@ -469,20 +597,48 @@ fn real_main() -> Result<()> {
             if let Some(s) = r["summary"].as_str().filter(|s| !s.is_empty()) {
                 println!("{s}\n");
             }
+            // where a command runs, when that isn't the folder you're in
+            let here = r["here"].as_str().unwrap_or(".");
+            let place = |dir: &str| match dir {
+                d if d == here => String::new(),
+                "." => " in the project root".to_string(),
+                d => format!(" in `{d}/`"),
+            };
+            let dir_of = |cmd: &str| {
+                let mut all = r["sections"].as_array().into_iter().flatten().flat_map(|s| s["commands"].as_array().into_iter().flatten());
+                all.find(|c| c["command"] == json!(cmd)).and_then(|c| c["dir"].as_str()).unwrap_or(here).to_string()
+            };
+            // a command typed over several lines (`` ` `` / `\` continuations) as the one line it is
+            let flat = |s: &str| s.lines().map(|l| l.trim().trim_end_matches(['`', '\\']).trim_end()).filter(|l| !l.is_empty()).collect::<Vec<_>>().join(" ");
             let first: Vec<&str> = r["getting_started"].as_array().into_iter().flatten().filter_map(Value::as_str).collect();
             if !first.is_empty() {
                 println!("## Getting started\n");
                 for (n, c) in first.iter().enumerate() {
-                    println!("{}. `{c}`", n + 1);
+                    println!("{}. `{}`{}", n + 1, flat(c), place(&dir_of(c)));
                 }
                 println!();
             }
             for sec in r["sections"].as_array().into_iter().flatten() {
                 println!("## {}\n", sec["title"].as_str().unwrap_or(""));
                 for c in sec["commands"].as_array().into_iter().flatten() {
-                    let rec = if c["failed"].as_u64() == Some(0) { format!("worked {}x", c["worked"]) } else { format!("worked {} of {}", c["worked"], c["runs"]) };
+                    // only what was seen: a run whose result a pipe hid proves nothing
+                    let n = |k: &str| c[k].as_u64().unwrap_or(0);
+                    let (runs, ok, fail, unseen) = (n("runs"), n("worked"), n("failed"), n("unseen"));
+                    let rec = match (ok, fail, unseen) {
+                        (0, 0, _) => format!("ran {runs}x, result not seen"),
+                        (_, 0, 0) => format!("worked {ok}x"),
+                        (_, _, 0) => format!("worked {ok} of {runs}"),
+                        (_, 0, u) => format!("worked {ok}x (+{u} runs, result not seen)"),
+                        (_, f, u) => format!("worked {ok} of {} (+{u} runs, result not seen)", ok + f),
+                    };
+                    let rec = match c["declared"].as_str() {
+                        Some(f) => format!("in {f}, not run yet"),
+                        None => format!("{rec} · last {}", c["last_run"].as_str().unwrap_or("?")),
+                    };
                     let note = c["note"].as_str().map(|n| format!(": {n}")).unwrap_or_default();
-                    println!("- `{}`{note} · {rec} · last {}", c["command"].as_str().unwrap_or("").replace('\n', " "), c["last_run"].as_str().unwrap_or("?"));
+                    let at = place(c["dir"].as_str().unwrap_or(here));
+                    let part = if c["partial"] == json!(true) { " (some files only)" } else { "" };
+                    println!("- `{}`{at}{part}{note} · {rec}", flat(c["command"].as_str().unwrap_or("")));
                 }
                 println!();
             }
@@ -490,7 +646,7 @@ fn real_main() -> Result<()> {
             if !flows.is_empty() {
                 println!("## Usual sequences\n");
                 for f in flows {
-                    let steps: Vec<String> = f["steps"].as_array().into_iter().flatten().filter_map(Value::as_str).map(|s| format!("`{}`", s.replace('\n', " "))).collect();
+                    let steps: Vec<String> = f["steps"].as_array().into_iter().flatten().filter_map(Value::as_str).map(|s| format!("`{}`", flat(s))).collect();
                     println!("- {} ({}x)", steps.join(" → "), f["count"]);
                 }
                 println!();
@@ -517,7 +673,12 @@ fn real_main() -> Result<()> {
         Cmd::Hook { agent } => match agent.as_str() {
             "claude" | "claude-code" => capture::hook_claude(),
             "codex" => capture::hook_agent("codex"),
-            other => bail!("unknown agent hook {other:?} (supported: claude)"),
+            "cursor" => capture::hook_cursor(),
+            "gemini" => capture::hook_gemini(),
+            "windsurf" => capture::hook_windsurf(),
+            "copilot" => capture::hook_copilot(),
+            "event" => capture::hook_event(),
+            other => bail!("unknown agent hook {other:?} (supported: claude, codex, cursor, gemini, windsurf, copilot, event)"),
         },
         Cmd::Import { source, path } => {
             let mut total = 0u64;
@@ -606,8 +767,11 @@ fn real_main() -> Result<()> {
                 Some(a) => serde_json::from_str(&a).context("args must be a JSON object")?,
                 None => json!({}),
             };
-            let v = mcp::Bridge::new(mcp::Policy::from_env()).call(&tool, &args)?;
-            println!("{}", serde_json::to_string_pretty(&v)?);
+            let a = mcp::Answer::from_reply(mcp::Bridge::new(mcp::Policy::from_env()).call(&tool, &args)?);
+            println!("{}", serde_json::to_string_pretty(&a.value)?);
+            if let Some(n) = a.note {
+                println!("note: {n}");
+            }
             Ok(())
         }
         Cmd::Ping => {
@@ -678,13 +842,73 @@ fn unshared_folders(roots: &[String]) -> Vec<(String, u64)> {
     complete::unshared_folders(roots)
 }
 
+/// `reman yesterday` / `today` / `day <date>`: the day's story, by project.
+fn print_day(day: &str) -> Result<()> {
+    let r = client::call(&json!({"op": "day", "day": day}))?;
+    if let Some(reason) = r["reason"].as_str() {
+        println!("{reason}");
+        return Ok(());
+    }
+    let title = match day {
+        "today" => "Today".to_string(),
+        "yesterday" => "Yesterday".to_string(),
+        d => d.to_string(),
+    };
+    if r["found"] != json!(true) {
+        println!("{title}: nothing ran.");
+        return Ok(());
+    }
+    let short = |c: &str| {
+        let c = c.lines().next().unwrap_or("");
+        if c.chars().count() > 50 { format!("{}…", c.chars().take(49).collect::<String>()) } else { c.to_string() }
+    };
+    println!("\x1b[1m{title}\x1b[0m, {} to {}", r["from"].as_str().unwrap_or("?"), r["to"].as_str().unwrap_or("?"));
+    for p in r["projects"].as_array().into_iter().flatten() {
+        let branch = p["branch"].as_str().map(|b| format!("  ({b})")).unwrap_or_default();
+        println!("\n\x1b[1m{}\x1b[0m{branch}   \x1b[90m{} to {}\x1b[0m", p["name"].as_str().unwrap_or("?"), p["from"].as_str().unwrap_or(""), p["to"].as_str().unwrap_or(""));
+        let flow: Vec<String> = p["flow"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(|f| {
+                let n = f["times"].as_u64().unwrap_or(1);
+                format!("{}{}", short(f["command"].as_str().unwrap_or("")), if n > 1 { format!(" ({n}x)") } else { String::new() })
+            })
+            .collect();
+        if !flow.is_empty() {
+            let more = p["more"].as_u64().unwrap_or(0);
+            println!("  {}{}", flow.join(" → "), if more > 0 { format!("  \x1b[90m(+{more} more)\x1b[0m") } else { String::new() });
+        }
+        for f in p["failures"].as_array().into_iter().flatten() {
+            let c = short(f["command"].as_str().unwrap_or(""));
+            let n = f["times"].as_u64().unwrap_or(1);
+            if let Some(fix) = f["fixed_by"].as_str() {
+                println!("  \x1b[31m✗\x1b[0m {c}  →  \x1b[32m✓\x1b[0m {}   \x1b[90m(fixed)\x1b[0m", short(fix));
+            } else if f["worked_later"] == json!(true) {
+                println!("  \x1b[31m✗\x1b[0m {c}   \x1b[90m(worked later)\x1b[0m");
+            } else {
+                println!("  \x1b[31m✗\x1b[0m {c}   \x1b[33mstill failing\x1b[0m{}", if n > 1 { format!(" ({n} failures)") } else { String::new() });
+            }
+        }
+        for a in p["agents"].as_array().into_iter().flatten() {
+            let (runs, failed) = (a["runs"].as_u64().unwrap_or(0), a["failed"].as_u64().unwrap_or(0));
+            let f = if failed > 0 { format!(" ({failed} failed)") } else { String::new() };
+            println!("  \x1b[90m{} ran {runs} command{} here{f}\x1b[0m", a["agent"].as_str().unwrap_or("?"), if runs == 1 { "" } else { "s" });
+        }
+    }
+    Ok(())
+}
+
 fn connect_cmd(targets: &[String], roots: &[String], add: &[String], remove: &[String], port: Option<u16>, print: bool, old_history: Option<&str>) -> Result<()> {
     let (exe, hook) = agent_exes()?;
     if print {
         println!("{}", connect::generic_snippet(&exe));
         return Ok(());
     }
-    // the boundary: one list of folders for every agent
+    // the boundary: one list of folders for every agent, and only the user widens it
+    if !roots.is_empty() || !add.is_empty() || old_history == Some("on") {
+        connect::refuse_if_agent("Sharing history with agents")?;
+    }
     let mut st = settings::load();
     if !roots.is_empty() || st.mcp_roots.is_empty() {
         st.mcp_roots = connect::resolve_roots(roots);

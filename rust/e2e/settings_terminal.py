@@ -13,7 +13,9 @@ box = tempfile.mkdtemp(prefix="reman-settings-")
 for d in (".claude", ".cursor", ".gemini"):
     os.makedirs(os.path.join(box, d), exist_ok=True)
 CFG = os.path.join(box, "reman-config.json")
-ENV = dict(os.environ, REMAN_CONNECT_HOME=box, REMAN_CONFIG=CFG)
+# the test plays the user: without the variables a coding agent sets (sharing refuses those)
+ENV = dict({k: v for k, v in os.environ.items() if k not in ("CLAUDECODE", "GEMINI_CLI") and not k.startswith("CODEX_")},
+           REMAN_CONNECT_HOME=box, REMAN_CONFIG=CFG)
 SHARE_TYPED = os.path.dirname(os.path.abspath(__file__))   # e2e folder: exists, never in history
 BAR = " ▌ "   # the selection bar
 
@@ -79,8 +81,8 @@ t = Term()
 time.sleep(3)
 t.snap("reman settings (sandbox)")
 text = t.text()
-check("the page opens with its sections", all(s in text for s in ("Coding tools", "What agents can see", "Privacy", "Shells")))
-check("a new user shares no folder: agents see only their own project", "each agent sees only the project it's working in" in text)
+check("the page opens with its sections", all(s in text for s in ("Coding tools", "What agents can see", "Privacy")))
+check("a new user shares no folder: agents see no history until one is approved", "agents see no history" in text)
 check("installed tools are listed as not connected yet", "Claude Code" in text and "installed, not connected" in text)
 
 check("the first row is Claude Code", "Claude Code" in t.selected(), t.selected().strip())
@@ -107,14 +109,29 @@ t.keys("enter", wait=1.0)
 roots = cfg().get("mcp_roots", [])
 check("`a` + a typed path shares that folder", any(os.path.normcase(r) == os.path.normcase(SHARE_TYPED) for r in roots), str(roots))
 
+check("the strict-permissions switch is there, off by default", t.goto("Strict permissions") and "[ ]" in t.selected(), t.selected().strip())
+t.keys("enter", wait=0.8)
+check("Enter turns it on and saves", cfg().get("strict_permissions") is True and "[x]" in t.selected(), cfg())
+t.keys("enter", wait=0.8)
+check("Enter again turns it off (from the user's own terminal)", "strict_permissions" not in cfg(), cfg())
+
 check("the strict-secrets switch can be selected", t.goto("Strict secrets"), t.selected().strip())
 t.keys("enter", wait=0.8)
 check("Enter flips it and saves", cfg().get("strict_secrets") is False)
+
+check("the secrets row can be selected, masking by default", t.goto("Secrets in commands") and "mask the value" in t.selected(), t.selected().strip())
+t.keys("enter", wait=0.8)
+check("Enter: drop the command", cfg().get("secrets") == "drop" and "drop the command" in t.selected(), cfg().get("secrets"))
+t.keys("enter", wait=0.8)
+check("Enter: keep as typed (redaction off for you; agents still masked)", cfg().get("secrets") == "keep" and "agents still get them masked" in t.selected(), cfg().get("secrets"))
+t.keys("enter", wait=0.8)
+check("Enter: back to masking", "secrets" not in cfg() and "mask the value" in t.selected(), cfg().get("secrets"))
 
 check("the language-model switch is there, on by default", t.goto("Use a language model") and "[x]" in t.selected(), t.selected().strip())
 check("it says where the model comes from", "auto: a model running on this machine" in t.text())
 t.keys("enter", wait=0.8)
 check("Enter turns it off and saves", (cfg().get("ai") or {}).get("enabled") is False, cfg().get("ai"))
+check("further down, the Shells section (the page scrolls)", t.goto("PowerShell") and "Shells" in t.text(), t.selected().strip())
 t.snap("after the changes")
 
 t.keys("esc", wait=1.0)

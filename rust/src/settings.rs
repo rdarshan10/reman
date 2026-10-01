@@ -23,7 +23,8 @@ pub struct Settings {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ai: Option<Ai>,
     /// a command holding a secret, when recorded: "mask" keeps it with the value hidden
-    /// (`export API_TOKEN=***`, the default), "drop" doesn't record it at all
+    /// (`export API_TOKEN=***`, the default), "drop" doesn't record it at all, "keep" records it
+    /// exactly as typed, for the user's own finder (agents still get it masked)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub secrets: Option<String>,
     /// regexes: commands that are never recorded (e.g. "^curl ", "vault ")
@@ -32,12 +33,47 @@ pub struct Settings {
     /// regexes: folders where nothing is recorded (e.g. "(?i)\\\\secret-project")
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub ignore_folders: Vec<String>,
+    /// strict permissions: only reman's own dialog box can let an agent see a folder; the AI
+    /// app's approval buttons and dialogs can't (mcp.rs, Consent). For apps set to approve tool
+    /// calls on their own. Where the dialog can't be shown (no desktop), nothing is shared.
+    #[serde(default, alias = "consent_window", skip_serializing_if = "std::ops::Not::not")]
+    pub strict_permissions: bool,
+    /// a desktop notification when a command of yours that ran this many seconds finishes;
+    /// absent = 60, 0 = never
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub done_alert_after_s: Option<u64>,
 }
 
 impl Settings {
+    /// After how many seconds a finished command of yours gets a desktop notification; None = never.
+    pub fn done_alert_after(&self) -> Option<u64> {
+        match self.done_alert_after_s {
+            None => Some(60),
+            Some(0) => None,
+            Some(n) => Some(n),
+        }
+    }
+
     /// Drop commands holding a secret instead of masking them.
     pub fn drop_secrets(&self) -> bool {
         self.secrets.as_deref() == Some("drop")
+    }
+
+    /// No redaction when recording: commands and error text are stored as typed, so the user's own
+    /// finder shows them whole. Agents still get them masked (mcp::Policy::safe).
+    pub fn keep_secrets(&self) -> bool {
+        self.secrets.as_deref() == Some("keep")
+    }
+
+    /// "mask" | "drop" | "keep"
+    pub fn secrets_mode(&self) -> &'static str {
+        if self.drop_secrets() {
+            "drop"
+        } else if self.keep_secrets() {
+            "keep"
+        } else {
+            "mask"
+        }
     }
 }
 

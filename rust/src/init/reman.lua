@@ -3,6 +3,7 @@
 -- runs `reman init cmd`, so an updated reman is picked up by every new cmd window.
 --   Records every command with its folder, real %ERRORLEVEL%, duration and session
 --   Up = finder scoped to this folder   Ctrl+R = finder over all folders   Alt+F = insert the fix
+--   Alt+N on an empty line = what you usually run next here (again: the next idea)
 --   Tab on `reman ...` = reman's own completions (the same engine as the other shells)
 -- cmd's quoting can't carry arbitrary text intact (" & | % ^), so text travels to reman through
 -- environment variables, never the command line.
@@ -114,10 +115,13 @@ local function find(rl_buffer, scope)
     os.remove(tmp)
     pick = pick:gsub("[\r\n]+$", "")
     if #pick > 0 then
+        -- a command with a blank: \1 marks where the cursor goes
+        local at = pick:find("\1", 1, true)
         rl_buffer:beginundogroup()
         rl_buffer:remove(1, rl_buffer:getlength() + 1)
-        rl_buffer:insert(pick)
+        rl_buffer:insert((pick:gsub("\1", "")))
         rl_buffer:endundogroup()
+        if at then rl_buffer:setcursor(at) end
     end
     rl_buffer:refreshline()
 end
@@ -130,14 +134,42 @@ function reman_insert_fix(rl_buffer)
         rl_buffer:remove(1, rl_buffer:getlength() + 1)
         rl_buffer:insert(reman_fix)
         rl_buffer:endundogroup()
-    else
+    elseif not (rl.invokecommand and pcall(rl.invokecommand, "forward-word")) then
+        -- no fix waiting: what Alt+F does without reman (it also accepts a word of a suggestion)
         rl_buffer:ding()
     end
+end
+
+-- Alt+N on an empty line: what you'd run next here, ready to edit (Alt+N again: the next idea,
+-- up to 3)
+reman_next, reman_next_i = nil, 0
+function reman_nextup(rl_buffer)
+    local line = rl_buffer:getbuffer()
+    local i = 0
+    if line:match("%S") then
+        if not reman_next or line ~= reman_next then return rl_buffer:ding() end
+        i = reman_next_i + 1
+    end
+    local h = io.popen('""' .. hook .. '" nextup --cwd "' .. os.getcwd() .. '" --session ' .. session .. ' --index ' .. i .. '"')
+    local out = h and h:read("*l") or ""
+    if h then h:close() end
+    local cmd, why, idx = out:match("^([^\t]*)\t([^\t]*)\t(%d+)")
+    if not cmd or cmd == "" then return rl_buffer:ding() end
+    reman_next, reman_next_i = cmd, tonumber(idx) or 0
+    if i == 0 then
+        clink.print("\x1b[90m  reman: " .. why .. "\x1b[0m")
+    end
+    rl_buffer:beginundogroup()
+    rl_buffer:remove(1, rl_buffer:getlength() + 1)
+    rl_buffer:insert(cmd)
+    rl_buffer:endundogroup()
+    rl_buffer:refreshline()
 end
 
 rl.setbinding([["\e[A"]], [["luafunc:reman_find_folder"]])
 rl.setbinding([["\C-r"]], [["luafunc:reman_find_all"]])
 rl.setbinding([["\ef"]], [["luafunc:reman_insert_fix"]])
+rl.setbinding([["\en"]], [["luafunc:reman_nextup"]])
 
 -- ---- Tab completion for reman itself -----------------------------------------------------------
 local gen = clink.generator(1)

@@ -27,10 +27,15 @@ enum Row {
     Http { port: Option<u16> },
     Folder { path: String, shared: bool, runs: Option<u64> },
     AddFolder,
+    /// only reman's own dialog can let an agent see a folder
+    StrictPermissions(bool),
     Strict(bool),
     OldHistory(bool),
-    DropSecrets(bool),
+    /// "mask" | "drop" | "keep"
+    Secrets(&'static str),
     Ai(bool),
+    /// a notification when a long command of yours finishes: after this many seconds, or never
+    DoneAlert(Option<u64>),
     Shell { name: &'static str, wired: bool, detail: String },
     Info { label: &'static str, value: String },
 }
@@ -51,9 +56,12 @@ impl Row {
             Row::Folder { shared: true, .. } => "↵ stops sharing this folder with agents.".into(),
             Row::Folder { .. } => "↵ lets agents see commands you ran in this folder (and the folders inside it).".into(),
             Row::AddFolder => "↵ (or a) types a folder path to share. Tab completes.".into(),
+            Row::StrictPermissions(true) => "On: an agent asking to see a folder gets reman's own dialog box, and only your click there shares it. Your AI app's Allow buttons can't. ↵ turns it off.".into(),
+            Row::StrictPermissions(false) => "Off: you approve an agent's request with your AI app's own buttons, for that session. ↵ turns on reman's own dialog box instead, for apps set to approve tool calls by themselves.".into(),
             Row::Strict(_) => "Strict mode withholds any command that still looks like it holds a secret after redaction.".into(),
             Row::OldHistory(_) => "Old, imported history has no folder. When on, agents also get its generic commands (no paths, quotes or hosts).".into(),
-            Row::DropSecrets(_) => "A command holding a secret is recorded with the value masked (`export API_TOKEN=***`); on, it is not recorded at all. `reman scrub` cleans older history.".into(),
+            Row::Secrets(_) => "↵ cycles: mask the value (`export API_TOKEN=***`) · drop the command · keep as typed, so your finder shows it whole. Agents always get secrets masked. `reman scrub` cleans older history.".into(),
+            Row::DoneAlert(_) => "↵ cycles: after 1 minute · after 5 minutes · never. A desktop notification when a command of yours that ran that long finishes, with how long it took.".into(),
             Row::Ai(_) => "A model only arranges and explains commands that really worked (runbooks), never invents one. Remote endpoints: set \"ai\" in config.json.".into(),
             Row::Shell { wired: true, name, .. } => format!("{name} is wired. To remove it, delete the reman block from the file shown."),
             Row::Shell { name, .. } => format!("↵ wires {name} so its commands are recorded and the finder keys work."),
@@ -90,7 +98,7 @@ fn build() -> Vec<Row> {
 
     r.push(Row::Header("What agents can see"));
     if st.mcp_roots.is_empty() {
-        r.push(Row::Note("Now: each agent sees only the project it's working in. Share a folder to let every agent see it.".into()));
+        r.push(Row::Note("Now: agents see no history. Share a folder to approve it for every agent.".into()));
     }
     for root in &st.mcp_roots {
         r.push(Row::Folder { path: root.clone(), shared: true, runs: None });
@@ -99,13 +107,17 @@ fn build() -> Vec<Row> {
         r.push(Row::Folder { path: f, shared: false, runs: Some(n) });
     }
     r.push(Row::AddFolder);
+    r.push(Row::StrictPermissions(st.strict_permissions));
 
     r.push(Row::Header("Privacy"));
     r.push(Row::Strict(st.strict_secrets));
     r.push(Row::OldHistory(st.share_old_history));
-    r.push(Row::DropSecrets(st.drop_secrets()));
+    r.push(Row::Secrets(st.secrets_mode()));
     let (nc, nf) = (st.ignore_commands.len(), st.ignore_folders.len());
     r.push(Row::Info { label: "never kept", value: if nc + nf == 0 { "commands typed with a leading space; add patterns as ignore_commands / ignore_folders in config.json".into() } else { format!("a leading space, {nc} command pattern(s), {nf} folder pattern(s) (config.json)") } });
+
+    r.push(Row::Header("Alerts"));
+    r.push(Row::DoneAlert(st.done_alert_after()));
 
     r.push(Row::Header("Language model (optional)"));
     r.push(Row::Ai(st.ai.as_ref().is_none_or(|a| a.enabled)));
@@ -188,11 +200,28 @@ fn act(row: &Row) -> Result<(String, Color)> {
                 share(&mut st, path)?
             }
         }
+        // turning it off lets an app's own approval share history: the user's call, never an agent's
+        Row::StrictPermissions(true) if connect::run_by_agent().is_some() => {
+            (connect::refuse_if_agent("Turning off strict permissions").unwrap_err().to_string(), BAD)
+        }
+        Row::StrictPermissions(on) => {
+            let mut st = settings::load();
+            st.strict_permissions = !on;
+            settings::save(&st)?;
+            if st.strict_permissions {
+                ("strict permissions on: only reman's own dialog box can let an agent see a folder".into(), OK)
+            } else {
+                ("strict permissions off: your AI app's buttons approve, for that session".into(), WARN)
+            }
+        }
         Row::Strict(on) => {
             let mut st = settings::load();
             st.strict_secrets = !on;
             settings::save(&st)?;
             (format!("strict secrets {}", if st.strict_secrets { "on" } else { "off" }), OK)
+        }
+        Row::OldHistory(false) if connect::run_by_agent().is_some() => {
+            (connect::refuse_if_agent("Sharing old history with agents").unwrap_err().to_string(), BAD)
         }
         Row::OldHistory(on) => {
             let mut st = settings::load();
@@ -200,11 +229,30 @@ fn act(row: &Row) -> Result<(String, Color)> {
             settings::save(&st)?;
             (format!("old history {}", if st.share_old_history { "shared (generic commands only)" } else { "hidden from agents" }), OK)
         }
-        Row::DropSecrets(on) => {
+        Row::Secrets("drop") if connect::run_by_agent().is_some() => {
+            (connect::refuse_if_agent("Turning off secret redaction").unwrap_err().to_string(), BAD)
+        }
+        Row::Secrets(mode) => {
             let mut st = settings::load();
-            st.secrets = if *on { None } else { Some("drop".into()) };
+            let (next, msg, c) = match *mode {
+                "mask" => ("drop", "commands holding a secret are no longer recorded", OK),
+                "drop" => ("keep", "secrets are kept as typed for you; agents still get them masked", WARN),
+                _ => ("mask", "secrets are masked: the command is kept, the value hidden", OK),
+            };
+            st.secrets = (next != "mask").then(|| next.to_string());
             settings::save(&st)?;
-            (if *on { "secrets are masked: the command is kept, the value hidden" } else { "commands holding a secret are no longer recorded" }.to_string(), OK)
+            (msg.to_string(), c)
+        }
+        Row::DoneAlert(after) => {
+            let mut st = settings::load();
+            let (next, msg) = match after {
+                Some(60) => (300, "done alerts after 5 minutes"),
+                Some(_) => (0, "no done alerts"),
+                None => (60, "done alerts after 1 minute"),
+            };
+            st.done_alert_after_s = (next != 60).then_some(next);
+            settings::save(&st)?;
+            (msg.to_string(), OK)
         }
         Row::Ai(on) => {
             let mut st = settings::load();
@@ -240,6 +288,9 @@ fn act(row: &Row) -> Result<(String, Color)> {
 }
 
 fn share(st: &mut settings::Settings, path: &str) -> Result<(String, Color)> {
+    if let Err(e) = connect::refuse_if_agent("Sharing a folder with agents") {
+        return Ok((e.to_string(), BAD));
+    }
     let abs = std::path::absolute(path.trim()).map(|p| p.to_string_lossy().into_owned()).unwrap_or_else(|_| path.trim().to_string());
     if !std::path::Path::new(&abs).is_dir() {
         return Ok((format!("{abs} isn't a folder"), BAD));
@@ -292,10 +343,29 @@ fn row_line(row: &Row, sel: bool, w: usize) -> Line<'static> {
             },
         ]),
         Row::AddFolder => Line::from(vec![bar, Span::styled("  + share another folder…", name_st.fg(ACCENT))]),
+        Row::StrictPermissions(on) => Line::from(vec![bar, check(*on), Span::styled("Strict permissions: only reman's own dialog box can approve an agent", name_st)]),
         Row::Strict(on) => Line::from(vec![bar, check(*on), Span::styled("Strict secrets: withhold anything that still looks secret", name_st)]),
         Row::OldHistory(on) => Line::from(vec![bar, check(*on), Span::styled("Share generic commands from old, folder-less history", name_st)]),
-        Row::DropSecrets(on) => Line::from(vec![bar, check(*on), Span::styled("Drop commands holding a secret (off: mask the value)", name_st)]),
+        Row::Secrets(mode) => Line::from(vec![
+            bar,
+            Span::styled("Secrets in commands: ", name_st),
+            match *mode {
+                "drop" => state("drop the command".into(), OK),
+                "keep" => state("keep as typed (agents still get them masked)".into(), WARN),
+                _ => state("mask the value".into(), OK),
+            },
+        ]),
         Row::Ai(on) => Line::from(vec![bar, check(*on), Span::styled("Use a language model to arrange runbooks", name_st)]),
+        Row::DoneAlert(after) => Line::from(vec![
+            bar,
+            Span::styled("Done alerts: ", name_st),
+            match after {
+                Some(60) => state("after 1 minute".into(), OK),
+                Some(n) if n % 60 == 0 => state(format!("after {} minutes", n / 60), OK),
+                Some(n) => state(format!("after {n} seconds"), OK),
+                None => state("never".into(), MUTED),
+            },
+        ]),
         Row::Shell { name, wired, detail } => Line::from(vec![
             bar,
             check(*wired),

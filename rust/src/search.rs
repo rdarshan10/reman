@@ -76,6 +76,8 @@ pub struct Query<'a> {
     pub rank: Rank,
     /// cwd used for a small "run here before" boost when scope is wider than the folder
     pub here: Option<u32>,
+    /// [since, until): only commands that ran in this window (timewords.rs)
+    pub window: Option<(i64, i64)>,
 }
 
 #[derive(Debug, Clone)]
@@ -99,6 +101,8 @@ pub struct Outcome {
     pub confident: bool,
     pub hits: Vec<Hit>,
     pub total: usize,
+    /// a folded hit -> every variant it stands for, itself first, best first
+    pub members: HashMap<u32, Vec<u32>>,
 }
 
 #[inline]
@@ -208,6 +212,21 @@ pub fn is_close(sim: f32, words: f32, fuzzy: f32, cmd_like: bool, described: boo
             || (cmd_like && fuzzy >= CLOSE_FUZZY))
 }
 
+/// The tools a query names (`start the astro dev server` names astro): words that are programs
+/// some command of yours runs, and not everyday words in other tools' descriptions (`start`,
+/// `find`, `python` are, so they name nothing). A command that runs none of them is for some
+/// other tool, however alike the sentence: never close.
+fn named_tools(store: &Store, text: &str) -> Vec<String> {
+    content_words(text)
+        .into_iter()
+        .filter(|w| w.len() >= 3 && store.programs.contains(w.as_str()))
+        .filter(|w| {
+            let elsewhere = |e: &&crate::store::Entry| e.alive && !e.progs.iter().any(|p| p == w) && e.desc_words.as_deref().is_some_and(|d| has_word(d, w));
+            store.entries.iter().filter(elsewhere).take(2).count() < 2
+        })
+        .collect()
+}
+
 fn freq(runs: u32) -> f32 {
     0.03 * (runs as f32 / (runs as f32 + 20.0))
 }
@@ -248,11 +267,15 @@ pub fn similarities(store: &Store, qv: &[f32]) -> Vec<f32> {
 pub fn search(store: &Store, q: &Query, qv: Option<&[f32]>) -> Outcome {
     let now = config::now();
     let show_self = q.text.to_lowercase().contains("reman");
+    // a time named in the query (`deploy last week`): only commands that ran then, there
+    let ran_then: Option<std::collections::HashSet<u32>> = q.window.map(|(since, until)| {
+        store.execs.iter().filter(|x| x.ts >= since && x.ts < until && store.cwd_in_scope(x.cwd, q.scope)).map(|x| x.entry).collect()
+    });
     let cands: Vec<Cand> = store
         .entries
         .iter()
         .enumerate()
-        .filter(|(_, e)| e.recallable(show_self) && store.in_scope(e, q.scope))
+        .filter(|(i, e)| e.recallable(show_self) && store.in_scope(e, q.scope) && ran_then.as_ref().is_none_or(|s| s.contains(&(*i as u32))))
         .filter_map(|(i, e)| {
             let a = store.agg(e, q.scope);
             store.passes(&a, q.actor, q.status).then(|| Cand {
@@ -367,6 +390,11 @@ pub fn search(store: &Store, q: &Query, qv: Option<&[f32]>) -> Outcome {
         has.iter().map(|h| if total > 0.0 { h.iter().zip(&weight).filter(|(x, _)| **x).map(|(_, w)| w).sum::<f32>() / total } else { 0.0 }).collect()
     };
     let cmd_like = w_fuzzy == W_FUZZY;
+    let named = named_tools(store, text);
+    let for_named = |c: &Cand| {
+        let e = &store.entries[c.idx as usize];
+        named.iter().all(|t| has_word(&e.lower, t) || e.desc_words.as_deref().is_some_and(|d| has_word(d, t)))
+    };
 
     let short = text.chars().count() < 3 || sim_all.is_none();
     let mut scored: Vec<Hit> = Vec::with_capacity(cands.len());
@@ -377,7 +405,7 @@ pub fn search(store: &Store, q: &Query, qv: Option<&[f32]>) -> Outcome {
             for (k, c) in cands.iter().enumerate() {
                 let s = sim(c.idx);
                 let mut h = hit(c.idx, s + freq(c.runs) + recency(c.last, now), s, 0.0);
-                h.close = is_close(s, words[k], 0.0, false, store.entries[c.idx as usize].desc.is_some(), c.oneoff);
+                h.close = for_named(c) && is_close(s, words[k], 0.0, false, store.entries[c.idx as usize].desc.is_some(), c.oneoff);
                 h.words = words[k];
                 scored.push(h);
             }
@@ -399,7 +427,7 @@ pub fn search(store: &Store, q: &Query, qv: Option<&[f32]>) -> Outcome {
                     - if c.failing { W_FAILING } else { 0.0 }
                     - script_penalty(e);
                 let mut h = hit(c.idx, score, s, fz[k]);
-                h.close = is_close(s, words[k], fz[k], cmd_like, e.desc.is_some(), c.oneoff);
+                h.close = for_named(c) && is_close(s, words[k], fz[k], cmd_like, e.desc.is_some(), c.oneoff);
                 h.words = words[k];
                 scored.push(h);
             }
@@ -446,17 +474,21 @@ fn hit(idx: u32, score: f32, sim: f32, fuzzy: f32) -> Hit {
 
 fn finish(store: &Store, scored: Vec<Hit>, q: &Query, group: bool, mode: &'static str) -> Outcome {
     let confident = scored.first().is_some_and(|h| h.close);
+    let mut members: HashMap<u32, Vec<u32>> = HashMap::new();
     let hits = if group {
-        let mut sizes: HashMap<&str, u32> = HashMap::new();
+        let mut by_shape: HashMap<&str, Vec<u32>> = HashMap::new();
         for h in &scored {
-            *sizes.entry(store.entries[h.idx as usize].shape.as_str()).or_default() += 1;
+            by_shape.entry(store.entries[h.idx as usize].shape.as_str()).or_default().push(h.idx);
         }
         let mut seen = std::collections::HashSet::new();
         let mut out = Vec::new();
         for mut h in scored {
             let gk = store.entries[h.idx as usize].shape.as_str();
             if seen.insert(gk) {
-                h.variants = sizes[gk];
+                h.variants = by_shape[gk].len() as u32;
+                if h.variants > 1 {
+                    members.insert(h.idx, by_shape[gk].clone());
+                }
                 out.push(h);
             }
         }
@@ -466,7 +498,7 @@ fn finish(store: &Store, scored: Vec<Hit>, q: &Query, group: bool, mode: &'stati
     };
     let total = hits.len();
     let hits = hits.into_iter().skip(q.offset).take(if q.k == 0 { usize::MAX } else { q.k }).collect();
-    Outcome { mode, confident, hits, total }
+    Outcome { mode, confident, hits, total, members }
 }
 
 /// Browse: newest first (pinned float to the top), no embedding at all.
@@ -503,7 +535,7 @@ mod tests {
     }
 
     fn q(text: &str) -> Query<'_> {
-        Query { text, k: 5, offset: 0, scope: Scope::All, actor: None, status: None, group: false, rank: Rank::Hybrid, here: None }
+        Query { text, k: 5, offset: 0, scope: Scope::All, actor: None, status: None, group: false, rank: Rank::Hybrid, here: None, window: None }
     }
 
     #[test]

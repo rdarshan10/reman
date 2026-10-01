@@ -14,10 +14,10 @@ fn error_line(line: &str) -> bool {
     ERROR_WORDS.iter().any(|w| l.contains(w))
 }
 
-/// Keep what a failure printed: redacted, the error lines first (else its last lines), at most
-/// 300 characters. None for nothing useful.
-pub fn clean(text: &str) -> Option<String> {
-    let text = crate::redact::redact(text);
+/// Keep what a failure printed: redacted (unless the user keeps secrets as typed), the error lines
+/// first (else its last lines), at most 300 characters. None for nothing useful.
+pub fn clean_as(text: &str, redact: bool) -> Option<String> {
+    let text = if redact { crate::redact::redact(text) } else { text.to_string() };
     let lines: Vec<&str> = text.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
     if lines.is_empty() {
         return None;
@@ -61,9 +61,11 @@ mod tests {
     #[test]
     fn keeps_the_error_lines() {
         let out = "added 3 packages\nnpm ERR! code ERESOLVE\nnpm ERR! ERESOLVE unable to resolve dependency tree\nnpm ERR! Found: react@18.2.0";
-        assert_eq!(clean(out).unwrap().lines().next().unwrap(), "npm ERR! code ERESOLVE");
-        assert_eq!(clean("\n\n"), None);
-        assert!(clean("export API_TOKEN=abc123 failed").unwrap().contains("API_TOKEN=***"));
+        assert_eq!(clean_as(out, true).unwrap().lines().next().unwrap(), "npm ERR! code ERESOLVE");
+        assert_eq!(clean_as("\n\n", true), None);
+        assert!(clean_as("export API_TOKEN=abc123 failed", true).unwrap().contains("API_TOKEN=***"));
+        // kept as typed when the user turned redaction off
+        assert!(clean_as("export API_TOKEN=abc123 failed", false).unwrap().contains("API_TOKEN=abc123"));
     }
 
     #[test]

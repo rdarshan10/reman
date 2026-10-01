@@ -126,6 +126,8 @@ struct Results {
     titles: Vec<String>,
     total: usize,
     label: String,
+    /// the time the query named (`last week`), when it named one
+    window: Option<String>,
 }
 
 enum Reply {
@@ -202,7 +204,7 @@ fn worker(rx: Receiver<Job>, tx: Sender<Reply>) {
                         continue;
                     }
                     let res = (|| -> Result<Results> {
-                        let mut r = Results { seq, items: Vec::new(), titles: Vec::new(), total: 0, label: String::new() };
+                        let mut r = Results { seq, items: Vec::new(), titles: Vec::new(), total: 0, label: String::new(), window: None };
                         let push = |r: &mut Results, title: String, items: Vec<Item>| {
                             let fresh: Vec<Item> = items.into_iter().filter(|it| !r.items.iter().any(|x| x.command == it.command)).collect();
                             if fresh.is_empty() {
@@ -276,6 +278,7 @@ fn worker(rx: Receiver<Job>, tx: Sender<Reply>) {
                                     if sec.main {
                                         r.total = v["total"].as_u64().unwrap_or(items.len() as u64) as usize;
                                         r.label = v["mode"].as_str().unwrap_or("").to_string();
+                                        r.window = v["window"].as_str().map(str::to_string);
                                     }
                                     push(&mut r, title, items);
                                 }
@@ -315,6 +318,7 @@ struct App {
     titles: Vec<String>,
     total: usize,
     label: String,
+    window: Option<String>,
     loaded: bool,
     sel: usize,
     want: usize,
@@ -368,6 +372,7 @@ impl App {
         self.titles.clear();
         self.loaded = false;
         self.label.clear();
+        self.window = None;
         self.reset();
     }
 
@@ -451,7 +456,7 @@ impl App {
             }
             Mode::Recall => {
                 // this folder's STRONG matches first, then everything ranked across all folders
-                let find = filters(json!({"op": "search", "query": q, "k": self.want, "group": self.group}), self.actor, self.status);
+                let find = filters(json!({"op": "search", "query": q, "k": self.want, "group": self.group, "templates": true}), self.actor, self.status);
                 if narrow {
                     let mut here = sec(self.scope.phrase(), Kind::List, scoped(find.clone(), self.scope, &self.cwd), None, false);
                     here.req["k"] = json!(40);
@@ -519,9 +524,13 @@ impl App {
         self.fixes.get(&it.command).and_then(|f| f["command"].as_str()).map(String::from)
     }
 
-    /// What Enter puts on the prompt: the fix when a failure with a known fix is selected.
+    /// What Enter puts on the prompt: the fix when a failure with a known fix is selected; a
+    /// command with a blank, with the cursor in the blank (`\u{1}` marks it for the shell).
     fn pick(&self) -> Option<String> {
         let it = self.selected()?;
+        if let Some(f) = it.meta["fill"].as_str() {
+            return Some(f.to_string());
+        }
         Some(self.fix_of(&it).unwrap_or(it.command))
     }
 
@@ -837,6 +846,10 @@ fn filter_line<'a>(app: &App, items: &[&Item], w: usize) -> Line<'a> {
                 _ => "any outcome",
             };
             row.extend([dot(), val(app.actor != "all", actor), key("F3"), dot(), val(app.status != "all", status), key("F2")]);
+            // the time the query named: only what ran then
+            if let Some(w) = app.window.as_deref().filter(|_| !app.query.trim().is_empty()) {
+                row.extend([dot(), val(true, &format!("ran {w}"))]);
+            }
             if !app.query.trim().is_empty() {
                 row.extend([dot(), val(!app.group, if app.group { "variants folded" } else { "every variant" }), key("^G")]);
             }
@@ -918,8 +931,18 @@ fn list_rows<'a>(app: &App, items: &[&'a Item], w: usize) -> (Vec<(Line<'a>, Opt
             _ if app.mode == Mode::Flows && app.flow.is_none() => it.command.replace(" ; ", "  →  "),
             _ => it.command.clone(),
         };
-        for (seg, m) in highlight(&fit(&clean(&shown), cmd_w), &app.query) {
-            row.push(Span::styled(seg, if m { hi } else { text_st }));
+        if let Some(t) = it.meta["template"].as_str() {
+            // a command with a blank: the blank in the accent colour
+            let t = fit(&clean(t), cmd_w);
+            let (before, rest) = t.split_once('‹').map(|(a, b)| (a.to_string(), format!("‹{b}"))).unwrap_or((t.clone(), String::new()));
+            let (blank, after) = rest.split_once('›').map(|(a, b)| (format!("{a}›"), b.to_string())).unwrap_or((rest.clone(), String::new()));
+            row.push(Span::styled(before, text_st));
+            row.push(Span::styled(blank, Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)));
+            row.push(Span::styled(after, text_st));
+        } else {
+            for (seg, m) in highlight(&fit(&clean(&shown), cmd_w), &app.query) {
+                row.push(Span::styled(seg, if m { hi } else { text_st }));
+            }
         }
         if meta_w > 0 {
             row.push(Span::raw(" "));
@@ -1021,7 +1044,8 @@ fn draw_card(buf: &mut Buffer, app: &App, items: &[&Item], r: Rect, wide: bool) 
         l.push(Line::styled("↵ to walk through it: each step lands on your prompt, the next one waits on ↑", muted()));
     } else {
         if wide {
-            l.push(Line::styled(clean(&it.command), Style::default().add_modifier(Modifier::BOLD)));
+            let head = m["template"].as_str().unwrap_or(&it.command);
+            l.push(Line::styled(clean(head), Style::default().add_modifier(Modifier::BOLD)));
         }
         // a step of a flow: where it sits and what follows
         if let Some((n, of)) = it.step {
@@ -1042,13 +1066,27 @@ fn draw_card(buf: &mut Buffer, app: &App, items: &[&Item], r: Rect, wide: bool) 
         if app.mode == Mode::Fixes && app.query.trim().is_empty() {
             match (app.fix_of(it), app.fixes.get(&it.command)) {
                 (Some(f), _) => {
-                    l.push(Line::from(vec![Span::styled("What worked instead: ", Style::default().fg(OK)), Span::styled(clean(&f), Style::default().fg(OK).add_modifier(Modifier::BOLD))]));
+                    let mut s = vec![Span::styled("What worked instead: ", Style::default().fg(OK)), Span::styled(clean(&f), Style::default().fg(OK).add_modifier(Modifier::BOLD))];
+                    // what it changes, when it's a variant of this one (adds --build, gti → git)
+                    if let Some(d) = crate::fixpairs::diff(&it.command, &f) {
+                        s.push(Span::styled(format!("  ({d})"), muted()));
+                    }
+                    l.push(Line::from(s));
                 }
                 (None, Some(v)) if v.is_null() => {
                     l.push(Line::styled("No fix known yet - nothing that worked followed it.", muted()));
                 }
                 _ => {}
             }
+        }
+        // a command with a blank: what went in it, and how to fill it
+        if let Some(vals) = m["values"].as_array().filter(|_| m["template"].is_string()) {
+            let recent: Vec<String> = vals.iter().filter_map(Value::as_str).take(3).map(|v| format!("\"{}\"", fit(&clean(v), 24))).collect();
+            l.push(Line::from(vec![
+                Span::styled(format!("{} variants", m["variants"].as_u64().unwrap_or(vals.len() as u64)), Style::default().fg(INFO)),
+                Span::styled(format!(" · recent: {}", recent.join(", ")), muted()),
+            ]));
+            l.push(Line::styled("Enter puts it on the prompt with the cursor in the blank · ^G shows each one", muted()));
         }
         // what it is / why it's offered
         let why = if it.fix {
@@ -1075,10 +1113,12 @@ fn draw_card(buf: &mut Buffer, app: &App, items: &[&Item], r: Rect, wide: bool) 
                 _ => ("·", MUTED, format!("ran {runs}x - outcome not recorded (old history)")),
             };
             let last = ago_long(m["last_used"].as_i64().unwrap_or(0));
+            // how long it usually takes, when that's worth knowing (2s or more)
+            let usually = m["typical_ms"].as_u64().filter(|t| *t >= 2000).map(|t| format!(" · usually {}", crate::insight::took(t as u32, false))).unwrap_or_default();
             l.push(Line::from(vec![
                 Span::styled(format!("{mark} "), Style::default().fg(col)),
                 Span::styled(verdict, Style::default().fg(col)),
-                Span::styled(format!(" · last {last} · by {}", who(&it.actor)), muted()),
+                Span::styled(format!("{usually} · last {last} · by {}", who(&it.actor)), muted()),
             ]));
             // where
             let folders: Vec<String> = app.details.get(&it.command).and_then(|v| v["folder_list"].as_array().cloned()).unwrap_or_default().iter().filter_map(Value::as_str).filter(|f| !f.eq_ignore_ascii_case("unknown")).map(String::from).collect();
@@ -1381,6 +1421,7 @@ pub fn run(o: Opts) -> Result<()> {
         titles: vec![],
         total: 0,
         label: String::new(),
+        window: None,
         loaded: false,
         sel: 0,
         want: 200,
@@ -1441,17 +1482,24 @@ pub fn run(o: Opts) -> Result<()> {
 #[cfg(windows)]
 fn type_ahead(text: &str) -> Result<()> {
     use std::os::windows::io::AsRawHandle;
+    const VK_LEFT: u16 = 0x25;
+    const SCAN_LEFT: u16 = 0x4B;
     let con = std::fs::OpenOptions::new().read(true).write(true).open("CONIN$")?;
-    let units: Vec<u16> = text.replace(['\r', '\n'], " ").encode_utf16().collect();
-    let mut recs: Vec<win::InputRecord> = Vec::with_capacity(units.len() * 2);
-    for ch in units {
+    // a command with a blank: \u{1} marks where the cursor goes; Left-arrows take it back there
+    let text = text.replace(['\r', '\n'], " ");
+    let back = text.split_once('\u{1}').map_or(0, |(_, after)| after.encode_utf16().count());
+    let units: Vec<u16> = text.replace('\u{1}', "").encode_utf16().collect();
+    let mut recs: Vec<win::InputRecord> = Vec::with_capacity((units.len() + back) * 2);
+    let mut key = |vk: u16, scan: u16, ch: u16| {
         for down in [1, 0] {
-            recs.push(win::InputRecord {
-                event_type: win::KEY_EVENT,
-                _pad: 0,
-                key: win::KeyEvent { key_down: down, repeat: 1, vk: 0, scan: 0, ch, ctrl: 0 },
-            });
+            recs.push(win::InputRecord { event_type: win::KEY_EVENT, _pad: 0, key: win::KeyEvent { key_down: down, repeat: 1, vk, scan, ch, ctrl: 0 } });
         }
+    };
+    for ch in units {
+        key(0, 0, ch);
+    }
+    for _ in 0..back {
+        key(VK_LEFT, SCAN_LEFT, 0);
     }
     let mut written = 0u32;
     let ok = unsafe { win::WriteConsoleInputW(con.as_raw_handle(), recs.as_ptr(), recs.len() as u32, &mut written) };
@@ -1463,7 +1511,7 @@ fn type_ahead(text: &str) -> Result<()> {
 
 #[cfg(not(windows))]
 fn type_ahead(text: &str) -> Result<()> {
-    println!("{text}");
+    println!("{}", text.replace('\u{1}', ""));
     Ok(())
 }
 
@@ -1516,6 +1564,7 @@ fn event_loop(screen: &mut Screen, app: &mut App, replies: &Receiver<Reply>) -> 
                     app.items = r.items;
                     app.titles = r.titles;
                     app.label = r.label;
+                    app.window = r.window;
                     app.loaded = true;
                     app.sel = app.sel.min(app.visible_items().len().saturating_sub(1));
                 }

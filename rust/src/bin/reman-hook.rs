@@ -1,6 +1,6 @@
 //! `reman-hook` - the slim capture binary for hooks that must spawn a process per command
 //! (fish, the Claude Code hook, and the bash/zsh fallback when the daemon is down).
-//! It links only config + client + capture: no ONNX Runtime (whose C++ static initializers the
+//! It links only config + client + capture (+ unwrap/verdict, to read an agent's output): no ONNX Runtime (whose C++ static initializers the
 //! full binary pays before `main`), no TUI, no clap. Same arguments as `reman record` / `reman hook`.
 #[path = "../capture.rs"]
 mod capture;
@@ -10,10 +10,16 @@ mod client;
 #[path = "../config.rs"]
 #[allow(dead_code)]
 mod config;
+#[path = "../unwrap.rs"]
+#[allow(dead_code)]
+mod unwrap;
+#[path = "../verdict.rs"]
+#[allow(dead_code)]
+mod verdict;
 
 fn usage() -> ! {
     eprintln!(
-        "usage: reman-hook record [--exit N] [--cwd DIR] [--session ID] [--actor A] [--duration-ms MS] [--suggest] -- <command...>\n       reman-hook welcome [--cwd DIR] [--session ID]\n       reman-hook claude    (Claude Code hook payload on stdin)"
+        "usage: reman-hook record [--exit N] [--cwd DIR] [--session ID] [--actor A] [--duration-ms MS] [--suggest] -- <command...>\n       reman-hook welcome [--cwd DIR] [--session ID]\n       reman-hook precheck [--cwd DIR] -- <command...>\n       reman-hook nextup [--cwd DIR] [--session ID] [--index N]\n       reman-hook claude|codex|cursor|gemini|windsurf|copilot    (that agent's hook payload on stdin)\n       reman-hook event     (a run from reman's opencode / pi plugin, JSON on stdin)"
     );
     std::process::exit(2)
 }
@@ -23,6 +29,12 @@ fn main() {
     let result = match args.next().as_deref() {
         Some("claude") | Some("hook") => capture::hook_claude(),
         Some("codex") => capture::hook_agent("codex"),
+        Some("cursor") => capture::hook_cursor(),
+        Some("gemini") => capture::hook_gemini(),
+        Some("windsurf") => capture::hook_windsurf(),
+        Some("copilot") => capture::hook_copilot(),
+        // reman's own opencode / pi plugins
+        Some("event") => capture::hook_event(),
         // fish, on arriving in a folder: "last time here" (once per session and folder)
         Some("welcome") => {
             let (mut cwd, mut session) = (None, None);
@@ -34,6 +46,32 @@ fn main() {
                 }
             }
             capture::welcome(cwd, session)
+        }
+        // fish and Clink, on Alt+N: what you'd run next here
+        Some("nextup") => {
+            let (mut cwd, mut session, mut index) = (None, None, 0);
+            while let Some(x) = args.next() {
+                match x.as_str() {
+                    "--cwd" => cwd = args.next(),
+                    "--session" => session = args.next(),
+                    "--index" => index = args.next().and_then(|v| v.parse().ok()).unwrap_or(0),
+                    _ => usage(),
+                }
+            }
+            capture::nextup(cwd, session, index)
+        }
+        // fish, on Enter: does the history here say this command will fail?
+        Some("precheck") => {
+            let mut cwd = None;
+            let mut cmd = Vec::new();
+            while let Some(x) = args.next() {
+                match x.as_str() {
+                    "--cwd" => cwd = args.next(),
+                    "--" => cmd.extend(args.by_ref()),
+                    _ => usage(),
+                }
+            }
+            capture::precheck(cwd, cmd.join(" "))
         }
         Some("record") => {
             let mut a = capture::RecordArgs { command: String::new(), exit: None, cwd: None, session: None, actor: None, duration_ms: None, suggest: false, print_fix: false };

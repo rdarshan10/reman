@@ -1,9 +1,7 @@
 //! Offline, no-execution command understanding: program/subcommand parsing, variant grouping,
-//! tldr-pages descriptions and repo identity. Port of reman_enrich.py (parse_cmd, describe,
-//! group_key, repo_identity) - nothing here ever runs a binary.
-use parking_lot::Mutex;
+//! tldr-pages descriptions. Port of reman_enrich.py (parse_cmd, describe, group_key) - nothing
+//! here ever runs a binary. (Repo identity is in git.rs.)
 use std::collections::HashMap;
-use std::path::Path;
 use std::sync::OnceLock;
 
 static TLDR_JSON: &[u8] = include_bytes!("../../tldr_map.json");
@@ -73,6 +71,28 @@ pub fn parse_cmd(cmd: &str) -> (Option<String>, Option<String>) {
     (Some(prog), sub)
 }
 
+/// Every program a command line runs: the first word of each `&&` / `;` / `|` step, and what a
+/// wrapper runs inside it (`npx astro dev` runs astro). `cd x` steps run nothing.
+pub fn programs(cmd: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for seg in cmd.split([';', '|', '&', '\n', '(', ')']) {
+        let seg = seg.trim();
+        let first = seg.split_whitespace().next().unwrap_or("").to_lowercase();
+        if seg.is_empty() || matches!(first.as_str(), "cd" | "pushd" | "popd" | "set-location" | "sl") {
+            continue;
+        }
+        for s in std::iter::once(seg.to_string()).chain(wrapped(seg)) {
+            if let (Some(p), _) = parse_cmd(&s) {
+                let name_like = p.len() >= 2 && p.starts_with(|c: char| c.is_ascii_alphabetic()) && p.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'));
+                if name_like && !out.contains(&p) {
+                    out.push(p);
+                }
+            }
+        }
+    }
+    out
+}
+
 /// A command that says nothing about the project it ran in: one line, a well-known tool as the
 /// first word, and no paths, quotes, URLs, hosts, variables or assignments in the arguments.
 /// `docker compose up -d` and `alembic upgrade head` are generic; `git commit -m "..."`,
@@ -137,12 +157,128 @@ pub fn shape_key(cmd: &str) -> String {
                 "_path"
             } else if digits > 0 && t.chars().all(|c| c.is_ascii_hexdigit() || matches!(c, '.' | ':' | '-')) && (digits * 2 >= t.len() || t.len() >= 7) {
                 "_n"
+            } else if generated_name(t) {
+                "_name"
             } else {
                 t
             }
         })
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+/// A name with a generated suffix: a pod or container (`api-7f9c4`, `web-6d4cf56db6-x2k1m`).
+fn generated_name(t: &str) -> bool {
+    let Some((head, tail)) = t.rsplit_once('-') else { return false };
+    !head.is_empty()
+        && head.chars().next().is_some_and(|c| c.is_ascii_alphabetic())
+        && head.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+        && (4..=10).contains(&tail.len())
+        && tail.chars().all(|c| c.is_ascii_alphanumeric())
+        && tail.chars().any(|c| c.is_ascii_digit())
+        && tail.chars().any(|c| c.is_ascii_alphabetic())
+}
+
+/// A command with one blank: variants of one command that differ in exactly one place, after
+/// the program and subcommand, never in a flag (`git commit -m "‹message›"`, `kubectl logs ‹name›`).
+#[derive(Debug, PartialEq)]
+pub struct Template {
+    /// the blank shown as ‹kind›
+    pub display: String,
+    /// for the prompt: \u{1} where the cursor goes, inside the quotes when the blank was quoted
+    pub fill: String,
+    pub kind: &'static str,
+    /// what went in the blank, in the order given (most recent first), at most 5
+    pub values: Vec<String>,
+}
+
+/// The template of `variants` (most recent first), or None when they don't differ in exactly one
+/// such place.
+pub fn template(variants: &[&str]) -> Option<Template> {
+    let toks: Vec<Vec<String>> = variants.iter().map(|v| words_quoted(v)).collect();
+    let n = toks.first()?.len();
+    if toks.len() < 2 || toks.iter().any(|t| t.len() != n) {
+        return None;
+    }
+    let diff: Vec<usize> = (0..n).filter(|&i| toks.iter().any(|t| t[i] != toks[0][i])).collect();
+    let [p] = diff[..] else { return None };
+    // never the program or its subcommand: `docker compose up` / `down` are two commands
+    if p < group_key(variants[0]).split_whitespace().count().max(1) {
+        return None;
+    }
+    let vals: Vec<&str> = toks.iter().map(|t| t[p].as_str()).collect();
+    // the blank holds data, as folding sees it (quoted text, a path, a number or hash, a
+    // generated name), never a flag or a word like `up` / `down`
+    if vals.iter().any(|v| v.starts_with('-') || !matches!(shape_key(v).as_str(), "\"_\"" | "_path" | "_n" | "_name")) {
+        return None;
+    }
+    // quoted, each its own way (`"wip"`, `'fix login'`): the blank takes the most recent's quotes
+    let in_quotes = |v: &str| v.len() >= 2 && ['"', '\''].iter().any(|q| v.starts_with(*q) && v.ends_with(*q));
+    let quoted = vals[0].chars().next().filter(|_| vals.iter().all(|v| in_quotes(v)));
+    let prev = toks[0][p - 1].to_lowercase();
+    let kube = matches!(toks[0][0].to_lowercase().trim_end_matches(".exe"), "kubectl" | "helm" | "oc" | "k");
+    let kind = match prev.as_str() {
+        "-m" | "--message" => "message",
+        "-n" | "--namespace" if kube => "namespace",
+        "checkout" | "switch" | "merge" | "rebase" => "branch",
+        "cd" | "set-location" | "sl" | "pushd" | "chdir" => "folder",
+        _ if vals.iter().all(|v| v.contains('/') || v.contains('\\')) => "path",
+        _ if vals.iter().all(|v| v.chars().all(|c| c.is_ascii_digit())) => "number",
+        _ if vals.iter().all(|v| generated_name(&v.to_lowercase())) => "name",
+        _ if quoted.is_some() => "text",
+        _ => "value",
+    };
+    let put = |blank: &str| {
+        let mut t = toks[0].clone();
+        t[p] = match quoted {
+            Some(q) => format!("{q}{blank}{q}"),
+            None => blank.to_string(),
+        };
+        t.join(" ")
+    };
+    let mut values: Vec<String> = Vec::new();
+    for v in &vals {
+        let v = match quoted {
+            Some(_) => v[1..v.len() - 1].to_string(),
+            None => v.to_string(),
+        };
+        if !values.contains(&v) && values.len() < 5 {
+            values.push(v);
+        }
+    }
+    Some(Template { display: put(&format!("‹{kind}›")), fill: put("\u{1}"), kind, values })
+}
+
+/// Words of a command line, a quoted string being one word (quotes kept).
+fn words_quoted(cmd: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    let mut quote: Option<char> = None;
+    for c in cmd.trim().chars() {
+        match quote {
+            Some(q) => {
+                cur.push(c);
+                if c == q {
+                    quote = None;
+                }
+            }
+            None if c.is_whitespace() => {
+                if !cur.is_empty() {
+                    out.push(std::mem::take(&mut cur));
+                }
+            }
+            None => {
+                if c == '"' || c == '\'' {
+                    quote = Some(c);
+                }
+                cur.push(c);
+            }
+        }
+    }
+    if !cur.is_empty() {
+        out.push(cur);
+    }
+    out
 }
 
 pub struct Description {
@@ -288,52 +424,6 @@ fn describe_one(cmd: &str) -> Description {
     Description { display, parts }
 }
 
-fn read_origin(cfg: &Path) -> Option<String> {
-    let text = std::fs::read_to_string(cfg).ok()?;
-    let mut sect: Option<String> = None;
-    let mut urls: Vec<(String, String)> = Vec::new();
-    for ln in text.lines() {
-        let s = ln.trim();
-        if s.starts_with('[') && s.ends_with(']') {
-            sect = Some(s[1..s.len() - 1].trim().to_string());
-        } else if let Some(sec) = &sect {
-            if sec.starts_with("remote ") && s.to_lowercase().starts_with("url") && s.contains('=') {
-                let name = sec.split('"').nth(1).unwrap_or(sec).to_string();
-                urls.push((name, s.split_once('=').unwrap().1.trim().to_string()));
-            }
-        }
-    }
-    urls.iter().find(|(n, _)| n == "origin").or(urls.first()).map(|(_, u)| u.clone())
-}
-
-/// Repo a folder belongs to: git origin url (parsed from .git/config, never runs git), else the
-/// repo root, else the folder itself. Cached - called once per distinct cwd.
-pub fn repo_identity(path: &str) -> String {
-    static CACHE: OnceLock<Mutex<HashMap<String, String>>> = OnceLock::new();
-    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
-    if let Some(v) = cache.lock().get(path) {
-        return v.clone();
-    }
-    let start = Path::new(path);
-    let mut d = Some(start);
-    let mut ident = crate::config::norm_path(path);
-    while let Some(dir) = d {
-        let gitdir = dir.join(".git");
-        let cfg = gitdir.join("config");
-        if cfg.is_file() {
-            ident = read_origin(&cfg).unwrap_or_else(|| crate::config::norm_path(&dir.to_string_lossy()));
-            break;
-        }
-        if gitdir.is_dir() {
-            ident = crate::config::norm_path(&dir.to_string_lossy());
-            break;
-        }
-        d = dir.parent();
-    }
-    cache.lock().insert(path.to_string(), ident.clone());
-    ident
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -346,6 +436,26 @@ mod tests {
         assert_eq!(group_key("scp index.html root@h:/p"), "scp");
         assert_eq!(group_key("cd x; npm run dev"), "npm run");
         assert_eq!(group_key(r"C:\Python\python.exe app.py"), "python");
+    }
+
+    #[test]
+    fn templates_with_one_blank() {
+        let t = template(&[r#"git commit -m "fix login""#, r#"git commit -m "wip""#, r#"git commit -m "wip""#]).unwrap();
+        assert_eq!((t.display.as_str(), t.fill.as_str(), t.kind), (r#"git commit -m "‹message›""#, "git commit -m \"\u{1}\"", "message"));
+        assert_eq!(t.values, vec!["fix login", "wip"]);
+        let t = template(&["kubectl logs api-7f9c4 -n prod", "kubectl logs web-x2k1m -n prod"]).unwrap();
+        assert_eq!((t.display.as_str(), t.kind), ("kubectl logs ‹name› -n prod", "name"));
+        assert_eq!(template(&[r"cd D:\work\api", r"cd D:\work\web"]).map(|t| t.fill), Some("cd \u{1}".into()));
+        assert_eq!(template(&["docker compose up", "docker compose down"]), None, "the subcommand differs");
+        assert_eq!(template(&["git commit -m a -q", "git commit -m b -v"]), None, "two places differ");
+        assert_eq!(template(&["ls -la", "ls -l"]), None, "a flag isn't a blank");
+        assert_eq!(template(&["git status"]), None, "one variant is just a command");
+        assert_eq!(template(&[r#"test -n "a1""#, r#"test -n "b2""#]).map(|t| t.kind), Some("text"), "-n is a namespace only for kubectl");
+        let t = template(&[r#"git commit -m "Move""#, "git commit -m 'First commit'"]).unwrap();
+        assert_eq!((t.fill.as_str(), t.values.clone()), ("git commit -m \"\u{1}\"", vec!["Move".to_string(), "First commit".to_string()]), "quotes of either kind");
+        assert_eq!(template(&["kubectl get pods -n api-7f9c4", "kubectl get pods -n web-x2k1m"]).map(|t| t.kind), Some("namespace"));
+        assert_eq!(shape_key("kubectl logs api-7f9c4 -n prod"), shape_key("kubectl logs web-6d4cf56db6-x2k1m -n prod"));
+        assert_ne!(shape_key("node-18 x"), shape_key("node-20 x"), "a short suffix is a version, not a generated name");
     }
 
     #[test]
@@ -405,5 +515,21 @@ mod generic_tests {
                   "export TOKEN=abc", "ping db.internal.corp", "python train.py","myscript --go", "return db_obj", "echo hi"] {
             assert!(!is_generic(c), "{c}");
         }
+    }
+}
+
+#[cfg(test)]
+mod program_tests {
+    use super::programs;
+
+    #[test]
+    fn every_step_and_what_wrappers_run() {
+        assert_eq!(programs("npx astro dev --port 4321"), ["npx", "astro"]);
+        assert_eq!(programs("cd D:/portfolio && npx vercel --prod 2>&1 | tail -3"), ["npx", "vercel", "tail"]);
+        assert_eq!(programs("git add -A; git commit -m wip"), ["git"]);
+        assert_eq!(programs("sudo docker ps"), ["sudo", "docker"]);
+        // a cd step runs nothing; variables and numbers are not programs
+        assert!(programs("cd portfolio").is_empty());
+        assert!(programs("$x = 1").is_empty());
     }
 }

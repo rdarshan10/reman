@@ -25,7 +25,7 @@ for k in ("CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "AGENT"):
     BASE_ENV.pop(k, None)
 subprocess.run([EXE, "ping"], env=BASE_ENV, capture_output=True, timeout=60)
 
-KEY = {"enter": "\r", "up": "\x1b[A", "esc": "\x1b", "ctrl_r": "\x12", "ctrl_u": "\x15", "alt_f": "\x1bf", "ctrl_c": "\x03"}
+KEY = {"enter": "\r", "up": "\x1b[A", "esc": "\x1b", "ctrl_r": "\x12", "ctrl_u": "\x15", "alt_f": "\x1bf", "alt_n": "\x1bn", "ctrl_c": "\x03"}
 CWD = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."))
 
 
@@ -131,11 +131,74 @@ for sh in ("bash", "zsh", "fish"):
     d = daemon({"op": "detail", "command": "gti status"})
     check("failure captured with real exit code", d.get("status") in ("fail", "mixed"), d)
     check("suggestion printed after the failure", re.search(r"reman: .*(->|→) ?git status", t.text()) is not None, t.text()[-400:])
+    check("...with what it changes", "(gti → git" in t.text(), t.text()[-400:])
     t.keys("alt_f"); time.sleep(0.8)
     check("Alt-F inserts the fix", t.last_prompt().rstrip().endswith("git status"), t.last_prompt())
     t.keys("ctrl_u"); time.sleep(0.3)
     t.run(f" echo secret-{tag}")
     check("leading-space command not recorded", not daemon({"op": "detail", "command": f"echo secret-{tag}"}).get("found"))
+    # the fix is offered only until the next recorded command; then Alt-F is forward-word again
+    # (zsh stops at the start of the next word, readline and fish at the end of this one)
+    t.run(f"echo next-{tag}")
+    t.type("echo one two"); t.keys("\x01", "alt_f"); t.type("X"); time.sleep(0.6)
+    line = t.last_prompt()
+    check("Alt-F with no fix waiting moves forward a word", "echoX one two" in line or "echo Xone two" in line, line)
+    t.keys("\x05", "ctrl_u"); time.sleep(0.3)
+    if sh == "fish":
+        # fish's autosuggestion: Alt-F accepts one word of it
+        t.type("echo o"); time.sleep(0.8); t.keys("alt_f"); t.type("Z"); time.sleep(0.6)
+        line = t.last_prompt()
+        check("Alt-F accepts one word of fish's autosuggestion", "echo okZ" in line or "echo ok-Z" in line, line)
+        t.keys("\x05", "ctrl_u"); time.sleep(0.3)
+    if sh != "bash":
+        # Enter holds a command that failed every time here, once, when failing costs something;
+        # Enter again runs it (bash's readline can't run a check on Enter and then accept the line)
+        fast = f"zzfail-{tag}"
+        t.run(fast, 1.5); t.run(fast, 1.5); time.sleep(1.5)
+        t.run(fast, 2.0)
+        check("a command that fails in a blink is not held", daemon({"op": "detail", "command": fast}).get("runs") == 3, daemon({"op": "detail", "command": fast}))
+        bad = f"sh -c 'sleep 11; exit 3' zzslow-{tag}"
+        t.run(bad, 13); t.run(bad, 13); time.sleep(1.5)
+        t.type(bad); t.keys("enter")
+        held = t.wait(r"reman: this failed all 2 times it ran here, after about 11s each time", 8)
+        time.sleep(0.8)
+        check("Enter holds a slow command that failed every time here, and says why", held and "Enter again runs it anyway" in t.text(), t.text()[-500:])
+        check("...keeping the line, not running it", t.last_prompt().rstrip().endswith(f"zzslow-{tag}") and daemon({"op": "detail", "command": bad}).get("runs") == 2, t.last_prompt())
+        t.keys("enter"); time.sleep(14)
+        check("Enter again runs it", daemon({"op": "detail", "command": bad}).get("runs") == 3, daemon({"op": "detail", "command": bad}))
+        t.run(f"echo fine-{tag}", 1.5)
+        check("a command with no such history runs on the first Enter", daemon({"op": "detail", "command": f"echo fine-{tag}"}).get("runs") == 1)
+    # Alt-N on an empty line: what usually comes next here, not run; again: another idea
+    na, nb = f"echo nx-a-{tag}", f"echo nx-b-{tag}"
+    for _ in range(3):
+        t.run(na, 1.0); t.run(nb, 1.0)
+    t.run(na, 2.0)
+    t.keys("alt_n"); time.sleep(1.5)
+    check("Alt-N on an empty line puts what usually comes next here", t.last_prompt().rstrip().endswith(nb), t.last_prompt())
+    t.keys("alt_n"); time.sleep(1.2)
+    after = t.last_prompt().split("RMN> ", 1)[-1].strip()
+    check("Alt-N again: another idea", after != "" and after != nb, t.last_prompt())
+    t.keys("\x05", "ctrl_u"); time.sleep(0.3)
+    # a command with a blank: Enter puts it on the prompt with the cursor in the blank
+    t.run(f'test -n "zzone-{tag}"', 1.2); t.run(f'test -n "zztwo-{tag}"', 1.2); time.sleep(1.5)
+    t.keys("ctrl_r")
+    opened = t.wait(r"Recall  Fixes  Flows", 15)
+    t.type("test -n"); time.sleep(2.0)
+    rows = [l for l in t.text().splitlines() if "test -n" in l]
+    check("the finder shows the variants as one command with a blank", opened and any('test -n "‹text›"' in l for l in rows), rows)
+    t.keys("enter"); time.sleep(1.5)
+    t.type("x"); time.sleep(0.6)
+    check("Enter: the cursor lands in the blank", 'RMN> test -n "x"' in t.last_prompt() and 'test -n "x""' not in t.last_prompt(), t.last_prompt())
+    t.keys("\x05", "ctrl_u"); time.sleep(0.3)
+    # rcd: go to the folder by its name (the daemon gives a Windows path; MSYS shells convert it)
+    proj = f"zzproj-{tag}"
+    os.makedirs(os.path.join(CWD, proj))
+    t.run(f"cd {proj} && echo built-{tag}", 2.0)
+    t.run("cd ..", 1.5)
+    t.run(f"rcd {proj} && pwd", 6.0)
+    check("rcd <name> goes to that folder", re.search(rf"/{proj}\s*$", t.text(), re.M) is not None, t.text()[-300:])
+    t.run("cd ..", 1.5)
+    shutil.rmtree(os.path.join(CWD, proj), ignore_errors=True)
     # finder
     t.keys("ctrl_r")
     opened = t.wait(r"Recall  Fixes  Flows", 15) and t.wait(r"everywhere ←→", 5)

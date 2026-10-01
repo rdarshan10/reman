@@ -15,13 +15,21 @@ pub struct Prediction {
     pub reason: String,
 }
 
+/// Commands that say nothing about what comes next: clearing the screen, looking at history.
+fn neutral(text: &str) -> bool {
+    let first = text.split_whitespace().next().unwrap_or("").to_lowercase();
+    matches!(first.strip_suffix(".exe").unwrap_or(&first), "cls" | "clear" | "clear-host" | "reset" | "history" | "h" | "hh" | "reman" | "r" | "rr")
+}
+
 /// Most recent command (and the one before it) in this session/folder, if recent enough.
+/// Clearing the screen and the like are skipped: they don't change what you do next.
 pub fn context(store: &Store, cwd: Option<u32>, session: Option<u32>) -> (Option<u32>, Option<u32>) {
     let now = crate::config::now();
     let mut it = store.execs.iter().rev().filter(|x| {
         now - x.ts <= CONTEXT_WINDOW
             && store.entries[x.entry as usize].alive
             && !store.entries[x.entry as usize].comment
+            && !neutral(&store.entries[x.entry as usize].text)
             && match (session, cwd) {
                 (Some(s), _) if !store.session_name(s).is_empty() => x.session == s,
                 (_, Some(c)) => x.cwd == Some(c),
@@ -114,7 +122,7 @@ mod tests {
         for _ in 0..3 {
             for c in ["git add .", "git commit -m x", "git push"] {
                 t += 10;
-                let r = Run { cmd: c.into(), exit: Some(0), cwd: Some("C:/r".into()), session: "s1".into(), actor: "human".into(), ts: t, duration_ms: None, err: None };
+                let r = Run { cmd: c.into(), exit: Some(0), cwd: Some("C:/r".into()), session: "s1".into(), actor: "human".into(), ts: t, duration_ms: None, ..Default::default() };
                 let rec = db::record_run(&db, &r).unwrap();
                 s.apply_run(rec.command_id, rec.new_row, &r, None);
             }

@@ -143,7 +143,7 @@ fn handle(d: &Daemon, s: TcpStream) -> anyhow::Result<()> {
         if pol.roots.is_empty() {
             anyhow::bail!("no folders are shared with agents yet: run `reman connect http --root <dir>`");
         }
-        mcp::call_tool(d, name, args, &pol)
+        mcp::answer(d, name, args, &pol).map(mcp::Answer::envelope)
     };
     match (req.method.as_str(), req.path.as_str()) {
         ("GET", "/health") => respond(&s, "200 OK", Some(&json!({"ok": true, "server": "reman", "version": crate::config::VERSION}))),
@@ -157,7 +157,8 @@ fn handle(d: &Daemon, s: TcpStream) -> anyhow::Result<()> {
         ("POST", p) if p.starts_with("/tools/") => {
             let name = &p["/tools/".len()..];
             let args: Value = if req.body.is_empty() { json!({}) } else { serde_json::from_slice(&req.body).unwrap_or(json!({})) };
-            match call(name, &args) {
+            // plain REST keeps the bare result (function-calling clients parse it as is)
+            match call(name, &args).map(|v| mcp::Answer::from_reply(v).value) {
                 Ok(v) => respond(&s, "200 OK", Some(&v)),
                 Err(e) => respond(&s, "400 Bad Request", Some(&json!({"error": e.to_string()}))),
             }

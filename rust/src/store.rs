@@ -20,6 +20,26 @@ pub struct Row {
     pub last_used: i64,
     pub last_exit: Option<i64>,
     pub last_actor: Option<String>,
+    /// how long its recent successful and failed runs took, newest last (Row::KEEP_MS each)
+    pub ok_ms: Vec<u32>,
+    pub fail_ms: Vec<u32>,
+}
+
+impl Row {
+    const KEEP_MS: usize = 20;
+
+    fn note_ms(&mut self, exit: Option<i64>, ms: Option<i64>) {
+        let (Some(x), Some(ms)) = (exit, ms.filter(|m| *m >= 0)) else { return };
+        let v = match x {
+            0 => &mut self.ok_ms,
+            x if x > 0 => &mut self.fail_ms,
+            _ => return,
+        };
+        v.push(ms.min(u32::MAX as i64) as u32);
+        if v.len() > Self::KEEP_MS {
+            v.remove(0);
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -46,6 +66,8 @@ pub struct Entry {
     /// pasted source code that PSReadLine recorded as if it were a command (no folder, never an
     /// outcome, reads like Python/JS). Kept in the db, never offered back.
     pub noise: bool,
+    /// the programs it runs (describe::programs): `npx astro dev` -> npx, astro
+    pub progs: Vec<String>,
 }
 
 impl Entry {
@@ -63,6 +85,9 @@ pub struct Exec {
     pub cwd: Option<u32>,
     pub session: u32,
     pub exit: Option<i64>,
+    /// the git branch and commit checked out when it ran: Store::git_name; 0 = not known
+    pub branch: u32,
+    pub head: u32,
 }
 
 /// Which rows of an entry count: all of them, one folder, or every folder of one repo.
@@ -150,11 +175,18 @@ pub struct Store {
     cwd_repo: Vec<u32>,
     repos: Interner,
     sessions: Interner,
+    /// branch names and commits (Exec::branch, Exec::head)
+    git: Interner,
     pub execs: Vec<Exec>,
     /// entry -> what it printed the last time it failed (redacted, short; see errors.rs)
     pub last_err: HashMap<u32, String>,
     /// error signature -> the entries that failed that way (errors::signature)
     pub by_sig: HashMap<String, Vec<u32>>,
+    /// every program some command in the history runs: a query naming one names a tool you use
+    pub programs: std::collections::HashSet<String>,
+    /// (entry, folder, command of the line) -> [runs, ok, fail] to add to what the line's exit
+    /// status recorded, from what its output said (verdict.rs)
+    pub seen: HashMap<(u32, Option<u32>, String), [i32; 3]>,
 }
 
 /// One bit per character class: a-z, 0-9, and the other printable ASCII folded into the rest.
@@ -268,6 +300,8 @@ impl Store {
                 last_used: r.get::<_, Option<i64>>(8)?.unwrap_or(0),
                 last_exit: r.get(9)?,
                 last_actor: r.get(10)?,
+                ok_ms: Vec::new(),
+                fail_ms: Vec::new(),
             };
             let desc: Option<String> = r.get::<_, Option<String>>(11)?.filter(|d| !d.is_empty());
             let pinned = r.get::<_, Option<i64>>(12)?.unwrap_or(0) != 0;
@@ -299,7 +333,7 @@ impl Store {
         }
         drop(rows);
         drop(st);
-        let mut st = db.prepare("SELECT command_id, ts, cwd, session, exit, err FROM executions WHERE ts IS NOT NULL ORDER BY ts, id")?;
+        let mut st = db.prepare("SELECT command_id, ts, cwd, session, exit, err, seen, branch, head, duration_ms FROM executions WHERE ts IS NOT NULL ORDER BY ts, id")?;
         let mut rows = st.query([])?;
         while let Some(r) = rows.next()? {
             let cid: i64 = r.get(0)?;
@@ -313,10 +347,18 @@ impl Store {
                 cwd: cwd.as_deref().map(|c| s.intern_cwd(c)),
                 session: s.sessions.intern(sess.as_deref().unwrap_or(""), sess.as_deref().unwrap_or("")),
                 exit: r.get(4)?,
+                branch: s.git_ref(r.get::<_, Option<String>>(7)?.as_deref()),
+                head: s.git_ref(r.get::<_, Option<String>>(8)?.as_deref()),
             };
             let err: Option<String> = r.get(5)?;
             if let Some(e) = err.filter(|_| ex.exit.is_some_and(|x| x != 0)) {
                 s.note_error(ei, e);
+            }
+            if let Some(j) = r.get::<_, Option<String>>(6)? {
+                s.note_seen(ei, ex.cwd, &j);
+            }
+            if let Some(row) = s.entries[ei as usize].rows.iter_mut().find(|w| w.id == cid) {
+                row.note_ms(ex.exit, r.get(9)?);
             }
             s.execs.push(ex);
         }
@@ -328,13 +370,22 @@ impl Store {
         Ok(s)
     }
 
+    fn git_ref(&mut self, v: Option<&str>) -> u32 {
+        v.map_or(0, |x| self.git.intern(x, x) + 1)
+    }
+
+    /// A branch name or commit as Exec::branch / Exec::head hold it.
+    pub fn git_name(&self, i: u32) -> Option<&str> {
+        (i > 0).then(|| self.git.names[i as usize - 1].as_str())
+    }
+
     fn intern_cwd(&mut self, c: &str) -> u32 {
         let n = config::norm_path(c);
         if let Some(i) = self.cwds.get(&n) {
             return i;
         }
         let i = self.cwds.intern(&n, c);
-        let repo = describe::repo_identity(c);
+        let repo = crate::git::repo_identity(c);
         let ri = self.repos.intern(&repo, &repo);
         self.cwd_repo.push(ri);
         debug_assert_eq!(self.cwd_repo.len(), i as usize + 1);
@@ -351,6 +402,11 @@ impl Store {
 
     pub fn cwd_name(&self, i: u32) -> &str {
         &self.cwds.names[i as usize]
+    }
+
+    /// How many folders the history knows (cwd indices are 0..this).
+    pub fn cwd_count(&self) -> u32 {
+        self.cwds.names.len() as u32
     }
 
     pub fn session_name(&self, i: u32) -> &str {
@@ -370,15 +426,19 @@ impl Store {
     }
 
     pub fn scope_repo(&self, path: &str) -> Scope {
-        let ident = describe::repo_identity(path);
+        let ident = crate::git::repo_identity(path);
         self.repos.get(&ident).map(Scope::Repo).unwrap_or(Scope::Nothing)
     }
 
     pub fn row_in_scope(&self, r: &Row, scope: Scope) -> bool {
+        self.cwd_in_scope(r.cwd, scope)
+    }
+
+    pub fn cwd_in_scope(&self, cwd: Option<u32>, scope: Scope) -> bool {
         match scope {
             Scope::All => true,
-            Scope::Folder(f) => r.cwd == Some(f),
-            Scope::Repo(rp) => r.cwd.is_some_and(|c| self.cwd_repo[c as usize] == rp),
+            Scope::Folder(f) => cwd == Some(f),
+            Scope::Repo(rp) => cwd.is_some_and(|c| self.cwd_repo[c as usize] == rp),
             Scope::Nothing => false,
         }
     }
@@ -407,6 +467,17 @@ impl Store {
             }
         }
         a
+    }
+
+    /// How long it usually takes in `scope`: the median of its recent successful (`ok`) or failed
+    /// runs there. None when no run there was timed.
+    pub fn typical(&self, e: &Entry, scope: Scope, ok: bool) -> Option<u32> {
+        let mut v: Vec<u32> = e.rows.iter().filter(|r| self.row_in_scope(r, scope)).flat_map(|r| if ok { &r.ok_ms } else { &r.fail_ms }).copied().collect();
+        if v.is_empty() {
+            return None;
+        }
+        v.sort_unstable();
+        Some(v[v.len() / 2])
     }
 
     /// Filter helper shared by search/browse: actor = human|agent, status = ok|fail.
@@ -453,6 +524,8 @@ impl Store {
             }
             None => self.vecs.extend(std::iter::repeat_n(0.0, DIM)),
         }
+        let progs = describe::programs(text);
+        self.programs.extend(progs.iter().cloned());
         self.entries.push(Entry {
             text: text.to_string(),
             lower: text.to_lowercase(),
@@ -468,6 +541,7 @@ impl Store {
             alive: true,
             has_vec: vec.is_some(),
             noise: false,
+            progs,
         });
         self.by_text.insert(text.to_string(), i);
         i
@@ -516,8 +590,14 @@ impl Store {
                 last_used: run.ts,
                 last_exit: run.exit,
                 last_actor: Some(run.actor.clone()),
+                ok_ms: Vec::new(),
+                fail_ms: Vec::new(),
             });
+            if let Some(r) = e.rows.last_mut() {
+                r.note_ms(run.exit, run.duration_ms);
+            }
         } else if let Some(r) = e.rows.iter_mut().find(|r| r.id == command_id) {
+            r.note_ms(run.exit, run.duration_ms);
             r.runs += 1;
             r.ok += ok;
             r.fail += bad;
@@ -531,7 +611,11 @@ impl Store {
         if let Some(e) = run.err.clone().filter(|_| run.failed()) {
             self.note_error(ei, e);
         }
-        let ex = Exec { ts: run.ts, entry: ei, row_id: command_id, cwd, session, exit: run.exit };
+        if let Some(j) = &run.seen {
+            self.note_seen(ei, cwd, j);
+        }
+        let (branch, head) = (self.git_ref(run.branch.as_deref()), self.git_ref(run.head.as_deref()));
+        let ex = Exec { ts: run.ts, entry: ei, row_id: command_id, cwd, session, exit: run.exit, branch, head };
         // imports can arrive out of order; keep the log sorted by ts
         if self.execs.last().is_none_or(|l| l.ts <= ex.ts) {
             self.execs.push(ex);
@@ -540,6 +624,58 @@ impl Store {
             self.execs.insert(pos, ex);
         }
         ei
+    }
+
+    /// A run's corrections from what its output said (`[[command, runs, ok, fail], ...]`).
+    fn note_seen(&mut self, ei: u32, cwd: Option<u32>, json: &str) {
+        self.tally_seen(ei, cwd, json, 1);
+    }
+
+    fn tally_seen(&mut self, ei: u32, cwd: Option<u32>, json: &str, sign: i32) {
+        let Ok(serde_json::Value::Array(adj)) = serde_json::from_str(json) else { return };
+        for a in adj {
+            let n = |i: usize| sign * a.get(i).and_then(serde_json::Value::as_i64).unwrap_or(0) as i32;
+            if let Some(cmd) = a.get(0).and_then(serde_json::Value::as_str) {
+                let t = self.seen.entry((ei, cwd, cmd.to_string())).or_default();
+                (t[0], t[1], t[2]) = (t[0] + n(1), t[1] + n(2), t[2] + n(3));
+            }
+        }
+    }
+
+    /// The row (and entry) a command id is, with the row's folder.
+    fn row_of(&mut self, command_id: i64) -> Option<(u32, &mut Row)> {
+        let ei = *self.by_id.get(&command_id)?;
+        let r = self.entries[ei as usize].rows.iter_mut().find(|r| r.id == command_id)?;
+        Some((ei, r))
+    }
+
+    /// A shell's record of a run became an agent's (db::claim_for_agent), with what its output said.
+    pub fn claim_for_agent(&mut self, command_id: i64, actor: &str, seen: Option<&str>) {
+        let Some((ei, r)) = self.row_of(command_id) else { return };
+        r.human = r.human.saturating_sub(1);
+        r.agent += 1;
+        r.last_actor = Some(actor.to_string());
+        let cwd = r.cwd;
+        if let Some(j) = seen {
+            self.note_seen(ei, cwd, j);
+        }
+    }
+
+    /// An agent's record of a run learned the shell's exit code (db::settle_twin): it counts, and
+    /// what the output said is superseded.
+    pub fn settle_twin(&mut self, command_id: i64, ts: i64, had: Option<i64>, exit: Option<i64>, seen: Option<&str>) {
+        let (Some(x), None) = (exit.filter(|x| *x >= 0), had) else { return };
+        let Some((ei, r)) = self.row_of(command_id) else { return };
+        r.ok += (x == 0) as u32;
+        r.fail += (x > 0) as u32;
+        r.last_exit = Some(x);
+        let cwd = r.cwd;
+        if let Some(j) = seen {
+            self.tally_seen(ei, cwd, j, -1);
+        }
+        if let Some(e) = self.execs.iter_mut().rev().find(|e| e.row_id == command_id && e.ts == ts) {
+            e.exit = Some(x);
+        }
     }
 
     /// A failure's output: the entry's last error, and its signature in the index.
@@ -595,7 +731,7 @@ mod tests {
     use super::*;
 
     fn run(cmd: &str, exit: i64, cwd: &str, actor: &str, ts: i64) -> Run {
-        Run { cmd: cmd.into(), exit: Some(exit), cwd: Some(cwd.into()), session: "s".into(), actor: actor.into(), ts, duration_ms: None, err: None }
+        Run { cmd: cmd.into(), exit: Some(exit), cwd: Some(cwd.into()), session: "s".into(), actor: actor.into(), ts, duration_ms: None, ..Default::default() }
     }
 
     #[test]

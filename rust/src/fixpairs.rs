@@ -173,9 +173,60 @@ pub fn rebuild(store: &Store) -> Vec<(Pair, Option<String>, i64)> {
     out
 }
 
+/// What a fix changed, word by word, when it is a variant of the command that failed:
+/// `adds --build`, `drops -v`, `ci → install --legacy-peer-deps`, `gti → git`. None when the two
+/// share too little to be variants (a different command altogether) or are the same.
+pub fn diff(failed: &str, fixed: &str) -> Option<String> {
+    let (a, b): (Vec<&str>, Vec<&str>) = (failed.split_whitespace().collect(), fixed.split_whitespace().collect());
+    // longest common subsequence of words
+    let (n, m) = (a.len(), b.len());
+    let mut l = vec![vec![0u16; m + 1]; n + 1];
+    for i in (0..n).rev() {
+        for j in (0..m).rev() {
+            l[i][j] = if a[i] == b[j] { l[i + 1][j + 1] + 1 } else { l[i + 1][j].max(l[i][j + 1]) };
+        }
+    }
+    let common = l[0][0] as usize;
+    // the same program, or at least half the words shared; else it's another command
+    if common == 0 || common == n.max(m) || (a[0] != b[0] && common * 2 < n.max(m)) {
+        return None;
+    }
+    let (mut i, mut j, mut gone, mut added) = (0, 0, Vec::new(), Vec::new());
+    while i < n || j < m {
+        if i < n && j < m && a[i] == b[j] {
+            i += 1;
+            j += 1;
+        } else if j < m && (i == n || l[i][j + 1] >= l[i + 1][j]) {
+            added.push(b[j]);
+            j += 1;
+        } else {
+            gone.push(a[i]);
+            i += 1;
+        }
+    }
+    let s = match (gone.is_empty(), added.is_empty()) {
+        (true, false) => format!("adds {}", added.join(" ")),
+        (false, true) => format!("drops {}", gone.join(" ")),
+        _ => format!("{} → {}", gone.join(" "), added.join(" ")),
+    };
+    (s.chars().count() <= 60).then_some(s)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn what_a_fix_changed() {
+        assert_eq!(diff("docker compose up", "docker compose up --build").as_deref(), Some("adds --build"));
+        assert_eq!(diff("npm ci --verbose", "npm ci").as_deref(), Some("drops --verbose"));
+        assert_eq!(diff("npm ci", "npm install --legacy-peer-deps").as_deref(), Some("ci → install --legacy-peer-deps"));
+        assert_eq!(diff("gti status", "git status").as_deref(), Some("gti → git"));
+        assert_eq!(diff("pip install nummpy", "pip install numpy").as_deref(), Some("nummpy → numpy"));
+        assert_eq!(diff("python app.py", "python app.py"), None, "the same command, retried");
+        assert_eq!(diff("docker compose pull", "make up"), None, "another command altogether");
+        assert_eq!(diff("cargo build", "npm run build"), None, "only one word in common, and not the program");
+    }
 
     /// Port of reman_fixpairs.simulate(): each tier detected, unpaired failure evaporates.
     #[test]

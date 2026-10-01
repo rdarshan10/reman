@@ -66,6 +66,23 @@ pub fn age(ts: i64) -> String {
 
 /// Folder equality the way Python's os.path.normcase(normpath()) did it: case-insensitive and
 /// separator-agnostic on Windows, trailing separators ignored.
+/// A folder as this OS writes it, for opening or showing: Git Bash / MSYS2's `/c/Users/x` is
+/// `C:\Users\x` on Windows. Unlike norm_path, the case is kept.
+pub fn native_path(p: &str) -> String {
+    let p = p.trim();
+    if !cfg!(windows) {
+        return p.to_string();
+    }
+    let rest = p.strip_prefix("/cygdrive").unwrap_or(p);
+    let b = rest.as_bytes();
+    let p = if b.len() >= 2 && b[0] == b'/' && b[1].is_ascii_alphabetic() && (b.len() == 2 || b[2] == b'/') {
+        format!("{}:{}", (b[1] as char).to_ascii_uppercase(), if b.len() == 2 { "/" } else { &rest[2..] })
+    } else {
+        p.to_string()
+    };
+    p.replace('/', "\\")
+}
+
 pub fn norm_path(p: &str) -> String {
     let p = p.trim();
     // Git Bash / MSYS2 / Cygwin report `/c/Users/x` (or `/cygdrive/c/...`) for `C:\Users\x`

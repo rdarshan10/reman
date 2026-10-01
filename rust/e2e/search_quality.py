@@ -21,7 +21,7 @@ EXE = os.environ.get("REMAN_EXE_UNDER_TEST") or os.path.join(HERE, "..", "target
 PORT = 8797
 DIAG = "--diag" in sys.argv
 REAL = "--real-db" in sys.argv
-API, WEB, HOME = "C:\\work\\api", "C:\\work\\web", "C:\\Users\\dev"
+API, WEB, HOME, SITE, APP = "C:\\work\\api", "C:\\work\\web", "C:\\Users\\dev", "C:\\work\\site", "C:\\work\\app"
 
 # (command, folder, runs)
 EVERYDAY = [
@@ -45,6 +45,8 @@ EVERYDAY = [
     ("openssl x509 -in cert.pem -noout -dates", HOME, 2), ("tar -czf backup.tgz data/", HOME, 2), ('find . -name "*.log" -mtime +7 -delete', HOME, 2),
     ("ipconfig /flushdns", HOME, 2), ("Get-ChildItem -Recurse -Filter *.env", HOME, 1), ("python scripts/seed_db.py --users 50", API, 3),
     ("make lint", API, 4), ("go test ./...", HOME, 3), ("cargo build --release", HOME, 5), ("terraform plan -out plan.tfplan", HOME, 2),
+    ("npx expo start --dev-client", APP, 6), ("npm start", APP, 8), ("ollama serve", HOME, 3), ("npx astro check", SITE, 3),
+    ("npx vercel --prod", SITE, 3),
 ]
 
 # description -> the command(s) that count as right
@@ -58,6 +60,7 @@ FOUND = [
     ("restart the api in kubernetes", ["kubectl rollout restart deploy/api -n api"]),
     ("dcoker ps", ["docker ps"]),
     ("tear down containers", ["docker compose down -v"]),
+    ("deploy to vercel", ["npx vercel --prod"]),
     ("undo my last commit", ["git reset --soft HEAD~1"]),
     ("rebuild images without cache", ["docker compose build --no-cache"]),
     ("run database migrations", ["alembic upgrade head"]),
@@ -71,7 +74,8 @@ FOUND = [
     ("lint and fix the python code", ["ruff check --fix .", "make lint"]),
     ("switch back to main", ["git checkout main"]),
     ("check for outdated packages", ["npm outdated"]),
-    ("start the frontend dev server", ["npm run dev"]),
+    # the sample has two frontends (web and an Expo app): each one's dev server is right
+    ("start the frontend dev server", ["npm run dev", "npx expo start --dev-client", "npm start"]),
     ("clear the dns cache", ["ipconfig /flushdns"]),
     ("back up the data folder", ["tar -czf backup.tgz data/"]),
     ("copy the dump to staging", ["scp dump.sql deploy@staging.internal:/tmp"]),
@@ -95,6 +99,9 @@ ABSENT = [
     "send an email from the terminal", "encrypt a folder with a password", "update homebrew packages", "clean the conda cache",
     "train the model on the gpu", "record the screen", "translate this file to french", "generate a qr code",
 ]
+# the query names a tool you have used: whatever is close runs it (never `npx expo start` or
+# `npm start` for astro, however alike the sentence)
+NAMED = [("start the astro dev server", "astro"), ("deploy the site with vercel", "vercel"), ("show the expo logs", "expo")]
 # absent from a real history too, as far as a stranger can tell; checked only with --real-db
 ABSENT_REAL = ["who changed these lines"]
 
@@ -245,6 +252,14 @@ def run_checks():
             hit = top.get("command") in expect
             verdict = ("found, close" if top.get("close") else "found, not close") if hit else "missed"
             print(f"  --   {q}  ({verdict}: {top.get('command', '-')!r})")
+    if not REAL:
+        print("\nNAMED: a query naming a tool you use is only answered by that tool")
+        for q, tool in NAMED:
+            r = search(q)
+            if DIAG:
+                show(q, r)
+            other = [x["command"] for x in r["results"] if x.get("close") and tool not in x["command"]]
+            check(q, not other, f"close: {other[0][:70]!r}" if other else "")
     print("\nABSENT: nothing marked close" + (" (a real history may hold something related: reported, not asserted)" if REAL else ""))
     for q in ABSENT + (ABSENT_REAL if REAL else []):
         r = search(q)

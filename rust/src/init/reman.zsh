@@ -3,11 +3,21 @@
 # run goes straight to the daemon over zsh/net/tcp. Only when the daemon is down is the slim
 # reman-hook spawned (it spools the run and starts the daemon).
 #   Up = finder (this folder)   Ctrl-R = finder (all folders)   Alt-F = insert suggested fix
+#   Enter on a command that keeps failing here = held once, with why (Enter again runs it)
+#   Alt-N on an empty line = what you usually run next here (again: the next idea)
 #   Tab on an empty line = finder (Tab after text is normal completion)
 __reman_exe="__REMAN__"
 __reman_hook="__HOOK__"
 __reman_port=__PORT__
 reman() { "$__reman_exe" "$@" }
+# rcd <words>: go to the folder where you ran what the words describe (or whose path has them).
+# `rcd alembic 2` takes the second match; `rcd` lists where you were lately, `rcd 3` goes there.
+rcd() {
+  local p
+  p=$("$__reman_exe" goto "$@") && [[ -n $p ]] || return
+  (( $+commands[cygpath] )) && p=$(cygpath -u "$p")
+  cd -- "$p"
+}
 # one session per shell: the id lives in an unexported variable, so a child shell makes its own
 [[ -z "$__reman_sid" ]] && __reman_sid="zsh-$$-$RANDOM$RANDOM"
 export REMAN_SESSION=$__reman_sid
@@ -34,6 +44,77 @@ __reman_note() { # print JSON string field $2 of reply $1 as a dim reman line
   print -P -- "%F{8}  reman: ${s//\%/%%}%f" >&2
 }
 
+__reman_field() { # JSON string field $2 of reply $1 into REPLY; false when it isn't there
+  REPLY=
+  [[ $1 =~ "\"$2\":\"(([^\"\\\\]|\\\\.)*)\"" ]] || return 1
+  REPLY=${match[1]//\\\"/\"}; REPLY=${REPLY//\\\\/\\}
+}
+
+# Enter: a command that keeps failing here is held once, with why (and the fix, on Alt-F); Enter
+# again runs it. An exact lookup with a tight timeout: no daemon, no delay.
+__reman_accept() {
+  local t="${BUFFER#"${BUFFER%%[![:space:]]*}"}"
+  t="${t%"${t##*[![:space:]]}"}"
+  if (( ${#t} > 1 )) && [[ $BUFFER != ' '* && $BUFFER != *$'\n'* && $t != $__reman_held ]] && (( $+builtins[ztcp] )) \
+      && ztcp 127.0.0.1 $__reman_port 2>/dev/null; then
+    local fd=$REPLY reply=
+    __reman_q "$t"; local qc=$REPLY
+    __reman_q "$PWD"; local qd=$REPLY
+    print -r -- "{\"op\":\"precheck\",\"command\":$qc,\"cwd\":$qd}" >&$fd
+    read -t 0.15 -r -u $fd reply
+    ztcp -c $fd
+    if __reman_field "$reply" warn; then
+      __reman_held=$t
+      zle -I
+      print -P -- "%F{3}  reman: ${REPLY//\%/%%}%f"
+      __reman_field "$reply" error && print -P -- "%F{8}         last error: ${REPLY//\%/%%}%f"
+      if __reman_field "$reply" fix; then
+        __reman_fix=$REPLY
+        local how="Alt-F inserts"
+        __reman_field "$reply" diff && how="$REPLY; $how"
+        print -P -- "%F{8}  reman: worked instead -> %F{6}${__reman_fix//\%/%%}%F{8}   (${how//\%/%%})%f"
+      fi
+      print -P -- "%F{8}  Enter again runs it anyway%f"
+      return
+    fi
+  fi
+  __reman_held=
+  zle accept-line
+}
+zle -N __reman_accept
+bindkey '^M' __reman_accept
+
+# Alt-N on an empty line: what you'd run next here, ready to edit (Alt-N again: the next idea, up
+# to 3). With other text typed, what Alt-N did before reman.
+__reman_nextup() {
+  local empty=0 i=0
+  [[ -z ${BUFFER//[[:space:]]/} ]] && empty=1
+  if (( empty )) || [[ -n $__reman_next && $BUFFER == $__reman_next ]]; then
+    (( empty )) || i=$(( __reman_next_i + 1 ))
+    if (( $+builtins[ztcp] )) && ztcp 127.0.0.1 $__reman_port 2>/dev/null; then
+      local fd=$REPLY reply=
+      __reman_q "$PWD"; local qd=$REPLY
+      __reman_q "$REMAN_SESSION"; local qs=$REPLY
+      print -r -- "{\"op\":\"nextup\",\"cwd\":$qd,\"session\":$qs,\"index\":$i}" >&$fd
+      read -t 0.4 -r -u $fd reply
+      ztcp -c $fd
+      if __reman_field "$reply" command; then
+        __reman_next=$REPLY
+        [[ $reply =~ '"index":([0-9]+)' ]] && __reman_next_i=$match[1]
+        BUFFER=$__reman_next; CURSOR=${#BUFFER}
+        __reman_field "$reply" reason && zle -M "reman: $REPLY"
+        return
+      fi
+    fi
+    (( empty )) && return
+  fi
+  [[ -n $__reman_altn_prev ]] && zle $__reman_altn_prev
+}
+zle -N __reman_nextup
+__reman_altn_prev=${${(z)"$(bindkey '^[n')"}[2]}
+[[ $__reman_altn_prev == (__reman_nextup|undefined-key) ]] && __reman_altn_prev=
+bindkey '^[n' __reman_nextup
+
 __reman_welcome() { # "last time here": asked when the folder changes (the daemon answers once)
   [[ $PWD == $__reman_pwd ]] && return
   __reman_pwd=$PWD
@@ -51,10 +132,12 @@ __reman_welcome() { # "last time here": asked when the folder changes (the daemo
 
 __reman_precmd() {
   local ec=$?
+  __reman_held=   # a held command is held once per prompt
   __reman_welcome
   [[ -z $__reman_cmd ]] && return
   local cmd=$__reman_cmd
   __reman_cmd=
+  __reman_fix=   # a fix is offered for the command just run, until the next one
   [[ $cmd == ' '* ]] && return   # leading space: never recorded
   local -i dur   # integer var truncates; int() would need zsh/mathfunc
   (( dur = (EPOCHREALTIME - __reman_start) * 1000 ))
@@ -77,7 +160,10 @@ __reman_precmd() {
     [[ $reply == *'"kind":"proven"'* ]] && lead="last time this failed you ran"
     [[ $reply == *'"kind":"same_error"'* ]] && lead="the same error was fixed by"
     __reman_fix=$fix
-    print -P -- "%F{8}  reman: $lead -> %F{6}${fix//\%/%%}%F{8}   (Alt-F inserts)%f" >&2
+    # what it changes, when it's a variant of what failed (adds --build, gti -> git)
+    local how="Alt-F inserts"
+    __reman_field "$reply" diff && how="$REPLY; $how"
+    print -P -- "%F{8}  reman: $lead -> %F{6}${fix//\%/%%}%F{8}   (${how//\%/%%})%f" >&2
   fi
   __reman_note "$reply" note   # it used to work here: what ran here since
 }
@@ -88,15 +174,19 @@ __reman_find_widget() {
   local scope=$1 picked
   picked=$(REMAN_FIND_QUERY="$BUFFER" "$__reman_exe" find --scope "$scope" --cwd "$PWD" </dev/tty)
   if [[ -n "$picked" ]]; then
-    BUFFER="$picked"
+    BUFFER="${picked//$'\x01'/}"
     CURSOR=${#BUFFER}
+    # a command with a blank: \x01 marks where the cursor goes
+    [[ $picked == *$'\x01'* ]] && { local pre=${picked%%$'\x01'*}; CURSOR=${#pre} }
   fi
   zle reset-prompt
 }
 __reman_find_all() { __reman_find_widget all }
 __reman_find_here() { __reman_find_widget folder }
 __reman_insert_fix() {
-  [[ -n $__reman_fix ]] || return
+  # no fix waiting: what Alt-F did before reman (forward-word, which zsh-autosuggestions also uses
+  # to accept one word of a suggestion)
+  [[ -n $__reman_fix ]] || { [[ -n $__reman_altf_prev ]] && zle $__reman_altf_prev; return }
   BUFFER=$__reman_fix
   CURSOR=${#BUFFER}
 }
@@ -126,4 +216,6 @@ zle -N __reman_insert_fix
 bindkey '^R' __reman_find_all
 bindkey '^[[A' __reman_find_here
 bindkey '^[OA' __reman_find_here
+__reman_altf_prev=${${(z)"$(bindkey '^[f')"}[2]}
+[[ $__reman_altf_prev == (__reman_insert_fix|undefined-key) ]] && __reman_altf_prev=
 bindkey '^[f' __reman_insert_fix

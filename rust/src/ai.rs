@@ -65,6 +65,11 @@ fn pick(models: &[String]) -> Option<String> {
     models.iter().find(|m| !m.to_lowercase().contains("embed")).cloned()
 }
 
+/// The user turned models off (`reman settings`).
+pub fn turned_off() -> bool {
+    settings::load().ai.is_some_and(|a| !a.enabled)
+}
+
 /// The model to use, if any: the configured one, else one running on this machine.
 pub fn find() -> Option<Model> {
     let cfg = settings::load().ai;
@@ -154,7 +159,11 @@ pub fn runbook(m: &Model, rb: &Value) -> Result<Extra> {
             .flatten()
             .filter_map(|c| {
                 let t = redact::safe_command(c["command"].as_str()?, true)?;
-                Some(json!({"command": t, "runs": c["runs"], "worked": c["worked"]}))
+                let mut v = json!({"command": t, "folder": c["dir"], "runs": c["runs"], "worked": c["worked"], "failed": c["failed"]});
+                if let Some(f) = c["declared"].as_str() {
+                    v["declared_in"] = json!(f); // the project's own file; nobody ran it yet
+                }
+                Some(v)
             })
             .collect()
     };
@@ -171,6 +180,7 @@ pub fn runbook(m: &Model, rb: &Value) -> Result<Extra> {
     let project = rb["folder"].as_str().map(|f| f.replace('\\', "/")).and_then(|f| f.rsplit('/').find(|p| !p.is_empty()).map(String::from)).unwrap_or_default();
     let user = json!({
         "project": project,
+        "folders": "each command's folder is where it runs, from the project root ('.' is the root)",
         "sections": sections,
         "other_frequent_commands": list(&rb["unplaced"]),
         "usual_sequences": flows,

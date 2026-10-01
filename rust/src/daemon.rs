@@ -47,8 +47,11 @@ pub struct Daemon {
 struct Privacy {
     stamp: Option<std::time::SystemTime>,
     drop_secrets: bool,
+    keep_secrets: bool,
     commands: Vec<regex::Regex>,
     folders: Vec<regex::Regex>,
+    /// a desktop notification for a command of yours that ran this many seconds (None = never)
+    done_after: Option<u64>,
 }
 
 impl Privacy {
@@ -69,13 +72,24 @@ impl Privacy {
                 })
                 .collect()
         };
-        *self = Privacy { stamp, drop_secrets: s.drop_secrets(), commands: compile(&s.ignore_commands), folders: compile(&s.ignore_folders) };
+        *self = Privacy {
+            stamp,
+            drop_secrets: s.drop_secrets(),
+            keep_secrets: s.keep_secrets(),
+            commands: compile(&s.ignore_commands),
+            folders: compile(&s.ignore_folders),
+            done_after: s.done_alert_after(),
+        };
     }
 
     /// The run as it may be stored: None when it must not be recorded at all.
     fn admit(&self, mut r: Run) -> Option<Run> {
         if self.commands.iter().any(|x| x.is_match(&r.cmd)) || r.cwd.as_deref().is_some_and(|c| self.folders.iter().any(|x| x.is_match(c))) {
             return None;
+        }
+        r.err = r.err.and_then(|e| crate::errors::clean_as(&e, !self.keep_secrets));
+        if self.keep_secrets {
+            return Some(r);
         }
         let masked = crate::redact::redact(&r.cmd);
         let secret = masked != r.cmd;
@@ -146,19 +160,75 @@ pub fn run_from(v: &Value, default_actor: &str) -> Option<Run> {
     }
     Some(Run {
         cmd,
-        exit: v.get("exit").and_then(Value::as_i64).filter(|e| *e >= 0),
+        exit: v.get("exit").and_then(Value::as_i64).map(exit_code),
         cwd: s(v, "cwd").map(str::to_string),
         session: s(v, "session").unwrap_or("").to_string(),
         actor: s(v, "actor").unwrap_or(default_actor).to_string(),
         ts: v.get("ts").and_then(Value::as_i64).filter(|t| *t > 0).unwrap_or_else(config::now),
-        duration_ms: v.get("duration_ms").and_then(Value::as_i64).filter(|d| *d >= 0),
-        err: s(v, "error").and_then(crate::errors::clean),
+        // a duration past 30 days is a broken clock reading (a start time never set), not a run
+        duration_ms: v.get("duration_ms").and_then(Value::as_i64).filter(|d| (0..=30 * 86_400_000).contains(d)),
+        // cleaned (and redacted, unless the user keeps secrets) by Privacy::admit
+        err: s(v, "error").map(str::to_string),
+        // what an agent's hook read from the output; or the output, to read here (never stored)
+        reads: v.get("reads").and_then(Value::as_array).map(|a| a.iter().map(Value::as_bool).collect()),
+        // (empty is an answer too: a silent tool printing nothing passed)
+        output: v.get("output").and_then(Value::as_str).map(str::to_string),
+        seen: None,
+        branch: None,
+        head: None,
     })
+}
+
+/// The branch and commit each run's folder has checked out, read now: a run that only just
+/// finished (an imported or long-spooled one may have run on another).
+fn with_git(mut runs: Vec<Run>) -> Vec<Run> {
+    const FRESH_S: i64 = 300;
+    let now = config::now();
+    let mut seen: std::collections::HashMap<String, crate::git::State> = std::collections::HashMap::new();
+    for r in &mut runs {
+        let Some(cwd) = r.cwd.as_deref().filter(|_| r.session != "import" && (now - r.ts).abs() <= FRESH_S) else { continue };
+        let g = seen.entry(cwd.to_string()).or_insert_with(|| crate::git::state(cwd));
+        r.branch = g.branch.clone();
+        r.head = g.head.clone();
+    }
+    runs
+}
+
+/// What a run's output said, as corrections to its record (see verdict.rs); the output is
+/// dropped here, never stored. (The reads stay on the run: a twin may judge them again.)
+fn with_verdicts(mut r: Run) -> Run {
+    if r.reads.is_none() {
+        r.reads = r.output.as_deref().map(|o| crate::verdict::read(&r.cmd, o));
+    }
+    r.output = None;
+    r.seen = r.reads.as_ref().and_then(|x| seen_json(&r.cmd, r.exit, x));
+    r
+}
+
+/// Corrections as stored: `[[command, runs, ok, fail], ...]`, or None when there are none.
+fn seen_json(cmd: &str, exit: Option<i64>, reads: &[Option<bool>]) -> Option<String> {
+    let adj = crate::verdict::adjust(cmd, exit, reads);
+    (!adj.is_empty()).then(|| json!(adj.iter().map(|a| json!([a.cmd, a.runs, a.ok, a.fail])).collect::<Vec<_>>()).to_string())
+}
+
+/// An exit code as reported. A live report never uses a negative one for "unknown" (that's no
+/// code at all): on Windows it is a real failure, its 32-bit code read as signed, like Node's
+/// -4058 (ENOENT, 0xFFFFF026) or a crash's -1073741819 (0xC0000005). Kept as Windows has it, unsigned, so it
+/// counts as the failure it is. (Old Atuin imports' -1 = unknown never come through here.)
+fn exit_code(e: i64) -> i64 {
+    if e < 0 && e >= i64::from(i32::MIN) { i64::from(e as i32 as u32) } else { e }
 }
 
 /// blank, control-char-only (the \x07 beep) or 1-char noise
 pub fn is_junk(cmd: &str) -> bool {
-    cmd.chars().filter(|c| !c.is_control()).collect::<String>().trim().chars().count() < 2
+    cmd.chars().filter(|c| !c.is_control()).collect::<String>().trim().chars().count() < 2 || terminal_bootstrap(cmd)
+}
+
+/// The line an editor's terminal runs when it opens (VS Code's, Cursor's, Windsurf's shell
+/// integration): its own, never the user's or an agent's.
+fn terminal_bootstrap(cmd: &str) -> bool {
+    let l = cmd.to_lowercase();
+    ["shellintegration.ps1", "shellintegration-bash.sh", "shellintegration-rc.zsh", "shellintegration.fish", "shellintegration-env.zsh"].iter().any(|s| l.contains(s))
 }
 
 impl Daemon {
@@ -186,6 +256,41 @@ impl Daemon {
         })
     }
 
+    /// An agent that types its commands into a real terminal (Copilot in VS Code, Cursor,
+    /// Windsurf) gets each one reported twice: by that shell's prompt hook, as a person's run with
+    /// the exact exit code, and by the agent's hook. The second report merges into the first: the
+    /// run is the agent's, with the shell's exit code and what the output said. Some(run) when
+    /// the run is its own.
+    fn unpaired(&self, r: Run) -> Option<Run> {
+        const WINDOW: i64 = 30;
+        let agent_second = db::TERMINAL_AGENTS.contains(&r.actor.as_str());
+        if !(agent_second || r.actor == "human") || r.session == "import" {
+            return Some(r);
+        }
+        let others: &[&str] = if agent_second { &["human"] } else { &db::TERMINAL_AGENTS };
+        let conn = self.db.lock();
+        let Ok(Some(t)) = db::find_twin(&conn, &r.cmd, r.cwd.as_deref(), r.ts, WINDOW, others) else { return Some(r) };
+        if agent_second {
+            // the shell's exit code; else the agent's, when the shell couldn't tell
+            let learned = r.exit.filter(|_| t.exit.is_none());
+            let seen = r.reads.as_ref().and_then(|x| seen_json(&r.cmd, t.exit.or(learned), x));
+            if db::claim_for_agent(&conn, &t, &r.actor, seen.as_deref()).and_then(|_| db::learn_exit(&conn, &t, learned)).is_err() {
+                return Some(r);
+            }
+            drop(conn);
+            let mut st = self.store.write();
+            st.claim_for_agent(t.command_id, &r.actor, seen.as_deref());
+            st.settle_twin(t.command_id, t.ts, t.exit, learned, None);
+        } else {
+            if db::settle_twin(&conn, &t, r.exit).is_err() {
+                return Some(r);
+            }
+            drop(conn);
+            self.store.write().settle_twin(t.command_id, t.ts, t.exit, r.exit, t.seen.as_deref());
+        }
+        None
+    }
+
     /// Write path for everything (hooks, spool, imports). Embeds new texts outside any lock,
     /// then one db transaction, then mirrors into memory. Returns (#new texts, per-run suggestion).
     pub fn ingest_runs(&self, runs: &[Run]) -> Result<(usize, Vec<Option<Value>>)> {
@@ -193,8 +298,10 @@ impl Daemon {
         let admitted: Vec<Run> = {
             let mut p = self.privacy.lock();
             p.refresh();
-            runs.iter().cloned().filter_map(|r| p.admit(r)).collect()
+            runs.iter().cloned().filter_map(|r| p.admit(r)).map(with_verdicts).collect()
         };
+        // one run reported twice (a shell, and the agent typing into it) is recorded once
+        let admitted: Vec<Run> = with_git(admitted.into_iter().filter_map(|r| self.unpaired(r)).collect());
         let runs = &admitted[..];
         if runs.is_empty() {
             return Ok((0, vec![]));
@@ -259,6 +366,13 @@ impl Daemon {
                 st.apply_run(rec.command_id, rec.new_row, r, v.as_ref().map(|(a, d, p)| (a.as_slice(), d.clone(), p.as_slice())));
             }
         }
+        // a command of yours that ran a while has just finished: a desktop notification
+        if let Some(after) = self.privacy.lock().done_after {
+            let now = config::now();
+            for r in runs.iter().filter(|r| r.actor == "human" && r.duration_ms.is_some_and(|d| d >= after as i64 * 1000) && (now - r.ts).abs() <= 120) {
+                self.done_alert(r);
+            }
+        }
         // live fix-pairs
         let mut proven = Vec::new();
         {
@@ -291,6 +405,42 @@ impl Daemon {
         Ok((new_texts.len(), suggestions))
     }
 
+    /// The notification for a long command that finished: how it went, how long it took, and
+    /// whether that's faster or slower than usual (by a quarter or more).
+    fn done_alert(&self, r: &Run) {
+        let ms = r.duration_ms.unwrap_or(0).clamp(0, u32::MAX as i64) as u32;
+        let took = insight::took(ms, false);
+        let usual = {
+            let st = self.store.read();
+            st.entry(&r.cmd).and_then(|(_, e)| {
+                let here = r.cwd.as_deref().map(|c| st.scope_folder(c)).filter(|sc| *sc != Scope::Nothing).unwrap_or(Scope::All);
+                st.typical(e, here, true)
+            })
+        };
+        let pace = match usual.filter(|_| r.ok()) {
+            Some(u) if (ms as f64) < u as f64 * 0.75 => format!(", faster than usual ({})", insight::took(u, false)),
+            Some(u) if (ms as f64) > u as f64 * 1.25 => format!(", slower than usual ({})", insight::took(u, false)),
+            _ => String::new(),
+        };
+        let place = r
+            .cwd
+            .as_deref()
+            .map(config::native_path)
+            .map(|c| c.trim_end_matches(['\\', '/']).rsplit(['\\', '/']).next().unwrap_or("").to_string())
+            .filter(|p| !p.is_empty())
+            .map(|p| format!(" · in {p}"))
+            .unwrap_or_default();
+        let cmd = insight::short(&r.cmd, 60);
+        let (title, body) = if r.ok() {
+            (format!("✓ {cmd}"), format!("{took}{pace}{place}"))
+        } else if r.failed() {
+            (format!("✗ {cmd}"), format!("failed after {took}{place}"))
+        } else {
+            (cmd, format!("finished after {took}{place}"))
+        };
+        crate::notify::send(&title, &body);
+    }
+
     /// "Last time here": the first prompt of a session in a folder you last worked in a while
     /// ago gets one line of what you did there. Once per session and folder.
     pub fn welcome(&self, cwd: &str, session: &str) -> Option<String> {
@@ -309,6 +459,31 @@ impl Daemon {
         Some(format!("last time here ({}): {}", insight::ago(v.last, now), steps.join(" → ")))
     }
 
+    /// An agent running a command that keeps failing the same way: what to tell it, from the third
+    /// identical failure in a row on (and what fixed that error before, when something did).
+    pub fn retry_loop_note(&self, cmd: &str, of: db::StreakOf) -> Option<String> {
+        const LOOP: u32 = 3;
+        let (n, err) = db::same_failures(&self.db.lock(), cmd, of).ok()?;
+        if n < LOOP {
+            return None;
+        }
+        let how = err.as_deref().map(|e| format!(" ({})", insight::short(&crate::redact::redact(e), 100))).unwrap_or_default();
+        let mut s = format!("`{}` has now failed {n} times in a row, the same way each time{how}. Running it again unchanged will fail again: change something first, or ask the user.", insight::short(cmd, 60));
+        let fix = self.suggest_for(cmd, None, err.as_deref()).filter(|v| matches!(v["kind"].as_str(), Some("proven" | "same_error")));
+        if let Some(f) = fix.as_ref().and_then(|v| v["command"].as_str()).filter(|f| *f != cmd) {
+            s.push_str(&format!(" What fixed this before on this machine: `{}`.", crate::redact::redact(f)));
+        }
+        Some(s)
+    }
+
+    /// A failed command that is flaky here: say so, so nobody changes code over it.
+    pub fn flaky_note(&self, cmd: &str, cwd: &str) -> Option<String> {
+        let st = self.store.read();
+        let (c, (i, _)) = (st.cwd_index(cwd)?, st.entry(cmd)?);
+        let f = insight::flaky(&st, i, c)?;
+        Some(format!("`{}` is flaky here: {}. Try it again before changing anything.", insight::short(cmd, 40), f.summary()))
+    }
+
     /// "What broke it?": a command that kept working in this folder has just failed. One line:
     /// how often it worked, when last, and what ran here since.
     pub fn broke_note(&self, cmd: &str, cwd: &str) -> Option<String> {
@@ -322,7 +497,8 @@ impl Daemon {
         } else {
             format!("since then here: {}{}", since.join(" → "), if more > 0 { format!(" (+{more} more)") } else { String::new() })
         };
-        Some(format!("`{}` worked here {} times, last {}; {}   (reman why)", insight::short(cmd, 40), b.worked, insight::ago(b.last_ok, config::now()), tail))
+        let git = insight::GitChange::of(&st, &b).map(|g| format!("; {}", g.clause())).unwrap_or_default();
+        Some(format!("`{}` worked here {} times, last {}{git}; {}   (reman why)", insight::short(cmd, 40), b.worked, insight::ago(b.last_ok, config::now()), tail))
     }
 
     /// A command other than `failed` that failed with this error signature and has a proven fix:
@@ -361,6 +537,10 @@ impl Daemon {
         };
         let e = &st.entries[i as usize];
         let now = config::now();
+        if let Some(f) = insight::flaky(&st, i, c) {
+            return json!({"found": false, "command": e.text, "flaky": true,
+                          "reason": format!("Nothing broke: it's flaky here ({}). Try it again before changing anything.", f.summary())});
+        }
         let Some(b) = insight::what_broke(&st, i, c) else {
             let a = st.agg(e, Scope::Folder(c));
             let reason = match (a.ok, a.fail) {
@@ -377,10 +557,291 @@ impl Daemon {
             .filter(|x| x.cwd == Some(c) && x.ts >= b.last_ok)
             .filter(|x| x.entry == i || !insight::trivial(&st.entries[x.entry as usize]))
             .take(40)
-            .map(|x| json!({"command": st.entries[x.entry as usize].text, "exit": x.exit, "ago": insight::ago(x.ts, now), "target": x.entry == i}))
+            .map(|x| json!({"command": st.entries[x.entry as usize].text, "exit": x.exit, "ago": insight::ago(x.ts, now), "target": x.entry == i,
+                             "branch": st.git_name(x.branch)}))
             .collect();
+        let git_at = |(br, hd): (u32, u32)| json!({"branch": st.git_name(br), "commit": st.git_name(hd).map(|c| c.chars().take(7).collect::<String>())});
+        let git = insight::GitChange::of(&st, &b).map(|g| json!({"change": g.clause(), "advice": g.advice(), "worked_on": git_at(b.ok_git), "fails_on": git_at(b.fail_git)}));
         json!({"found": true, "command": e.text, "worked": b.worked, "last_ok": insight::ago(b.last_ok, now), "first_fail": insight::ago(b.first_fail, now),
-               "between": b.between.iter().map(|&j| st.entries[j as usize].text.clone()).collect::<Vec<_>>(), "timeline": timeline})
+               "between": b.between.iter().map(|&j| st.entries[j as usize].text.clone()).collect::<Vec<_>>(), "timeline": timeline, "git": git})
+    }
+
+    /// Enter, before a command runs: does the history here say it will fail? An exact lookup
+    /// (this text, this folder) - it runs on every Enter. {"warn": line, "fix": command?} or {}.
+    fn precheck_op(&self, req: &Value) -> Value {
+        let (Some(cmd), Some(cwd)) = (s(req, "command").map(str::trim), s(req, "cwd")) else { return json!({}) };
+        let (w, err, took) = {
+            let st = self.store.read();
+            let (Some(c), Some((i, e))) = (st.cwd_index(cwd), st.entry(cmd)) else { return json!({}) };
+            // only when failing costs something: a command that fails in a blink runs
+            let Some(w) = insight::warning(&st, i, c).filter(|_| insight::costly(&st, i, c)) else { return json!({}) };
+            (w, st.last_err.get(&i).cloned(), st.typical(e, Scope::Folder(c), false).filter(|ms| *ms >= 10_000))
+        };
+        let after = took.map(|ms| format!(", after about {} each time", insight::took(ms, true))).unwrap_or_default();
+        let warn = if w.worked == 0 {
+            format!("this failed all {} times it ran here{after}", w.failed)
+        } else {
+            format!("this failed the last {} times here{after} (it worked {} time{} before that)", w.failed, w.worked, if w.worked == 1 { "" } else { "s" })
+        };
+        let sg = self.suggest_for(cmd, Some(cwd), err.as_deref()).filter(|v| v["command"].as_str().is_some_and(|f| f != cmd));
+        let (fix, diff) = sg.map_or((None, None), |v| (v["command"].as_str().map(str::to_string), v["diff"].as_str().map(str::to_string)));
+        let error = err.as_deref().map(|e| insight::short(e, 72)).filter(|e| !e.is_empty());
+        json!({"warn": warn, "fix": fix, "error": error, "diff": diff})
+    }
+
+    /// `reman agents`: what each agent (and you) ran over the last `days`: runs, failures, time
+    /// lost to failures, and the commands an agent kept retrying the same way, failing each time.
+    fn agents_op(&self, req: &Value) -> Result<Value> {
+        const LOOP: u32 = 4;
+        let days = n(req, "days", 7).clamp(1, 365);
+        let since = config::now() - days * 86400;
+        let rows: Vec<(String, String, String, Option<i64>, Option<String>, i64, Option<i64>, Option<String>)> = {
+            let conn = self.db.lock();
+            let mut st = conn.prepare(
+                "SELECT e.actor, COALESCE(e.session, ''), c.cmd_text, e.exit, e.err, e.ts, e.duration_ms, e.cwd
+                 FROM executions e JOIN commands c ON c.id = e.command_id WHERE e.ts >= ?1 ORDER BY e.ts, e.id",
+            )?;
+            st.query_map([since], |r| Ok((r.get::<_, Option<String>>(0)?.unwrap_or_default(), r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?, r.get(7)?)))?
+                .collect::<rusqlite::Result<_>>()?
+        };
+        #[derive(Default)]
+        struct Tally {
+            runs: u64,
+            failed: u64,
+            unknown: u64,
+            lost_ms: i64,
+        }
+        let mut by: std::collections::BTreeMap<String, Tally> = std::collections::BTreeMap::new();
+        // (actor, session, command) -> (the way the current streak fails, its length, last ts, folder)
+        let mut streak: std::collections::HashMap<(String, String, String), (String, u32, i64, Option<String>)> = std::collections::HashMap::new();
+        let mut loops: Vec<(u32, i64, String, String, Option<String>)> = Vec::new();
+        let close = |k: &(String, String, String), s: &(String, u32, i64, Option<String>), loops: &mut Vec<_>| {
+            if s.1 >= LOOP {
+                loops.push((s.1, s.2, k.2.clone(), k.0.clone(), s.3.clone()));
+            }
+        };
+        for (actor, session, cmd, exit, err, ts, dur, cwd) in rows {
+            let t = by.entry(actor.clone()).or_default();
+            t.runs += 1;
+            match exit {
+                Some(e) if e > 0 => {
+                    t.failed += 1;
+                    t.lost_ms += dur.unwrap_or(0).max(0);
+                }
+                Some(0) => {}
+                _ => t.unknown += 1,
+            }
+            if !actor.starts_with("agent:") || session.is_empty() {
+                continue;
+            }
+            let key = (actor, session, cmd);
+            let failed = exit.is_some_and(|e| e > 0);
+            let way = err.as_deref().and_then(crate::errors::signature).unwrap_or_else(|| format!("exit {}", exit.unwrap_or(0)));
+            match streak.get_mut(&key) {
+                Some(s) if failed && s.0 == way => {
+                    s.1 += 1;
+                    s.2 = ts;
+                    s.3 = cwd;
+                }
+                _ => {
+                    if let Some(s) = streak.remove(&key) {
+                        close(&key, &s, &mut loops);
+                    }
+                    if failed {
+                        streak.insert(key, (way, 1, ts, cwd));
+                    }
+                }
+            }
+        }
+        for (k, s) in &streak {
+            close(k, s, &mut loops);
+        }
+        loops.sort_by(|a, b| b.0.cmp(&a.0).then(b.1.cmp(&a.1)));
+        let now = config::now();
+        let st = self.store.read();
+        let who = |a: &str| if a == "human" { "you".to_string() } else { a.strip_prefix("agent:").unwrap_or(a).to_string() };
+        let mut actors: Vec<(&String, &Tally)> = by.iter().collect();
+        actors.sort_by(|a, b| (a.0 == "human").cmp(&(b.0 == "human")).then(b.1.runs.cmp(&a.1.runs)));
+        Ok(json!({
+            "days": days,
+            "actors": actors.iter().map(|(a, t)| json!({"actor": who(a), "runs": t.runs, "failed": t.failed, "unknown": t.unknown, "lost_ms": t.lost_ms})).collect::<Vec<_>>(),
+            "loops": loops.iter().take(10).map(|(n, ts, cmd, a, cwd)| json!({"command": cmd, "actor": who(a), "times": n, "ago": insight::ago(*ts, now),
+                "folder": cwd.as_deref().and_then(|c| st.cwd_index(c)).map(|c| st.cwd_name(c).to_string())})).collect::<Vec<_>>(),
+        }))
+    }
+
+    /// `reman yesterday` / `today` / `day <date>`: what ran that day, by project (repo, else
+    /// folder) in time order: your commands with repeats folded and looking-around left out,
+    /// failures with what fixed them (or that they're still failing), and the agents in one line.
+    fn day_op(&self, req: &Value) -> Result<Value> {
+        const FLOW_MAX: usize = 8;
+        let offset = self.local_offset();
+        let name = s(req, "day").unwrap_or("today");
+        let Some((since, until)) = crate::timewords::day(name, config::now(), offset) else {
+            return Ok(json!({"found": false, "reason": format!("`{name}` isn't a day reman knows (today, yesterday, a weekday, or YYYY-MM-DD).")}));
+        };
+        let rows: Vec<(String, String, Option<i64>, i64, Option<String>, Option<String>)> = {
+            let conn = self.db.lock();
+            let mut st = conn.prepare(
+                "SELECT COALESCE(e.actor, ''), c.cmd_text, e.exit, e.ts, e.cwd, e.branch FROM executions e JOIN commands c ON c.id = e.command_id
+                 WHERE e.ts >= ?1 AND e.ts < ?2 ORDER BY e.ts, e.id",
+            )?;
+            st.query_map([since, until], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)))?.collect::<rusqlite::Result<_>>()?
+        };
+        let hhmm = |ts: i64| {
+            let m = (ts + offset).rem_euclid(86_400) / 60;
+            format!("{}:{:02}", m / 60, m % 60)
+        };
+        #[derive(Default)]
+        struct Proj {
+            name: String,
+            from: i64,
+            to: i64,
+            branches: Vec<String>,
+            flow: Vec<(String, u32)>,
+            /// command -> (failures, worked later that day)
+            failed: Vec<(String, u32, bool)>,
+            oks: Vec<(String, i64)>,
+            agents: std::collections::BTreeMap<String, (u32, u32)>,
+        }
+        let st = self.store.read();
+        let mut order: Vec<String> = Vec::new();
+        let mut projects: std::collections::HashMap<String, Proj> = std::collections::HashMap::new();
+        for (actor, cmd, exit, ts, cwd, branch) in &rows {
+            let key = cwd.as_deref().map(crate::git::repo_identity).unwrap_or_else(|| "(no folder)".into());
+            let p = projects.entry(key.clone()).or_insert_with(|| {
+                order.push(key.clone());
+                let name = key.trim_end_matches(['/', '\\']).rsplit(['/', '\\']).next().unwrap_or(&key).to_string();
+                Proj { name, from: *ts, ..Default::default() }
+            });
+            p.to = *ts;
+            if let Some(b) = branch.as_ref().filter(|b| !p.branches.contains(b)) {
+                p.branches.push(b.clone());
+            }
+            let failed = exit.is_some_and(|e| e > 0);
+            if let Some(a) = actor.strip_prefix("agent:") {
+                let t = p.agents.entry(a.to_string()).or_default();
+                t.0 += 1;
+                t.1 += failed as u32;
+                continue;
+            }
+            if st.entry(cmd).is_some_and(|(_, e)| insight::trivial(e)) {
+                continue;
+            }
+            if failed {
+                match p.failed.iter_mut().find(|f| f.0 == *cmd) {
+                    Some(f) => f.1 += 1,
+                    None => p.failed.push((cmd.clone(), 1, false)),
+                }
+                continue;
+            }
+            if *exit == Some(0) {
+                p.oks.push((cmd.clone(), *ts));
+                if let Some(f) = p.failed.iter_mut().find(|f| f.0 == *cmd) {
+                    f.2 = true;
+                }
+            }
+            match p.flow.last_mut() {
+                Some(l) if l.0 == *cmd => l.1 += 1,
+                _ => match p.flow.iter_mut().find(|l| l.0 == *cmd) {
+                    Some(l) => l.1 += 1,
+                    None => p.flow.push((cmd.clone(), 1)),
+                },
+            }
+        }
+        let fixes = self.fixes.lock();
+        let out: Vec<Value> = order
+            .iter()
+            .map(|k| {
+                let p = &projects[k];
+                let failures: Vec<Value> = p
+                    .failed
+                    .iter()
+                    .map(|(cmd, n, worked)| {
+                        // what fixed it: a proven fix for it that ran (and worked) here that day
+                        let fix = (!worked).then(|| fixes.lookup(cmd, &st).into_iter().find(|f| p.oks.iter().any(|o| o.0 == f.fixed))).flatten().map(|f| f.fixed);
+                        json!({"command": cmd, "times": n, "worked_later": worked, "fixed_by": fix})
+                    })
+                    .collect();
+                let more = p.flow.len().saturating_sub(FLOW_MAX);
+                json!({"name": p.name, "branch": p.branches.last(), "from": hhmm(p.from), "to": hhmm(p.to),
+                       "flow": p.flow.iter().take(FLOW_MAX).map(|(c, n)| json!({"command": c, "times": n})).collect::<Vec<_>>(), "more": more,
+                       "failures": failures,
+                       "agents": p.agents.iter().map(|(a, (r, f))| json!({"agent": a, "runs": r, "failed": f})).collect::<Vec<_>>()})
+            })
+            .collect();
+        let span = rows.first().zip(rows.last()).map(|(a, b)| (hhmm(a.3), hhmm(b.3)));
+        Ok(json!({"found": !rows.is_empty(), "day": name, "from": span.as_ref().map(|s| s.0.clone()), "to": span.map(|s| s.1), "projects": out}))
+    }
+
+    /// `reman goto <words>` (`rcd` in the shells): the folders where you ran what the words
+    /// describe, or whose path has them, best first, that still exist. With no words, the folders
+    /// you were in most recently. {"results": [{"folder", "because", "ago"}]}
+    fn goto_op(&self, req: &Value) -> Result<Value> {
+        let words = s(req, "query").unwrap_or("").trim().to_string();
+        let k = n(req, "k", if words.is_empty() { 10 } else { 3 }).clamp(1, 20) as usize;
+        let qv = if words.chars().count() >= 3 { Some(self.embedder.embed_query(&words)?) } else { None };
+        let st = self.store.read();
+        let now = config::now();
+        // as this OS writes it (a folder recorded from Git Bash is `/c/...`)
+        let exists = |c: u32| std::path::Path::new(&config::native_path(st.cwd_name(c))).is_dir();
+        // when each folder was last worked in
+        let mut last: std::collections::HashMap<u32, i64> = std::collections::HashMap::new();
+        for x in &st.execs {
+            if let Some(c) = x.cwd {
+                last.insert(c, x.ts);
+            }
+        }
+        // folder -> (score, the command that put it here)
+        let mut best: std::collections::HashMap<u32, (f32, Option<u32>)> = std::collections::HashMap::new();
+        let mut offer = |c: u32, score: f32, because: Option<u32>| {
+            let b = best.entry(c).or_insert((f32::MIN, None));
+            if score > b.0 {
+                *b = (score, because.or(b.1));
+            }
+        };
+        if words.is_empty() {
+            for (&c, &ts) in &last {
+                offer(c, ts as f32, None);
+            }
+        } else {
+            let q = Query { text: &words, k: 40, offset: 0, scope: Scope::All, actor: None, status: None, group: false, rank: Rank::Hybrid, here: None, window: None };
+            for h in search::search(&st, &q, qv.as_deref().map(|v| v.as_slice())).hits.iter().filter(|h| h.close) {
+                let e = &st.entries[h.idx as usize];
+                if insight::trivial(e) {
+                    continue; // `cd x` and `ls` say nothing about where the work is
+                }
+                for c in e.rows.iter().filter_map(|r| r.cwd) {
+                    offer(c, h.score, Some(h.idx));
+                }
+            }
+            // the folder's own name: every word in its last part (`planet api` → planet_naidu_api)
+            // outranks any command match; every word somewhere in its path ranks with them
+            const NAMED: f32 = 1000.0;
+            let squash = |t: &str| t.to_lowercase().replace(['_', '-', ' ', '.'], "");
+            let terms: Vec<String> = words.split_whitespace().map(squash).collect();
+            for c in 0..st.cwd_count() {
+                let path = squash(st.cwd_name(c));
+                let tail = squash(st.cwd_name(c).trim_end_matches(['/', '\\']).rsplit(['/', '\\']).next().unwrap_or(""));
+                if terms.iter().all(|t| tail.contains(t.as_str())) {
+                    // the closer the name is to the words, the better (`api` → `api`, not `api-old`)
+                    offer(c, NAMED - (tail.len() as f32 - terms.iter().map(String::len).sum::<usize>() as f32).abs(), None);
+                } else if terms.iter().all(|t| path.contains(t.as_str())) {
+                    offer(c, 0.6, None);
+                }
+            }
+        }
+        let mut ranked: Vec<(u32, f32, Option<u32>)> = best.into_iter().map(|(c, (s, b))| (c, s, b)).filter(|(c, ..)| exists(*c)).collect();
+        ranked.sort_by(|a, b| b.1.total_cmp(&a.1).then(last.get(&b.0).cmp(&last.get(&a.0))));
+        let results: Vec<Value> = ranked
+            .iter()
+            .take(k)
+            .map(|(c, _, because)| {
+                json!({"folder": config::native_path(st.cwd_name(*c)), "because": because.map(|i| st.entries[i as usize].text.clone()),
+                       "ago": last.get(c).map(|t| insight::ago(*t, now))})
+            })
+            .collect();
+        Ok(json!({"results": results}))
     }
 
     /// `reman here`: what you did here last time, however long ago.
@@ -406,7 +867,7 @@ impl Daemon {
         if scope == Scope::Nothing {
             return json!({"found": false});
         }
-        let rb = insight::runbook_json(&st, scope, folder, &|i| Some(st.entries[i as usize].text.clone()), true);
+        let rb = insight::runbook_json(&st, scope, cwd, &|_, t, _| Some(t.to_string()), true);
         // the model's fuller version, while the project's commands are the same ("fresh": the
         // runbook from the history alone, with what only a model needs, to ask it again)
         if b(req, "fresh", false) {
@@ -426,6 +887,16 @@ impl Daemon {
     /// After a failure: a proven fix for this command; else one for a DIFFERENT command that
     /// failed with the same error (`err`, see errors.rs); else a strong typo match that worked.
     pub fn suggest_for(&self, failed: &str, cwd: Option<&str>, err: Option<&str>) -> Option<Value> {
+        // what the fix changes, word by word, when it is a variant of the failed command (after
+        // "command": shell hooks read that field first)
+        let mut v = self.suggestion(failed, cwd, err)?;
+        if let Some(d) = v["command"].as_str().and_then(|f| fixpairs::diff(failed, f)) {
+            v["diff"] = json!(d);
+        }
+        Some(v)
+    }
+
+    fn suggestion(&self, failed: &str, cwd: Option<&str>, err: Option<&str>) -> Option<Value> {
         let st = self.store.read();
         if let Some(p) = self.fixes.lock().lookup(failed, &st).into_iter().next() {
             return Some(json!({"command": p.fixed, "kind": "proven", "confidence": p.confidence, "times": p.count}));
@@ -463,6 +934,8 @@ impl Daemon {
             "runs": a_all.runs, "run_count": a_all.runs,
             "success_rate": a_all.success_rate(),
             "last_run": config::age(a.last_used), "last_used": a.last_used,
+            // how long it usually takes when it works: here, else anywhere
+            "typical_ms": st.typical(e, scope, true).or_else(|| st.typical(e, Scope::All, true)),
             "intent": e.gkey, "description": e.desc,
             "cwd": a.cwd.map(|c| st.cwd_name(c)),
             "folders": a_all.folders, "pinned": e.pinned,
@@ -489,8 +962,18 @@ impl Daemon {
         v
     }
 
+    /// The local time's distance from UTC, in seconds (SQLite knows the time zone).
+    pub fn local_offset(&self) -> i64 {
+        self.db
+            .lock()
+            .query_row("SELECT CAST(strftime('%s','now','localtime') AS INTEGER) - CAST(strftime('%s','now') AS INTEGER)", [], |r| r.get(0))
+            .unwrap_or(0)
+    }
+
     fn search_op(&self, req: &Value, browse: bool) -> Result<Value> {
-        let text = if browse { "" } else { s(req, "query").unwrap_or("") };
+        // a time named at the end (`deploy last week`) filters; the rest is what to look for
+        let (words, window) = if browse { (String::new(), None) } else { crate::timewords::split(s(req, "query").unwrap_or(""), config::now(), self.local_offset()) };
+        let text = words.as_str();
         let rank = if s(req, "rank") == Some("semantic") { Rank::Semantic } else { Rank::Hybrid };
         // embed before taking the store lock; tiny queries go fuzzy-only (no model call at all)
         let t0 = Instant::now();
@@ -509,14 +992,60 @@ impl Daemon {
             group: b(req, "group", !browse),
             rank,
             here,
+            window: window.as_ref().map(|w| (w.since, w.until)),
         };
         let out = search::search(&st, &q, qv.as_deref().map(|v| v.as_slice()));
         let t_rank = t0.elapsed() - t_embed;
-        let results: Vec<Value> = out.hits.iter().map(|h| self.item(&st, h, scope)).collect();
+        let mut results: Vec<Value> = out.hits.iter().map(|h| self.item(&st, h, scope)).collect();
+        // the finder (only it asks): a folded group that differs in one place is a command with a
+        // blank, unless what was typed names one of its values
+        if b(req, "templates", false) {
+            for (v, h) in results.iter_mut().zip(&out.hits) {
+                if let Some(m) = out.members.get(&h.idx) {
+                    self.add_template(&st, v, m, scope, text);
+                }
+            }
+        }
         if std::env::var_os("REMAN_TRACE").is_some() {
             log(&format!("search {text:?}: embed {t_embed:?} rank {t_rank:?} total {:?}", t0.elapsed()));
         }
-        Ok(json!({"mode": out.mode, "confident": out.confident, "total": out.total, "results": results}))
+        let mut v = json!({"mode": out.mode, "confident": out.confident, "total": out.total, "results": results});
+        if let Some(w) = window {
+            v["window"] = json!(w.label);
+        }
+        Ok(v)
+    }
+
+    /// Turn a folded item into a command with a blank (describe::template): its display and fill,
+    /// the values it took (most recent first), and the track record of all of them together.
+    fn add_template(&self, st: &Store, v: &mut Value, members: &[u32], scope: Scope, query: &str) {
+        let mut m: Vec<u32> = members.to_vec();
+        m.sort_by_key(|&i| std::cmp::Reverse(st.entries[i as usize].rows.iter().map(|r| r.last_used).max().unwrap_or(0)));
+        let texts: Vec<&str> = m.iter().map(|&i| st.entries[i as usize].text.as_str()).collect();
+        let Some(t) = describe::template(&texts) else { return };
+        // `fix login` names the commit message: show that commit, not the blank (words of the
+        // command itself, `git commit`, name nothing)
+        let fixed = t.display.to_lowercase();
+        let words: Vec<String> = query.to_lowercase().split_whitespace().filter(|w| w.chars().count() >= 3 && !fixed.contains(*w)).map(String::from).collect();
+        if t.values.iter().any(|val| words.iter().any(|w| val.to_lowercase().contains(w.as_str()))) {
+            return;
+        }
+        let (mut runs, mut ok, mut fail, mut last) = (0u32, 0u32, 0u32, 0i64);
+        for &i in &m {
+            let a = st.agg(&st.entries[i as usize], scope);
+            runs += a.runs;
+            ok += a.ok;
+            fail += a.fail;
+            last = last.max(a.last_used);
+        }
+        v["template"] = json!(t.display);
+        v["fill"] = json!(t.fill);
+        v["blank"] = json!(t.kind);
+        v["values"] = json!(t.values);
+        v["runs"] = json!(runs);
+        v["status"] = json!(crate::store::status_of(ok, fail));
+        v["success_rate"] = json!(((ok + fail) > 0).then(|| ((ok as f64) / ((ok + fail) as f64) * 100.0).round() / 100.0));
+        v["last_used"] = json!(last);
     }
 
     fn dym_op(&self, req: &Value) -> Result<Value> {
@@ -617,6 +1146,44 @@ impl Daemon {
             }
         }
         out
+    }
+
+    /// Alt+N on an empty prompt: what you'd run next here, one idea at a time (`index` cycles
+    /// through up to 3): the next step of a flow you're walking through, what worked last time
+    /// the command you just ran failed, then what usually follows here.
+    /// {"command", "reason", "index", "of"}, or {} with nothing to offer.
+    fn nextup_op(&self, req: &Value) -> Value {
+        const MAX: usize = 3;
+        let mut q = req.clone();
+        q["k"] = json!(12);
+        let nx = self.next_op(&q);
+        let mut ideas: Vec<(String, String)> = Vec::new();
+        // for your prompt: commands you ran yourself (an agent's long one-liners aren't), on one line
+        let yours = {
+            let st = self.store.read();
+            move |c: &str| c.chars().count() <= 160 && !c.contains('\n') && st.entry(c).is_some_and(|(_, e)| e.rows.iter().any(|r| r.human > 0))
+        };
+        let add = |ideas: &mut Vec<(String, String)>, c: Option<&str>, why: String| {
+            if let Some(c) = c.filter(|c| !c.trim().is_empty() && yours(c) && !ideas.iter().any(|i| i.0 == *c)) {
+                ideas.push((c.to_string(), why));
+            }
+        };
+        if let Some(i) = nx["flow"]["items"].get(0) {
+            add(&mut ideas, i["command"].as_str(), format!("the next step of the flow you started ({} of {})", i["flow_step"], i["flow_total"]));
+        }
+        if nx.get("fix").is_some() {
+            let failed = insight::short(nx["fix"]["failed"].as_str().unwrap_or(""), 40);
+            add(&mut ideas, nx["fix"]["item"]["command"].as_str(), format!("worked last time `{failed}` failed"));
+        }
+        for p in nx["results"].as_array().into_iter().flatten() {
+            add(&mut ideas, p["command"].as_str(), p["reason"].as_str().unwrap_or("usual here").to_string());
+        }
+        ideas.truncate(MAX);
+        if ideas.is_empty() {
+            return json!({});
+        }
+        let i = (n(req, "index", 0).max(0) as usize) % ideas.len();
+        json!({"command": ideas[i].0, "reason": ideas[i].1, "index": i, "of": ideas.len()})
     }
 
     fn predict_op(&self, req: &Value) -> Value {
@@ -1046,10 +1613,17 @@ impl Daemon {
                     }
                     // a command that kept working here has just failed: what ran here since
                     // (looked up as stored: a secret in it was masked)
+                    // (or that it is flaky here: then nothing broke)
                     if r.failed() {
                         let stored = crate::redact::redact(&r.cmd);
-                        if let Some(n) = r.cwd.as_deref().and_then(|c| self.broke_note(&stored, c)) {
+                        if let Some(n) = r.cwd.as_deref().and_then(|c| self.flaky_note(&stored, c).or_else(|| self.broke_note(&stored, c))) {
                             v["note"] = json!(n);
+                        }
+                        // an agent running it again and again, failing the same way each time
+                        if r.is_agent() && !r.session.is_empty() {
+                            if let Some(n) = self.retry_loop_note(&stored, db::StreakOf::Session(&r.session)) {
+                                v["loop"] = json!(n);
+                            }
                         }
                     }
                     v
@@ -1098,6 +1672,11 @@ impl Daemon {
                 _ => json!({"line": null}),
             },
             "why" => self.why_op(req),
+            "precheck" => self.precheck_op(req),
+            "nextup" => self.nextup_op(req),
+            "day" => self.day_op(req)?,
+            "goto" => self.goto_op(req)?,
+            "agents" => self.agents_op(req)?,
             "here" => self.here_op(req),
             "runbook" => self.runbook_op(req),
             "describe" => {
@@ -1156,7 +1735,10 @@ impl Daemon {
             }
             "stats" => self.stats(),
             "reindex" => json!({"ok": true, "reembedded": self.reindex()?}),
-            "mcp" => mcp::call_tool(self, s(req, "tool").unwrap_or(""), req.get("args").unwrap_or(&Value::Null), &mcp::Policy::from_req(req))?,
+            "mcp" => {
+                let ans = mcp::answer(self, s(req, "tool").unwrap_or(""), req.get("args").unwrap_or(&Value::Null), &mcp::Policy::from_req(req))?;
+                if b(req, "notes", false) { ans.envelope() } else { ans.value }
+            }
             "shutdown" => {
                 std::thread::spawn(|| {
                     std::thread::sleep(std::time::Duration::from_millis(50));
@@ -1279,5 +1861,24 @@ mod flow_tests {
         assert_eq!(f.pos, 1);
         f.observe("npm run dev", true, 4); // skipping ahead is fine
         assert_eq!(f.pos, 3);
+    }
+
+    #[test]
+    fn windows_exit_codes() {
+        use super::exit_code;
+        assert_eq!(exit_code(0), 0);
+        assert_eq!(exit_code(2), 2);
+        // npm on Windows with no package.json (ENOENT), a crash (0xC0000005): real failures
+        assert_eq!(exit_code(-4058), 0xFFFF_F026);
+        assert_eq!(exit_code(-1073741819), 0xC000_0005);
+        assert!(exit_code(-1) > 0);
+    }
+
+    #[test]
+    fn a_terminals_own_startup_line_is_not_a_command() {
+        use super::is_junk;
+        assert!(is_junk(r#"try { . "c:\Users\me\AppData\Local\Programs\Microsoft VS Code\04c0d99f4f\resources\app\out\vs\workbench\contrib\terminal\common\scripts\shellIntegration.ps1" } catch {}"#));
+        assert!(is_junk(r#". "/usr/share/code/resources/app/out/vs/workbench/contrib/terminal/common/scripts/shellIntegration-bash.sh""#));
+        assert!(!is_junk("npm test"));
     }
 }

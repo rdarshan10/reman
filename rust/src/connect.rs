@@ -2,7 +2,9 @@
 //!
 //! Every agent gets the same stdio MCP server (`reman mcp`); the folder boundary lives in ONE
 //! place (~/.reman/config.json `mcp_roots`), so `reman connect --root <dir>` re-scopes every agent
-//! at once. Claude Code also gets the capture hooks (its Bash runs are recorded as agent:claude-code).
+//! at once. Every agent with a shell tool also gets capture: its commands are recorded as
+//! agent:<name>, through the agent's own hooks (Claude Code, Codex, Cursor, VS Code, Windsurf,
+//! Gemini CLI) or a plugin of reman's (opencode, pi, which have no JSON hooks).
 //! Configs are edited in place: invalid files are never overwritten, a .reman-bak copy is kept,
 //! everything is idempotent, and `reman disconnect` removes exactly what was added.
 use crate::settings;
@@ -18,7 +20,15 @@ pub const AGENTS: &[(&str, &str)] = &[
     ("vscode", "VS Code (Copilot agent mode)"),
     ("windsurf", "Windsurf"),
     ("gemini", "Gemini CLI"),
+    ("opencode", "opencode"),
+    ("pi", "pi"),
 ];
+
+/// Where each agent tells hooks about the shell commands it runs, so reman records them (as
+/// agent:<name>): every agent with a shell tool. Claude Desktop has none.
+fn captures(id: &str) -> bool {
+    id != "claude-desktop"
+}
 
 /// REMAN_CONNECT_HOME redirects every config path (tests / dry runs never touch real configs).
 pub(crate) fn sandbox() -> Option<PathBuf> {
@@ -46,8 +56,40 @@ pub fn config_path(id: &str) -> Option<PathBuf> {
         "vscode" => app_config().join("Code").join("User").join("mcp.json"),
         "windsurf" => home().join(".codeium").join("windsurf").join("mcp_config.json"),
         "gemini" => home().join(".gemini").join("settings.json"),
+        "opencode" => xdg_config().join("opencode").join("opencode.json"),
+        // pi has no MCP: its config is reman's extension
+        "pi" => pi_dir().join("extensions").join("reman.ts"),
         _ => return None,
     })
+}
+
+/// $XDG_CONFIG_HOME, else ~/.config (opencode's config lives there on every OS)
+fn xdg_config() -> PathBuf {
+    std::env::var_os("XDG_CONFIG_HOME").filter(|_| sandbox().is_none()).map(PathBuf::from).unwrap_or_else(|| home().join(".config"))
+}
+
+/// $PI_CODING_AGENT_DIR, else ~/.pi/agent
+fn pi_dir() -> PathBuf {
+    std::env::var_os("PI_CODING_AGENT_DIR").filter(|_| sandbox().is_none()).map(PathBuf::from).unwrap_or_else(|| home().join(".pi").join("agent"))
+}
+
+fn opencode_plugin() -> PathBuf {
+    xdg_config().join("opencode").join("plugins").join("reman.ts")
+}
+
+/// VS Code reads the user's hook files from ~/.copilot/hooks ($COPILOT_HOME/hooks), as does the
+/// Copilot CLI; this one is all reman's.
+fn copilot_hooks() -> PathBuf {
+    let dir = std::env::var_os("COPILOT_HOME").filter(|_| sandbox().is_none()).map(PathBuf::from).unwrap_or_else(|| home().join(".copilot"));
+    dir.join("hooks").join("reman.json")
+}
+
+fn cursor_hooks() -> PathBuf {
+    home().join(".cursor").join("hooks.json")
+}
+
+fn windsurf_hooks() -> PathBuf {
+    home().join(".codeium").join("windsurf").join("hooks.json")
 }
 
 fn claude_settings() -> PathBuf {
@@ -62,7 +104,10 @@ fn on_path(name: &str) -> bool {
 /// Is the agent installed? (its config dir exists, or its CLI is on PATH)
 pub fn installed(id: &str) -> bool {
     let Some(p) = config_path(id) else { return false };
-    let dir_ok = p.parent().is_some_and(|d| d.is_dir()) && (id != "claude-code" || p.exists() || home().join(".claude").is_dir());
+    let dir_ok = match id {
+        "pi" => pi_dir().is_dir(),
+        _ => p.parent().is_some_and(|d| d.is_dir()) && (id != "claude-code" || p.exists() || home().join(".claude").is_dir()),
+    };
     dir_ok
         || (sandbox().is_none()
             && match id {
@@ -70,6 +115,8 @@ pub fn installed(id: &str) -> bool {
                 "codex" => on_path("codex"),
                 "gemini" => on_path("gemini"),
                 "cursor" => on_path("cursor"),
+                "opencode" => on_path("opencode"),
+                "pi" => on_path("pi"),
                 _ => false,
             })
 }
@@ -151,13 +198,40 @@ fn mcp_key(id: &str) -> &'static str {
 /// Current state of one agent: None = not connected, Some(path_matches)
 pub fn status(id: &str, exe: &Path) -> Option<bool> {
     let p = config_path(id)?;
-    if id == "codex" {
-        let t = std::fs::read_to_string(&p).ok()?;
-        return t.contains("[mcp_servers.reman]").then(|| t.contains(&toml_str(&exe.to_string_lossy())));
+    match id {
+        "codex" => {
+            let t = std::fs::read_to_string(&p).ok()?;
+            t.contains("[mcp_servers.reman]").then(|| t.contains(&toml_str(&exe.to_string_lossy())))
+        }
+        // reman's own extension, calling the reman-hook next to this reman
+        "pi" => std::fs::read_to_string(&p).ok().map(|t| t.contains(&fwd(&hook_for(exe)))),
+        "opencode" => {
+            let mcp = load_json(&p).ok().and_then(|m| m.get("mcp")?.get("reman")?.pointer("/command/0")?.as_str().map(|c| Path::new(c) == exe));
+            mcp.or_else(|| std::fs::read_to_string(opencode_plugin()).ok().map(|t| t.contains(&fwd(&hook_for(exe)))))
+        }
+        _ => {
+            let m = load_json(&p).ok()?;
+            let e = m.get(mcp_key(id))?.get("reman")?;
+            Some(e.get("command").and_then(Value::as_str).is_some_and(|c| Path::new(c) == exe))
+        }
     }
-    let m = load_json(&p).ok()?;
-    let e = m.get(mcp_key(id))?.get("reman")?;
-    Some(e.get("command").and_then(Value::as_str).is_some_and(|c| Path::new(c) == exe))
+}
+
+/// The reman-hook installed next to `exe`.
+fn hook_for(exe: &Path) -> PathBuf {
+    exe.with_file_name(if cfg!(windows) { "reman-hook.exe" } else { "reman-hook" })
+}
+
+/// A path with forward slashes: valid on every OS, and no escaping in JSON, TOML or TypeScript.
+fn fwd(p: &Path) -> String {
+    p.to_string_lossy().replace('\\', "/")
+}
+
+/// `<reman-hook> <agent>` as one command line a shell runs: quoted only when it must be (a bare
+/// path runs the same in sh, cmd and PowerShell; a quoted one is only a string to PowerShell).
+fn cmdline(hook: &Path, agent: &str) -> String {
+    let exe = fwd(hook);
+    if exe.contains(char::is_whitespace) { format!("\"{exe}\" {agent}") } else { format!("{exe} {agent}") }
 }
 
 /// Uninstall: reman out of every coding tool's config (its MCP entry, its capture hooks), and
@@ -169,24 +243,14 @@ pub fn remove_everywhere(exe: &Path, dry: bool) -> Result<Vec<String>> {
             if !dry {
                 disconnect(id)?;
             }
-            let hooks = if matches!(*id, "claude-code" | "codex") { " and its capture hooks" } else { "" };
-            out.push(format!("{name}: reman's MCP server{hooks}"));
-        }
-    }
-    let has_reman = |p: &Path| std::fs::read_to_string(p).is_ok_and(|t| t.contains("reman"));
-    let cs = claude_settings();
-    if has_reman(&cs) && !out.iter().any(|l| l.starts_with("Claude Code")) && load_json(&cs).ok().and_then(|m| m.get("hooks").cloned()).is_some_and(|h| h.to_string().contains("reman")) {
-        if !dry {
-            set_claude_hooks(None)?;
-        }
-        out.push("Claude Code: reman's capture hooks".into());
-    }
-    if let Some(h) = codex_hooks_path().filter(|h| has_reman(h)) {
-        if !out.iter().any(|l| l.starts_with("OpenAI Codex")) {
+            let what = if *id == "pi" { "reman's extension" } else if captures(id) { "reman's MCP server and its capture hooks" } else { "reman's MCP server" };
+            out.push(format!("{name}: {what}"));
+        } else if captures(id) && capture_installed(id) {
+            // hooks left behind without the MCP entry
             if !dry {
-                set_hooks(&h, None, "codex", "")?;
+                set_capture(id, None)?;
             }
-            out.push("OpenAI Codex CLI: reman's capture hooks".into());
+            out.push(format!("{name}: reman's capture hooks"));
         }
     }
     Ok(out)
@@ -223,8 +287,8 @@ pub fn connect(id: &str, exe: &Path, hook: &Path) -> Result<String> {
                 servers["reman"] = json!({"type": "stdio", "command": exe.to_string_lossy(), "args": ["mcp"], "env": {}});
                 save_json(&p, m)?;
             }
-            set_claude_hooks(Some(hook))?;
-            Ok(format!("MCP server (user scope) + capture hooks in {}", claude_settings().display()))
+            let hooks = set_capture(id, Some(hook))?;
+            Ok(format!("MCP server (user scope) + capture hooks in {}", hooks.display()))
         }
         "codex" => {
             let text = std::fs::read_to_string(&p).unwrap_or_default();
@@ -238,9 +302,28 @@ pub fn connect(id: &str, exe: &Path, hook: &Path) -> Result<String> {
             }
             backup(&p)?;
             std::fs::write(&p, new)?;
-            let hooks = codex_hooks_path().context("no Codex folder")?;
-            set_hooks(&hooks, Some(hook), "codex", "Bash|shell|local_shell")?;
+            let hooks = set_capture(id, Some(hook))?;
             Ok(format!("[mcp_servers.reman] in {} + capture hooks in {} (approve them once in Codex: /hooks)", p.display(), hooks.display()))
+        }
+        "opencode" => {
+            let plugin = set_capture(id, Some(hook))?;
+            // opencode.json may be JSONC: then the MCP entry is the user's to add, the plugin still records
+            let mcp = load_json(&p).and_then(|mut m| {
+                let servers = m.entry("mcp").or_insert_with(|| json!({}));
+                if !servers.is_object() {
+                    bail!("{}: `mcp` is not an object - not touching it", p.display());
+                }
+                servers["reman"] = json!({"type": "local", "command": [exe.to_string_lossy(), "mcp"], "enabled": true});
+                save_json(&p, m)
+            });
+            match mcp {
+                Ok(()) => Ok(format!("\"mcp\".reman in {} + capture plugin {}", p.display(), plugin.display())),
+                Err(e) => Ok(format!("capture plugin {} (MCP not added: {e:#})", plugin.display())),
+            }
+        }
+        "pi" => {
+            let ext = set_capture(id, Some(hook))?;
+            Ok(format!("capture extension {} (pi has no MCP; restart pi or /reload)", ext.display()))
         }
         _ => {
             let mut m = load_json(&p)?;
@@ -251,6 +334,10 @@ pub fn connect(id: &str, exe: &Path, hook: &Path) -> Result<String> {
             }
             servers["reman"] = entry(exe, id == "vscode");
             save_json(&p, m)?;
+            if captures(id) {
+                let hooks = set_capture(id, Some(hook))?;
+                return Ok(format!("\"{key}\".reman in {} + capture hooks in {}", p.display(), hooks.display()));
+            }
             Ok(format!("\"{key}\".reman in {}", p.display()))
         }
     }
@@ -269,7 +356,7 @@ pub fn disconnect(id: &str) -> Result<String> {
                 }
                 save_json(&p, m)?;
             }
-            set_claude_hooks(None)?;
+            set_capture(id, None)?;
             Ok("removed MCP server + capture hooks".into())
         }
         "codex" => {
@@ -277,27 +364,31 @@ pub fn disconnect(id: &str) -> Result<String> {
                 backup(&p)?;
                 std::fs::write(&p, toml_without_reman(&t) + "\n")?;
             }
-            if let Some(hooks) = codex_hooks_path().filter(|h| h.exists()) {
-                set_hooks(&hooks, None, "codex", "")?;
-            }
+            set_capture(id, None)?;
             Ok(format!("removed from {} and its capture hooks", p.display()))
+        }
+        "pi" => {
+            set_capture(id, None)?;
+            Ok(format!("removed {}", p.display()))
         }
         _ => {
             if p.exists() {
-                let mut m = load_json(&p)?;
-                if let Some(s) = m.get_mut(mcp_key(id)).and_then(Value::as_object_mut) {
-                    s.remove("reman");
+                // (an opencode.json that isn't plain JSON never got an entry)
+                if let Ok(mut m) = load_json(&p) {
+                    let key = if id == "opencode" { "mcp" } else { mcp_key(id) };
+                    if let Some(s) = m.get_mut(key).and_then(Value::as_object_mut) {
+                        s.remove("reman");
+                    }
+                    save_json(&p, m)?;
                 }
-                save_json(&p, m)?;
+            }
+            if captures(id) {
+                set_capture(id, None)?;
+                return Ok(format!("removed from {} and its capture hooks", p.display()));
             }
             Ok(format!("removed from {}", p.display()))
         }
     }
-}
-
-/// Claude Code PostToolUse/PostToolUseFailure hooks -> reman-hook claude (None = remove ours).
-fn set_claude_hooks(hook: Option<&Path>) -> Result<()> {
-    set_hooks(&claude_settings(), hook, "claude", "Bash|PowerShell")
 }
 
 /// Codex reads hooks from hooks.json next to its config.toml.
@@ -305,39 +396,155 @@ fn codex_hooks_path() -> Option<PathBuf> {
     config_path("codex").and_then(|p| p.parent().map(|d| d.join("hooks.json")))
 }
 
-/// Capture hooks in an agent's hook file (Claude Code's settings.json, Codex's hooks.json: the
-/// same format). PreToolUse marks when a command starts (for its duration); PostToolUse and
-/// PostToolUseFailure record it. None removes ours and keeps everything else the user has.
-fn set_hooks(p: &Path, hook: Option<&Path>, agent: &str, matcher: &str) -> Result<()> {
+/// The file an agent's capture lives in.
+fn capture_file(id: &str) -> Option<PathBuf> {
+    Some(match id {
+        "claude-code" => claude_settings(),
+        "codex" => codex_hooks_path()?,
+        "cursor" => cursor_hooks(),
+        "vscode" => copilot_hooks(),
+        "windsurf" => windsurf_hooks(),
+        "gemini" => config_path("gemini")?,
+        "opencode" => opencode_plugin(),
+        "pi" => config_path("pi")?,
+        _ => return None,
+    })
+}
+
+/// Are reman's capture hooks there (reman-hook named in the agent's hook file)?
+pub fn capture_installed(id: &str) -> bool {
+    capture_file(id).and_then(|p| std::fs::read_to_string(p).ok()).is_some_and(|t| t.contains("reman-hook"))
+}
+
+/// Install (Some(reman-hook)) or remove (None) an agent's capture, in the way that agent takes
+/// it: JSON hooks (Claude Code, Codex, Cursor, VS Code, Windsurf, Gemini CLI) or reman's own
+/// plugin (opencode, pi, which have no JSON hooks). Everything else the user has stays. The
+/// file touched.
+fn set_capture(id: &str, hook: Option<&Path>) -> Result<PathBuf> {
+    let p = capture_file(id).context("this agent takes no capture hooks")?;
+    match id {
+        // PreToolUse marks a start (for the duration), PostToolUse / PostToolUseFailure record
+        "claude-code" => {
+            let e = hook.map(|h| json!({"type": "command", "command": fwd(h), "args": ["claude"], "timeout": 5}));
+            set_nested_hooks(&p, &["PreToolUse", "PostToolUse", "PostToolUseFailure"], "^(Bash|PowerShell)$", e)?;
+        }
+        "codex" => {
+            let e = hook.map(|h| json!({"type": "command", "command": format!("\"{}\" codex", fwd(h)), "timeout": 5}));
+            set_nested_hooks(&p, &["PreToolUse", "PostToolUse", "PostToolUseFailure"], "^(Bash|shell|local_shell)$", e)?;
+        }
+        // Gemini CLI: AfterTool on its shell tool (timeout in ms)
+        "gemini" => {
+            let e = hook.map(|h| json!({"type": "command", "command": cmdline(h, "gemini"), "name": "reman", "timeout": 5000}));
+            set_nested_hooks(&p, &["AfterTool"], "run_shell_command", e)?;
+        }
+        // Cursor: afterShellExecution carries the output and the duration
+        "cursor" => {
+            let e = hook.map(|h| json!({"command": cmdline(h, "cursor"), "timeout": 5}));
+            set_flat_hooks(&p, &["afterShellExecution"], e, Some(json!(1)))?;
+        }
+        // Windsurf: pre_run_command marks a start, post_run_command records
+        "windsurf" => {
+            let e = hook.map(|h| json!({"command": cmdline(h, "windsurf"), "powershell": format!("& '{}' windsurf", fwd(h)), "show_output": false}));
+            set_flat_hooks(&p, &["pre_run_command", "post_run_command"], e, None)?;
+        }
+        // VS Code (Copilot agent mode): a hook file of reman's own in ~/.copilot/hooks. The Copilot
+        // CLI reads that folder too, so the file is valid for both: `version` (the CLI's), PascalCase
+        // events (VS Code's; the CLI then speaks VS Code's snake_case payload), the command for
+        // each (`command`/`windows` for VS Code, `bash`/`powershell` for the CLI), both timeouts.
+        // The matcher narrows it to their terminal tools where it's honoured.
+        "vscode" => match hook {
+            Some(h) => {
+                let c = cmdline(h, "copilot");
+                let e = json!({"type": "command", "matcher": "run_in_terminal|bash|powershell", "command": c, "windows": c, "bash": c, "powershell": c, "timeout": 5, "timeoutSec": 5});
+                save_json(&p, json!({"version": 1, "hooks": {"PreToolUse": [e.clone()], "PostToolUse": [e]}}).as_object().cloned().unwrap_or_default())?;
+            }
+            None => remove_ours(&p)?,
+        },
+        "opencode" | "pi" => match hook {
+            Some(h) => {
+                let src = if id == "pi" { include_str!("init/pi.ts") } else { include_str!("init/opencode.ts") };
+                let js = serde_json::to_string(&fwd(h))?;
+                if let Some(d) = p.parent() {
+                    std::fs::create_dir_all(d)?;
+                }
+                std::fs::write(&p, src.replace("\"@@REMAN_HOOK@@\"", &js)).with_context(|| format!("writing {}", p.display()))?;
+            }
+            None => remove_ours(&p)?,
+        },
+        _ => bail!("this agent takes no capture hooks"),
+    }
+    Ok(p)
+}
+
+/// Delete a file only reman writes, when it is reman's.
+fn remove_ours(p: &Path) -> Result<()> {
+    if std::fs::read_to_string(p).is_ok_and(|t| t.contains("reman")) {
+        std::fs::remove_file(p)?;
+    }
+    Ok(())
+}
+
+fn is_ours(v: &Value) -> bool {
+    ["command", "powershell", "windows", "bash"].iter().any(|k| v.get(*k).and_then(Value::as_str).is_some_and(|c| c.contains("reman-hook") || c.contains("reman.exe")))
+}
+
+/// Hooks as `{"hooks": {Event: [{"matcher": .., "hooks": [entry]}]}}` (Claude Code, Codex,
+/// Gemini CLI): ours replaced by `entry` (None: removed), everything else the user has kept.
+fn set_nested_hooks(p: &Path, events: &[&str], matcher: &str, entry: Option<Value>) -> Result<()> {
     let mut m = load_json(p)?;
     let hooks = m.entry("hooks").or_insert_with(|| json!({}));
-    for ev in ["PreToolUse", "PostToolUse", "PostToolUseFailure"] {
-        let list = hooks.as_object_mut().context("`hooks` is not an object")?.entry(ev).or_insert_with(|| json!([]));
+    for ev in events {
+        let list = hooks.as_object_mut().context("`hooks` is not an object")?.entry(*ev).or_insert_with(|| json!([]));
         let arr = list.as_array_mut().context("hook list is not an array")?;
-        // drop any previous reman hook, keep everything else the user has
         for block in arr.iter_mut() {
             if let Some(hs) = block.get_mut("hooks").and_then(Value::as_array_mut) {
-                hs.retain(|h| !h.get("command").and_then(Value::as_str).is_some_and(|c| c.contains("reman")));
+                hs.retain(|h| !is_ours(h));
             }
         }
         arr.retain(|b| b.get("hooks").and_then(Value::as_array).is_none_or(|h| !h.is_empty()));
-        if let Some(h) = hook {
-            let exe = h.to_string_lossy().replace('\\', "/");
-            // Claude takes the arguments apart; Codex runs one command line
-            let entry = if agent == "claude" {
-                json!({"type": "command", "command": exe, "args": [agent], "timeout": 5})
-            } else {
-                json!({"type": "command", "command": format!("\"{exe}\" {agent}"), "timeout": 5})
-            };
-            arr.push(json!({"matcher": matcher, "hooks": [entry]}));
+        if let Some(e) = &entry {
+            arr.push(json!({"matcher": matcher, "hooks": [e]}));
         }
     }
-    // leave no empty scaffolding behind on disconnect
-    if let Some(obj) = hooks.as_object_mut() {
+    finish_hooks(p, m, &[])
+}
+
+/// Hooks as `{"hooks": {event: [entry]}}` (Cursor, Windsurf); Cursor's file also says its
+/// `version`.
+fn set_flat_hooks(p: &Path, events: &[&str], entry: Option<Value>, version: Option<Value>) -> Result<()> {
+    if entry.is_none() && !p.exists() {
+        return Ok(());
+    }
+    let mut m = load_json(p)?;
+    if let (Some(v), Some(_)) = (&version, &entry) {
+        m.entry("version").or_insert_with(|| v.clone());
+    }
+    let hooks = m.entry("hooks").or_insert_with(|| json!({}));
+    for ev in events {
+        let list = hooks.as_object_mut().context("`hooks` is not an object")?.entry(*ev).or_insert_with(|| json!([]));
+        let arr = list.as_array_mut().context("hook list is not an array")?;
+        arr.retain(|h| !is_ours(h));
+        if let Some(e) = &entry {
+            arr.push(e.clone());
+        }
+    }
+    finish_hooks(p, m, &["version"])
+}
+
+/// Save a hook file without empty scaffolding; a file left holding nothing of the user's (only
+/// `boilerplate` keys) is deleted.
+fn finish_hooks(p: &Path, mut m: Map<String, Value>, boilerplate: &[&str]) -> Result<()> {
+    if let Some(obj) = m.get_mut("hooks").and_then(Value::as_object_mut) {
         obj.retain(|_, v| v.as_array().is_none_or(|a| !a.is_empty()));
     }
-    if hooks.as_object().is_some_and(|o| o.is_empty()) {
+    if m.get("hooks").and_then(Value::as_object).is_some_and(|o| o.is_empty()) {
         m.remove("hooks");
+    }
+    if !boilerplate.is_empty() && m.keys().all(|k| boilerplate.contains(&k.as_str())) {
+        if p.exists() {
+            std::fs::remove_file(p)?;
+        }
+        return Ok(());
     }
     save_json(p, m)
 }
@@ -358,16 +565,38 @@ pub fn resolve_roots(cli: &[String]) -> Vec<String> {
     if let Some(l) = legacy {
         return l.split(settings::roots_sep()).filter(|s| !s.trim().is_empty()).map(str::to_string).collect();
     }
-    // nothing chosen: no shared list. Each agent then sees only the project it was started in
-    // (mcp::Policy::from_env). Never the folder `connect` happened to run from - for a new user
-    // that is their home folder, i.e. everything.
+    // nothing chosen: no shared list, and agents see nothing until the user approves a folder.
+    // Never the folder `connect` happened to run from - for a new user that is their home folder,
+    // i.e. everything.
     Vec::new()
+}
+
+/// The coding agent running this process, if any: sharing a folder is the user's approval, so an
+/// agent must not be able to grant it to itself.
+pub fn run_by_agent() -> Option<&'static str> {
+    let set = |k: &str| std::env::var_os(k).is_some_and(|v| !v.is_empty() && v != "0");
+    if set("CLAUDECODE") {
+        Some("Claude Code")
+    } else if set("GEMINI_CLI") {
+        Some("Gemini CLI")
+    } else if std::env::vars_os().any(|(k, _)| k.to_string_lossy().starts_with("CODEX_")) {
+        Some("Codex")
+    } else {
+        None
+    }
+}
+
+pub fn refuse_if_agent(what: &str) -> anyhow::Result<()> {
+    if let Some(a) = run_by_agent() {
+        anyhow::bail!("{what} needs the user's approval, and this is running under {a}. Run it in your own terminal.");
+    }
+    Ok(())
 }
 
 /// One line saying what agents can see, for `reman connect` output.
 pub fn roots_line(roots: &[String]) -> String {
     if roots.is_empty() {
-        "each agent sees only the project folder it's working in (reman connect --add-root <dir> to share more)".into()
+        "nothing yet: agents see no history until you approve a folder (reman connect --add-root <dir>)".into()
     } else {
         roots.join("  |  ")
     }

@@ -3,6 +3,8 @@
 # (no process at all; the daemon drains it every second). A failure runs the slim reman-hook
 # (no ONNX, ~2MB) and waits briefly for the fix suggestion.
 #   Up = finder (this folder)   Ctrl-R = finder (all folders)   Alt-F = insert suggested fix
+#   Enter on a command that keeps failing here = held once, with why (Enter again runs it)
+#   Alt-N on an empty line = what you usually run next here (again: the next idea)
 #   Tab on an empty line = finder (Tab after text is normal completion)
 set -g __reman_exe "__REMAN__"
 set -g __reman_hook "__HOOK__"
@@ -12,6 +14,14 @@ if string match -qr '^[A-Za-z]:' -- $__reman_spool; and command -q cygpath
     set __reman_spool (cygpath -u -- $__reman_spool)
 end
 function reman; $__reman_exe $argv; end
+# rcd <words>: go to the folder where you ran what the words describe (or whose path has them).
+# `rcd alembic 2` takes the second match; `rcd` lists where you were lately, `rcd 3` goes there.
+function rcd
+    set -l p ($__reman_exe goto $argv); or return
+    test -n "$p"; or return
+    command -q cygpath; and set p (cygpath -u $p)
+    cd $p
+end
 # one session per shell: the id lives in an unexported variable, so a child shell makes its own
 if not set -q __reman_sid
     set -g __reman_sid fish-$fish_pid-(random)(random)
@@ -34,6 +44,7 @@ function __reman_postexec --on-event fish_postexec
     set -l cmd $argv[1]
     test -z "$cmd"; and return
     string match -q -- ' *' $cmd; and return   # leading space: never recorded
+    set -g __reman_fix   # a fix is offered for the command just run, until the next one
     if test $ec -ne 0
         set -g __reman_fix ($__reman_hook record --exit $ec --cwd $PWD --duration-ms $CMD_DURATION --suggest --print-fix -- $cmd)
     else
@@ -54,13 +65,79 @@ function __reman_find
     set -l scope $argv[1]
     set -l picked (env REMAN_FIND_QUERY=(commandline) $__reman_exe find --scope $scope --cwd $PWD)
     if test -n "$picked"
-        commandline -r -- $picked
+        # a command with a blank: \x01 marks where the cursor goes
+        set -l parts (string split -m 1 \x01 -- "$picked")
+        commandline -r -- (string join '' -- $parts)
+        test (count $parts) -eq 2; and commandline -C (string length -- "$parts[1]")
     end
     commandline -f repaint
 end
 
 function __reman_insert_fix
-    test -n "$__reman_fix"; and commandline -r -- $__reman_fix
+    if test -n "$__reman_fix"
+        commandline -r -- $__reman_fix
+    else
+        # what Alt-F does without reman: forward-word, which also accepts one word of the
+        # autosuggestion
+        commandline -f forward-word
+    end
+end
+
+# Enter: a command that keeps failing here is held once, with why (and the fix, on Alt-F); Enter
+# again runs it
+function __reman_enter
+    set -l line (commandline)
+    set -l t (string trim -- "$line")
+    if test (count $line) -eq 1; and test (string length -- "$t") -gt 1; and not string match -q -- ' *' "$line"; and test "$t" != "$__reman_held"
+        set -l out ($__reman_hook precheck --cwd $PWD -- $t 2>/dev/null)
+        if test -n "$out"
+            set -l parts (string split -m 3 \t -- $out[1])
+            set -g __reman_held $t
+            echo
+            set_color yellow; echo "  reman: $parts[1]"; set_color normal
+            if test -n "$parts[3]"
+                set_color brblack; echo "         last error: $parts[3]"; set_color normal
+            end
+            if test -n "$parts[2]"
+                set -g __reman_fix $parts[2]
+                set -l how "Alt-F inserts"
+                test -n "$parts[4]"; and set how "$parts[4]; $how"
+                set_color brblack; echo -n "  reman: worked instead -> "; set_color cyan; echo -n $parts[2]; set_color brblack; echo "   ($how)"; set_color normal
+            end
+            set_color brblack; echo "  Enter again runs it anyway"; set_color normal
+            commandline -f repaint
+            return
+        end
+    end
+    set -g __reman_held
+    commandline -f execute
+end
+
+# Alt-N on an empty line: what you'd run next here, ready to edit (Alt-N again: the next idea, up
+# to 3)
+function __reman_nextup
+    set -l line (commandline)
+    set -l i 0
+    if test -n (string trim -- "$line")
+        test -n "$__reman_next"; and test "$line" = "$__reman_next"; or return
+        set i (math $__reman_next_i + 1)
+    end
+    set -l out ($__reman_hook nextup --cwd $PWD --session $REMAN_SESSION --index $i 2>/dev/null)
+    test -n "$out"; or return
+    set -l parts (string split \t -- $out[1])
+    set -g __reman_next $parts[1]
+    set -g __reman_next_i $parts[3]
+    if test $i -eq 0
+        echo
+        set_color brblack; echo "  reman: $parts[2]"; set_color normal
+    end
+    commandline -r -- $parts[1]
+    commandline -f repaint
+end
+
+# a held command is held once per prompt
+function __reman_unhold --on-event fish_postexec --on-event fish_cancel
+    set -g __reman_held
 end
 
 function __reman_tab
@@ -83,3 +160,5 @@ complete -c reman.exe -f -a '(__reman_complete)'
 bind \cr '__reman_find all'
 bind \e\[A '__reman_find folder'
 bind \ef __reman_insert_fix
+bind \r __reman_enter
+bind \en __reman_nextup
