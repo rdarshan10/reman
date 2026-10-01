@@ -1048,15 +1048,20 @@
   (function () {
     const el = document.getElementById("acro");
     if (!el) return;
+    // one part per letter of R·E·M·A·N; the part's first capital is the letter
     const LINES = [
       ["Remembers", "Exactly,", "Makes", "Absolutely", "Nothing up"],
-      ["Remember", "Everything,", "Miss", "Absolutely", "Nothing"],
-      ["Retrieve", "Every", "Memorized", "Action,", "Now"],
-      ["Run", "Every", "Memory", "Again,", "Now"],
+      ["Repeats", "Every", "Mistake?", "Absolutely", "Not."],
+      ["Retrieves", "Exactly", "what you Meant,", "Approximately", "Named"],
+      ["Real", "Execution", "Memory for", "Agents,", "Natively"],
     ];
     let k = 0, auto = null;
+    const letter = (w) => {
+      const i = w.search(/[A-Z]/);
+      return esc(w.slice(0, i)) + `<span class="i">${w[i]}</span>` + esc(w.slice(i + 1));
+    };
     const show = () => {
-      el.innerHTML = '<span class="aw">' + LINES[k].map((w) => `<span class="i">${w[0]}</span>${esc(w.slice(1))}`).join(" ") + "</span>";
+      el.innerHTML = '<span class="aw">' + LINES[k].map(letter).join(" ") + "</span>";
       el.setAttribute("aria-label", "reman: " + LINES[k].join(" ") + ". Click for another.");
     };
     show();
