@@ -395,32 +395,32 @@
   <div class="rows">
     <div class="row"><div class="row-track">
       <ul class="feat-row">
-        <li><code>tear down containers</code> finds <code>docker compose down -v</code></li>
-        <li>Every command's track record</li>
-        <li>Fixes learned from what you ran next</li>
-        <li>Holds a command that's about to fail</li>
-        <li>What the fix changes: <code>adds --build</code></li>
-        <li><span class="k">Alt+N</span> the next step</li>
-        <li><code>git commit -m "‹message›"</code></li>
-        <li><code>deploy last week</code></li>
-        <li><code>usually 3m 12s</code></li>
-        <li>Tells you when the long one is done</li>
-        <li>Never invents a command</li>
+        <li>Describe a command in words and get it back: <code>tear down containers</code></li>
+        <li>See which version of a command actually worked</li>
+        <li>After a failure, it offers what fixed it last time</li>
+        <li>Warns you before you rerun a command that keeps failing</li>
+        <li>Shows what a fix changes, like <code>adds --build</code></li>
+        <li><span class="k">Alt+N</span> puts the command you usually run next on your prompt</li>
+        <li>Near-identical commands become one, with a blank to fill in</li>
+        <li>Find commands by when you ran them: <code>deploy last week</code></li>
+        <li>Knows how long a command usually takes</li>
+        <li>Notifies you when a long command finishes</li>
+        <li>Only gives back commands that really ran</li>
       </ul>
     </div></div>
     <div class="row"><div class="row-track rev">
       <ul class="feat-row">
-        <li><code>worked on main, fails on feat/x</code></li>
-        <li>Flaky, not broken</li>
-        <li><code>rcd alembic</code></li>
-        <li><code>reman yesterday</code></li>
-        <li>Tells an agent it's going in circles</li>
-        <li>Claude Code · Codex · Cursor · Gemini CLI</li>
-        <li>Last time here, in one line</li>
-        <li>A runbook from what actually worked</li>
-        <li>Secrets masked before saving</li>
-        <li>PowerShell · bash · zsh · fish · cmd</li>
-        <li>Nothing leaves your machine</li>
+        <li>Says when it worked on main but fails on your branch</li>
+        <li>Tells a flaky test apart from a real break</li>
+        <li><code>rcd alembic</code> jumps to the folder where you ran it</li>
+        <li><code>reman yesterday</code> recaps your day, project by project</li>
+        <li>Stops AI agents from retrying the same failing command</li>
+        <li>Claude Code, Codex and Cursor reuse commands that already worked</li>
+        <li>Reminds you what you did last time you opened a folder</li>
+        <li>Writes how a project is run, from commands that worked</li>
+        <li>Masks passwords and tokens before saving anything</li>
+        <li>One history for PowerShell, bash, zsh, fish and cmd</li>
+        <li>Everything stays on your machine</li>
       </ul>
     </div></div>
   </div>
