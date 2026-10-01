@@ -208,16 +208,6 @@
     .ch-label { margin-top: 0; }
   }
 
-  /* ---------- specimen table (chapter 1) ---------- */
-  .specimen { width: 100%; border-collapse: collapse; border-top: 1.5px solid var(--rule); border-bottom: 1.5px solid var(--rule); }
-  .specimen th { text-align: left; font: 600 11.5px var(--mono); letter-spacing: .1em; text-transform: uppercase; color: var(--ink-3); padding: 10px 0 8px; border-bottom: 1px solid var(--rule); }
-  .specimen td { padding: 8px 0; border-bottom: 1px solid var(--faint); vertical-align: baseline; }
-  .specimen tr:last-child td { border-bottom: 0; }
-  .specimen td:first-child { font: italic 400 21px/1.2 var(--serif); padding-right: 18px; width: 44%; }
-  .specimen td:last-child code { background: none; border: 0; padding: 0; font-size: 12.5px; color: var(--ink); word-break: break-word; }
-  .specimen tbody tr:hover td:last-child code { color: var(--signal); }
-  @media (max-width: 560px) { .specimen td:first-child { font-size: 18px; } }
-
   /* ---------- specifications ---------- */
   .spec { width: 100%; border-collapse: collapse; font-size: 15.5px; }
   .spec td { padding: 11px 0; border-bottom: 1px solid var(--faint); vertical-align: baseline; }
@@ -266,6 +256,22 @@
   .colophon nav { display: flex; gap: 22px; flex-wrap: wrap; }
   .colophon a { text-decoration: none; }
   .colophon a:hover { color: var(--signal); }
+
+  /* ---------- Fig. 2: search by meaning, one example at a time ---------- */
+  #mean .body { min-height: 236px; display: flex; flex-direction: column; }
+  .m-query { display: flex; gap: 10px; font-size: 15px; }
+  .m-query .p { color: var(--signal); }
+  .m-hit { margin: 18px -18px 0; padding: 9px 18px; background: var(--t-sel); box-shadow: inset 3px 0 0 var(--signal); display: flex; gap: 10px; align-items: baseline; flex-wrap: wrap; }
+  .m-hit .cmd { color: #fff; font-weight: 600; font-size: 14.5px; white-space: pre-wrap; word-break: break-word; }
+  .m-hit .cmd .shared { color: var(--signal); text-decoration: underline; text-underline-offset: 3px; }
+  .m-hit .close { margin-left: auto; color: var(--t-ok); font-size: 12px; white-space: nowrap; }
+  .m-facts { display: grid; grid-template-columns: 112px minmax(0, 1fr); gap: 6px 14px; margin-top: 16px; white-space: normal; font-size: 12.5px; }
+  .m-facts dt { color: var(--term-dim); }
+  .m-facts dd { margin: 0; color: var(--term-fg); }
+  .m-facts .none { color: var(--signal); font-weight: 600; }
+  .m-wait { color: var(--term-dim); margin-top: 18px; }
+  .mean-chips { margin: 28px 0 0; }
+  .mean-chips button { font-size: 12px; padding: 3px 9px; }
 
   /* ---------- new in 0.2: interactive figures ---------- */
   .new { font: 600 10.5px var(--mono); letter-spacing: .1em; text-transform: uppercase; color: #fff; background: var(--signal); padding: 1px 6px; vertical-align: .35em; margin-left: 8px; }
@@ -460,22 +466,12 @@
       </ul>
     </div>
     <figure>
-      <table class="specimen">
-        <thead><tr><th>You type</th><th>reman finds</th></tr></thead>
-        <tbody>
-          <tr><td>“tear down containers”</td><td><code>docker compose down -v</code></td></tr>
-          <tr><td>“undo my last commit”</td><td><code>git reset --soft HEAD~1</code></td></tr>
-          <tr><td>“free up docker disk space”</td><td><code>docker system prune -af --volumes</code></td></tr>
-          <tr><td>“kill whatever is on port 3000”</td><td><code>npx kill-port 3000</code></td></tr>
-          <tr><td>“biggest folders here”</td><td><code>du -sh * | sort -rh | head -20</code></td></tr>
-          <tr><td>“when does the certificate expire”</td><td><code>openssl x509 -in cert.pem -noout -dates</code></td></tr>
-          <tr><td>“clear the dns cache”</td><td><code>ipconfig /flushdns</code></td></tr>
-          <tr><td>“rebuild images without cache”</td><td><code>docker compose build --no-cache</code></td></tr>
-          <tr><td>“restart the api in kubernetes”</td><td><code>kubectl rollout restart deploy/api -n api</code></td></tr>
-          <tr><td>“dcoker ps”</td><td><code>docker ps</code></td></tr>
-        </tbody>
-      </table>
-      <figcaption><b>Fig. 2</b><span>Each query and the command ranked first and marked a close match, in a sample history of about 70 everyday commands and 250 scripts from coding agents. Checked on every change by <a href="https://github.com/rdarshan10/reman/blob/master/rust/e2e/search_quality.py">a test</a>. reman only ever returns commands you have run.</span></figcaption>
+      <div class="term" id="mean">
+        <div class="bar"><span>reman · search by meaning</span><span id="mean-n"></span></div>
+        <div class="body" id="mean-body"></div>
+      </div>
+      <div class="chips mean-chips" id="mean-chips" role="group" aria-label="Pick what to type"></div>
+      <figcaption><b>Fig. 2</b><span>Ten things people type, and the command reman ranks first, marked a close match. From a sample history of about 70 everyday commands and 250 scripts from coding agents, checked on every change by <a href="https://github.com/rdarshan10/reman/blob/master/rust/e2e/search_quality.py">a test</a>. reman only ever returns commands you have run.</span></figcaption>
     </figure>
   </div>
 </section>
@@ -1067,6 +1063,84 @@
     show();
     el.addEventListener("click", () => { clearInterval(auto); k = (k + 1) % LINES.length; show(); });
     if (!reduced) auto = setInterval(() => { k = (k + 1) % LINES.length; show(); }, 5000);
+  })();
+
+  // ---------- Fig. 2: search by meaning, one example at a time ----------
+  (function () {
+    const body = document.getElementById("mean-body");
+    if (!body) return;
+    const EX = [
+      ["tear down containers", "docker compose down -v", "Stop and remove a project's containers"],
+      ["undo my last commit", "git reset --soft HEAD~1", "Move back one commit, keeping the changes"],
+      ["free up docker disk space", "docker system prune -af --volumes", "Remove unused images, containers and volumes"],
+      ["kill whatever is on port 3000", "npx kill-port 3000", "Stop the process holding a port"],
+      ["biggest folders here", "du -sh * | sort -rh | head -20", "Disk usage per folder, largest first"],
+      ["when does the certificate expire", "openssl x509 -in cert.pem -noout -dates", "A certificate's validity dates"],
+      ["clear the dns cache", "ipconfig /flushdns", "Flush the DNS resolver cache"],
+      ["rebuild images without cache", "docker compose build --no-cache", "Build images from scratch"],
+      ["restart the api in kubernetes", "kubectl rollout restart deploy/api -n api", "Restart a deployment's pods"],
+      ["dcoker ps", "docker ps", "A typo: two letters swapped still finds it"],
+    ];
+    const SMALL = new Set(["the", "my", "on", "in", "is", "up", "here", "when", "does", "a", "of", "to", "whatever", "last"]);
+    const words = (s) => s.toLowerCase().split(/[^a-z0-9]+/).filter((w) => w && !SMALL.has(w));
+    const chips = document.getElementById("mean-chips"), count = document.getElementById("mean-n");
+    let k = 0, timer = null, token = 0, visible = false;
+
+    function draw(q, i, showHit) {
+      const [query, cmd, what] = EX[i];
+      const qw = new Set(words(query));
+      const shared = [...new Set(words(cmd).filter((w) => qw.has(w)))];
+      let hit = "";
+      if (showHit) {
+        // the words both share, underlined in the command
+        const marked = esc(cmd).replace(/[A-Za-z0-9]+/g, (w) => (shared.includes(w.toLowerCase()) ? `<span class="shared">${w}</span>` : w));
+        const share = shared.length
+          ? shared.map((w) => `<span class="acc">${esc(w)}</span>`).join(", ") + (i === EX.length - 1 ? "" : ", the rest by meaning")
+          : '<span class="none">none.</span> Found by meaning alone.';
+        hit = `<div class="m-hit fade"><span class="ok">✓</span><span class="cmd">${marked}</span><span class="close">close match</span></div>` +
+          `<dl class="m-facts fade"><dt>shared words</dt><dd>${share}</dd><dt>what it does</dt><dd>${esc(what)}</dd></dl>`;
+      } else {
+        hit = `<div class="m-wait">…</div>`;
+      }
+      body.innerHTML = `<div class="m-query"><span class="p">›</span><span>${esc(q)}</span><span class="caret"></span></div>${hit}`;
+      count.textContent = `${i + 1} of ${EX.length}`;
+      chips.querySelectorAll("button").forEach((b, j) => b.setAttribute("aria-pressed", String(j === i)));
+    }
+
+    function play(i) {
+      const my = ++token;
+      clearTimeout(timer);
+      k = i;
+      const q = EX[i][0];
+      if (reduced) { draw(q, i, true); return; }
+      let n = 0;
+      const type = () => {
+        if (my !== token) return;
+        n++;
+        draw(q.slice(0, n), i, n >= q.length);
+        if (n < q.length) timer = setTimeout(type, 55 + Math.random() * 45);
+        else timer = setTimeout(() => { if (visible) play((i + 1) % EX.length); }, 4800);
+      };
+      draw("", i, false);
+      timer = setTimeout(type, 400);
+    }
+
+    EX.forEach(([q], i) => {
+      const b = document.createElement("button");
+      b.textContent = q;
+      b.addEventListener("click", () => play(i));
+      chips.appendChild(b);
+    });
+    // plays while on screen; starts once you scroll to it
+    draw(EX[0][0], 0, true);
+    if (!reduced && "IntersectionObserver" in window) {
+      new IntersectionObserver((es) => {
+        const was = visible;
+        visible = es[0].isIntersecting;
+        if (visible && !was) play(k);
+        if (!visible) { clearTimeout(timer); token++; }
+      }, { threshold: 0.4 }).observe(body);
+    }
   })();
 
   // ---------- Fig. 3: a command with a blank ----------
