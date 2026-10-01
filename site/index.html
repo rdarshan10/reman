@@ -148,24 +148,31 @@
   }
 
   /* ---------- works-with line ---------- */
-  .works { margin-top: 64px; border-top: 1.5px solid var(--rule); border-bottom: 1.5px solid var(--rule); padding: 16px 0; font: 13px/1.7 var(--mono); color: var(--ink-2); }
+  .works { margin-top: 64px; border-top: 1.5px solid var(--rule); padding: 16px 0 0; font: 13px/1.7 var(--mono); color: var(--ink-2); }
   .works b { color: var(--ink); font-weight: 600; }
 
-  /* ---------- running line: every feature, one line each ---------- */
-  .ticker { padding: 13px 0; border-bottom: 1.5px solid var(--rule); font: 12.5px var(--mono); color: var(--ink-3); }
-  .ticker-fade { overflow: hidden; -webkit-mask-image: linear-gradient(90deg, transparent, #000 6%, #000 94%, transparent); mask-image: linear-gradient(90deg, transparent, #000 6%, #000 94%, transparent); }
-  .ticker-track { display: flex; width: max-content; animation: run 140s linear infinite; }
-  .ticker:hover .ticker-track, .ticker:focus-within .ticker-track { animation-play-state: paused; }
-  .ticker ul { display: flex; list-style: none; margin: 0; padding: 0; }
-  .ticker li { white-space: nowrap; padding-right: 30px; }
-  .ticker li::before { content: ""; display: inline-block; width: 6px; height: 6px; background: var(--signal); margin-right: 12px; vertical-align: .12em; opacity: .75; }
-  .ticker code { background: none; border: 0; padding: 0; color: var(--ink-2); font-size: 1em; }
-  @keyframes run { to { transform: translateX(-50%); } }
+
+  /* ---------- the band: everything it does, drifting in two rows ---------- */
+  .band { background: var(--ink); color: var(--paper); padding: 34px 0 30px; margin-top: 26px; overflow: hidden; }
+  .band-h { text-align: center; font: 400 22px/1.2 var(--serif); color: #d9d5cb; margin: 0 0 22px; }
+  .band-h em { color: var(--signal); }
+  .rows { -webkit-mask-image: linear-gradient(90deg, transparent, #000 9%, #000 91%, transparent); mask-image: linear-gradient(90deg, transparent, #000 9%, #000 91%, transparent); }
+  .row { overflow: hidden; padding: 7px 0; }
+  .row-track { display: flex; width: max-content; animation: drift 120s linear infinite; }
+  .row-track.rev { animation-direction: reverse; animation-duration: 135s; }
+  .band:hover .row-track { animation-play-state: paused; }
+  .row ul { display: flex; list-style: none; margin: 0; padding: 0; }
+  .row li { white-space: nowrap; padding-right: 58px; font: 600 18px/1.4 var(--sans); color: #8f8b82; letter-spacing: -.005em; }
+  .row li code { font: 500 15.5px var(--mono); color: #c4bfb4; background: none; border: 0; padding: 0; }
+  .row li .k { color: var(--signal); font: 600 15.5px var(--mono); }
+  @keyframes drift { to { transform: translateX(-50%); } }
+  @media (max-width: 720px) { .row li { font-size: 15.5px; padding-right: 40px; } .row li code, .row li .k { font-size: 13.5px; } .band-h { font-size: 19px; padding: 0 16px; } }
   @media (prefers-reduced-motion: reduce) {
-    .ticker-fade { -webkit-mask-image: none; mask-image: none; }
-    .ticker-track { animation: none; width: auto; }
-    .ticker ul { flex-wrap: wrap; row-gap: 6px; }
-    .ticker ul + ul { display: none; }
+    .rows { -webkit-mask-image: none; mask-image: none; }
+    .row-track { animation: none; width: auto; }
+    .row ul { flex-wrap: wrap; justify-content: center; row-gap: 8px; padding: 0 16px; }
+    .row li { padding: 0 14px; }
+    .row ul + ul { display: none; }
   }
 
   /* ---------- contents ---------- */
@@ -380,33 +387,42 @@
     <div class="works">
       <b>Connects itself at install</b> to Claude Code, OpenAI Codex CLI, Cursor, VS Code, Windsurf, Gemini CLI, opencode, pi and Claude Desktop. <b>Captures</b> PowerShell, bash, zsh, fish and Command Prompt, and what those agents run.
     </div>
-    <div class="ticker" aria-label="Everything reman does, one line each">
-    <div class="ticker-fade">
-    <div class="ticker-track">
-      <ul id="ticker-list">
-        <li>Describe it, get the command: <code>tear down containers</code> finds <code>docker compose down -v</code></li>
-        <li>Every command's track record, with real exit codes</li>
+  </div>
+</section>
+
+<section class="band" aria-label="Everything reman does, one line each">
+  <p class="band-h">Remembers exactly. Makes <em>absolutely nothing</em> up.</p>
+  <div class="rows">
+    <div class="row"><div class="row-track">
+      <ul class="feat-row">
+        <li><code>tear down containers</code> finds <code>docker compose down -v</code></li>
+        <li>Every command's track record</li>
         <li>Fixes learned from what you ran next</li>
-        <li>Holds a command that's about to fail, before you wait for it</li>
-        <li>Shows what a fix changes: <code>adds --build</code></li>
-        <li><code>Alt+N</code>: the next step, one key away</li>
-        <li>Ten near-copies become one: <code>git commit -m "‹message›"</code></li>
-        <li>Time is a search word: <code>deploy last week</code></li>
-        <li>Knows a build <code>usually takes 3m 12s</code></li>
-        <li>Tells you when the long one finishes</li>
-        <li><code>worked on main, fails on feat/x</code></li>
-        <li>Flaky, not broken</li>
-        <li><code>rcd alembic</code> goes where you ran it</li>
-        <li><code>reman yesterday</code>: your day, by project</li>
-        <li>Tells an agent when it's going in circles</li>
-        <li>MCP for Claude Code, Codex, Cursor and more</li>
-        <li>Secrets masked before anything is saved</li>
-        <li>Every shell, one history</li>
+        <li>Holds a command that's about to fail</li>
+        <li>What the fix changes: <code>adds --build</code></li>
+        <li><span class="k">Alt+N</span> the next step</li>
+        <li><code>git commit -m "‹message›"</code></li>
+        <li><code>deploy last week</code></li>
+        <li><code>usually 3m 12s</code></li>
+        <li>Tells you when the long one is done</li>
         <li>Never invents a command</li>
       </ul>
-    </div>
-    </div>
-    </div>
+    </div></div>
+    <div class="row"><div class="row-track rev">
+      <ul class="feat-row">
+        <li><code>worked on main, fails on feat/x</code></li>
+        <li>Flaky, not broken</li>
+        <li><code>rcd alembic</code></li>
+        <li><code>reman yesterday</code></li>
+        <li>Tells an agent it's going in circles</li>
+        <li>Claude Code · Codex · Cursor · Gemini CLI</li>
+        <li>Last time here, in one line</li>
+        <li>A runbook from what actually worked</li>
+        <li>Secrets masked before saving</li>
+        <li>PowerShell · bash · zsh · fish · cmd</li>
+        <li>Nothing leaves your machine</li>
+      </ul>
+    </div></div>
   </div>
 </section>
 
@@ -1021,15 +1037,12 @@
   }
   play(0);
 
-  // ---------- running line: a second copy makes the loop seamless ----------
-  (function () {
-    const list = document.getElementById("ticker-list");
-    if (!list) return;
-    const copy = list.cloneNode(true);
-    copy.removeAttribute("id");
+  // ---------- the band: a second copy of each row makes the loop seamless ----------
+  document.querySelectorAll(".feat-row").forEach((ul) => {
+    const copy = ul.cloneNode(true);
     copy.setAttribute("aria-hidden", "true");
-    list.parentNode.appendChild(copy);
-  })();
+    ul.parentNode.appendChild(copy);
+  });
 
   // ---------- the name: what reman stands for ----------
   (function () {
