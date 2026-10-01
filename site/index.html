@@ -270,66 +270,11 @@
   .m-facts dd { margin: 0; color: var(--term-fg); }
   .m-facts .none { color: var(--signal); font-weight: 600; }
   .m-wait { color: var(--term-dim); margin-top: 18px; }
-  .mean-list { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); column-gap: 28px; margin: 30px 0 0; padding: 0; list-style: none; border-top: 1.5px solid var(--rule); }
-  .mean-list button { width: 100%; display: flex; align-items: baseline; gap: 10px; padding: 7px 0; border: 0; border-bottom: 1px solid var(--faint); background: none; cursor: pointer; text-align: left; font: italic 400 17px/1.25 var(--serif); color: var(--ink-3); }
-  .mean-list .n { font: 600 11px var(--mono); color: var(--ink-3); width: 18px; flex: none; font-style: normal; }
-  .mean-list button:hover { color: var(--ink); }
-  .mean-list button[aria-pressed="true"] { color: var(--ink); }
-  .mean-list button[aria-pressed="true"] .n { color: var(--signal); }
-  .mean-list button[aria-pressed="true"]::after { content: ""; width: 7px; height: 7px; background: var(--signal); margin-left: auto; align-self: center; flex: none; }
-  .mean-list button:focus-visible { outline: 2px solid var(--signal); outline-offset: 2px; }
-  @media (max-width: 560px) { .mean-list { grid-template-columns: minmax(0, 1fr); } }
+  .mean-chips { margin: 28px 0 0; }
+  .mean-chips button { font-size: 12px; padding: 3px 9px; }
 
-  /* paper figures: the same frame as the terminals, in the page's own colours */
+  /* ---------- an agent's loop, as a conversation ---------- */
   .paper { background: #fbf9f4; border: 1.5px solid var(--ink); box-shadow: 8px 8px 0 var(--ink); padding: 18px 20px; }
-  .paper .lbl { font: 600 11px var(--mono); letter-spacing: .1em; text-transform: uppercase; color: var(--ink-3); }
-
-  /* Fig. 3: fill in the blank */
-  .fib-folded { display: flex; justify-content: space-between; gap: 12px; font: 13.5px var(--mono); padding: 10px 0 14px; border-bottom: 1px solid var(--faint); color: var(--ink-2); }
-  .fib-folded .blank { color: var(--signal); }
-  .fib-line { font: 500 clamp(17px, 2.1vw, 22px)/1.5 var(--mono); margin: 22px 0 6px; color: var(--ink); white-space: nowrap; overflow: hidden; }
-  .fib-line .pr { color: var(--signal); }
-  .fib-line input { font: inherit; color: var(--ink); background: rgba(255, 79, 0, .09); border: 0; border-bottom: 2px solid var(--signal); outline: 0; padding: 0 2px; width: 2ch; caret-color: var(--signal); }
-  .fib-note { font: 12px var(--mono); color: var(--ink-3); min-height: 1.6em; }
-  .fib-note.ok { color: #2f7d45; }
-  .fib-vals { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-top: 16px; font: 12px var(--mono); color: var(--ink-3); }
-  .fib-vals button { font: 12px var(--mono); border: 1.5px solid var(--ink); background: none; padding: 2px 9px; cursor: pointer; color: var(--ink); }
-  .fib-vals button:hover { border-color: var(--signal); }
-  .fib-others { margin-top: 18px; padding-top: 12px; border-top: 1px solid var(--faint); font: 12.5px var(--mono); color: var(--ink-3); display: grid; gap: 4px; }
-  .fib-others .blank { color: var(--signal); }
-
-  /* Fig. 7: what a failure costs, timed */
-  .cost { margin-top: 2px; }
-  .cost-row { display: grid; grid-template-columns: 112px minmax(0, 1fr) 64px; gap: 12px; align-items: center; padding: 10px 0; border-bottom: 1px solid var(--faint); font: 12.5px var(--mono); }
-  .cost-row:last-child { border-bottom: 0; }
-  .cost-row .who { color: var(--ink-2); font-weight: 600; }
-  .cost-bar { height: 20px; background: rgba(20, 20, 20, .06); position: relative; overflow: hidden; }
-  .cost-fill { position: absolute; inset: 0 auto 0 0; width: 0; background: rgba(20, 20, 20, .16); }
-  .cost-fill.bad { background: rgba(194, 65, 12, .3); box-shadow: inset -3px 0 0 #c2410c; }
-  .cost-fill.good { background: rgba(47, 125, 69, .28); box-shadow: inset -3px 0 0 #2f7d45; }
-  .cost-tag { position: absolute; left: 8px; top: 0; line-height: 20px; color: var(--ink); font-size: 11.5px; white-space: nowrap; }
-  .cost-t { text-align: right; color: var(--ink); font-weight: 600; font-variant-numeric: tabular-nums; }
-  .cost-say { margin-top: 12px; font: 12.5px var(--mono); color: var(--ink-2); min-height: 1.5em; }
-
-  /* Fig. 11: yesterday, hour by hour */
-  .day-axis { display: flex; justify-content: space-between; font: 11px var(--mono); color: var(--ink-3); margin: 8px 0 6px; padding-left: 128px; }
-  .day-row { display: grid; grid-template-columns: 116px minmax(0, 1fr); gap: 12px; align-items: center; padding: 12px 0 8px; border-top: 1px solid var(--faint); }
-  .day-row .proj { font: 600 13px var(--mono); }
-  .day-row .proj small { display: block; font-weight: 400; color: var(--ink-3); font-size: 11px; }
-  .day-track { position: relative; height: 26px; background: repeating-linear-gradient(90deg, transparent 0 calc(10% - 1px), var(--faint) calc(10% - 1px) 10%); }
-  .day-block { position: absolute; top: 9px; height: 8px; background: rgba(20, 20, 20, .14); transform-origin: left; transform: scaleX(0); transition: transform .5s ease; }
-  .day-block.on { transform: scaleX(1); }
-  .day-dot { position: absolute; top: 6px; width: 14px; height: 14px; margin-left: -7px; border: 1.5px solid var(--ink); background: #fbf9f4; opacity: 0; transform: scale(.4); transition: opacity .25s, transform .25s; font: 700 9px/11px var(--mono); text-align: center; }
-  .day-dot.on { opacity: 1; transform: none; }
-  .day-dot.ok { color: #2f7d45; } .day-dot.bad { color: #fff; background: #c2410c; border-color: #c2410c; } .day-dot.ag { border-style: dashed; color: var(--ink-3); }
-  .day-sum { grid-column: 2; font: 12px var(--mono); color: var(--ink-2); min-height: 1.5em; opacity: 0; transition: opacity .4s; }
-  .day-sum.on { opacity: 1; }
-  .day-sum .ok { color: #2f7d45; } .day-sum .bad { color: #c2410c; }
-  .day-clock { position: absolute; top: -4px; bottom: -4px; width: 1.5px; background: var(--signal); left: 0; }
-  .day-legend { display: flex; gap: 16px; flex-wrap: wrap; margin-top: 10px; font: 11px var(--mono); color: var(--ink-3); }
-  @media (max-width: 560px) { .day-row { grid-template-columns: minmax(0, 1fr); } .day-sum { grid-column: 1; } .day-axis { padding-left: 0; } }
-
-  /* Fig. 13: a conversation */
   .chat { display: grid; gap: 12px; min-height: 300px; align-content: start; }
   .msg { opacity: 0; transform: translateY(8px); transition: opacity .35s, transform .35s; }
   .msg.on { opacity: 1; transform: none; }
@@ -342,10 +287,6 @@
   .typing { display: inline-flex; gap: 4px; }
   .typing i { width: 6px; height: 6px; background: var(--ink-3); border-radius: 50%; animation: blink 1s infinite; }
   .typing i:nth-child(2) { animation-delay: .2s; } .typing i:nth-child(3) { animation-delay: .4s; }
-
-  /* things a figure reveals one by one (Fig. 10) */
-  .rv { transition: opacity .3s; }
-  .rv.hide { opacity: 0; }
 
   /* ---------- new in 0.2: interactive figures ---------- */
   .new { font: 600 10.5px var(--mono); letter-spacing: .1em; text-transform: uppercase; color: #fff; background: var(--signal); padding: 1px 6px; vertical-align: .35em; margin-left: 8px; }
@@ -544,7 +485,7 @@
         <div class="bar"><span>reman · search by meaning</span><span id="mean-n"></span></div>
         <div class="body" id="mean-body"></div>
       </div>
-      <ol class="mean-list" id="mean-chips" aria-label="Pick what to type"></ol>
+      <div class="chips mean-chips" id="mean-chips" role="group" aria-label="Pick what to type"></div>
       <figcaption><b>Fig. 2</b><span>Ten things people type, and the command reman ranks first, marked a close match. From a sample history of about 70 everyday commands and 250 scripts from coding agents, checked on every change by <a href="https://github.com/rdarshan10/reman/blob/master/rust/e2e/search_quality.py">a test</a>. reman only ever returns commands you have run.</span></figcaption>
     </figure>
   </div>
@@ -564,16 +505,11 @@
       </ul>
     </div>
     <figure>
-      <div class="paper" id="fib">
-        <div class="lbl">In the finder: 38 commits, folded into one</div>
-        <div class="fib-folded"><span>✓ git commit -m "<span class="blank">‹message›</span>"</span><span id="fib-count">38×</span></div>
-        <div class="lbl" style="margin-top:18px">Enter puts it on your prompt, the cursor in the blank</div>
-        <div class="fib-line"><span class="pr">PS&gt; </span>git commit -m "<input id="fib-in" aria-label="Commit message: type into the blank, then Enter" spellcheck="false" maxlength="30">"</div>
-        <div class="fib-note" id="fib-note">&nbsp;</div>
-        <div class="fib-vals">went in the blank lately: <button data-v="fix login">fix login</button><button data-v="wip">wip</button><button data-v="bump deps">bump deps</button></div>
-        <div class="fib-others"><span>also folded here</span><span>kubectl logs <span class="blank">‹name›</span> -n prod · 12×</span><span>cd <span class="blank">‹folder›</span> · 90×</span></div>
+      <div class="term">
+        <div class="bar"><span>reman · ~/work/api</span><span>try it</span></div>
+        <div class="body" id="blank-body"></div>
       </div>
-      <figcaption><b>Fig. 3</b><span>It fills itself in. Click the blank and type your own; Enter runs it.</span></figcaption>
+      <figcaption><b>Fig. 3</b><span>Thirty-eight commits with thirty-eight messages, one line in the finder. Press Enter and type into the blank.</span></figcaption>
     </figure>
   </div>
 </section>
@@ -654,26 +590,13 @@
         <li>One exact lookup on Enter, about 3 ms; never while you type. PowerShell, zsh and fish.</li>
       </ul>
     </div>
-    <div class="figs">
     <figure>
       <div class="term">
         <div class="bar"><span>powershell · ~/work/api</span><span>you pressed Enter once</span></div>
 <div class="body wraps"><div class="t-row"><span class="acc">PS&gt; </span><span>docker compose up</span></div><div class="t-row"><span class="str">  reman: this failed the last 3 times here, after about 2m each time (it worked 14 times before that)</span></div><div class="t-row"><span class="mut">         last error: pull access denied for api, repository does not exist</span></div><div class="t-row"><span class="mut">  reman: worked instead -&gt; </span><span class="info">docker compose up --build</span><span class="mut">   (adds --build; Alt+F inserts)</span></div><div class="t-row"><span class="mut">  Enter again runs it anyway</span></div><div class="t-row"><span class="acc">PS&gt; </span><span>docker compose up</span><span class="caret" style="margin-left:2px"></span></div></div>
       </div>
-      <figcaption><b>Fig. 7</b><span>Held once, with your line kept on a fresh prompt, and the fix one key away.</span></figcaption>
+      <figcaption><b>Fig. 7</b><span>Held once, with your line kept on a fresh prompt: two minutes saved, and the fix one key away.</span></figcaption>
     </figure>
-    <figure>
-      <div class="paper" id="cost">
-        <div class="lbl">The fourth time, by the clock</div>
-        <div class="cost">
-          <div class="cost-row"><span class="who">without reman</span><div class="cost-bar"><div class="cost-fill" id="cost-a"></div><span class="cost-tag" id="cost-a-tag"></span></div><span class="cost-t" id="cost-a-t">0:00</span></div>
-          <div class="cost-row"><span class="who">with reman</span><div class="cost-bar"><div class="cost-fill" id="cost-b"></div><span class="cost-tag" id="cost-b-tag"></span></div><span class="cost-t" id="cost-b-t">0:00</span></div>
-        </div>
-        <div class="cost-say" id="cost-say">&nbsp;</div>
-      </div>
-      <figcaption><b>Fig. 8</b><span>The same Enter, twice. One waits two minutes for a failure it could have known; the other is stopped at once and runs the fix.</span></figcaption>
-    </figure>
-    </div>
   </div>
 </section>
 
@@ -696,7 +619,7 @@
         <div class="bar"><span>powershell · ~/work/api</span><span></span></div>
 <div class="body wraps"><div class="t-row"><span class="acc">PS&gt; </span><span>git push</span></div><div class="t-row"><span class="bad">fatal: The current branch feat/search has no upstream branch.</span></div><div class="t-row"><span class="mut">  reman: last time this failed you ran -&gt; </span><span class="info">git push --set-upstream origin feat/search</span></div><div class="t-row"><span class="mut">  (adds --set-upstream origin feat/search; Alt+F inserts)</span></div><div class="t-row"><span class="acc">PS&gt; </span><span>git push --set-upstream origin feat/search</span><span class="caret" style="margin-left:2px"></span></div><div class="t-row"> </div><div class="t-row"><span class="acc">PS&gt; </span><span>gti status</span></div><div class="t-row"><span class="bad">gti : The term 'gti' is not recognized as the name of a cmdlet</span></div><div class="t-row"><span class="mut">  reman: did you mean -&gt; </span><span class="info">git status</span><span class="mut">   (gti → git; Alt+F inserts)</span></div></div>
       </div>
-      <figcaption><b>Fig. 9</b><span>The first fix was learned from what was run right after the same failure; the second is a typo of a command you run every day.</span></figcaption>
+      <figcaption><b>Fig. 8</b><span>The first fix was learned from what was run right after the same failure; the second is a typo of a command you run every day.</span></figcaption>
     </figure>
   </div>
 </section>
@@ -720,7 +643,7 @@
         <div class="body wraps" id="altn-body"></div>
       </div>
       <div class="t-actions"><button class="keybtn" id="altn-btn"><kbd>Alt</kbd> + <kbd>N</kbd></button><span class="mut" id="altn-hint" style="font:12px var(--mono);color:var(--ink-3)">press it a few times</span></div>
-      <figcaption><b>Fig. 10</b><span>After <code>docker compose up -d</code>, three ideas in order: the flow's next step, what usually follows, what you often run here.</span></figcaption>
+      <figcaption><b>Fig. 9</b><span>After <code>docker compose up -d</code>, three ideas in order: the flow's next step, what usually follows, what you often run here.</span></figcaption>
     </figure>
   </div>
 </section>
@@ -739,16 +662,16 @@
       </ul>
     </div>
     <figure>
-      <div class="lanes" id="lanes" role="img" aria-label="npm test passed four times on main, then failed twice on feat/x">
-        <div class="lane"><span class="name">main</span><div class="track"><span class="run ok rv" style="left:6%">✓</span><span class="run ok rv" style="left:20%">✓</span><span class="run ok rv" style="left:34%">✓</span><span class="run ok rv" style="left:48%">✓</span></div></div>
-        <div class="lane"><span class="name">feat/x</span><div class="track" style="background:linear-gradient(90deg,transparent 52%,var(--ink-3) 52%)"><span class="run bad rv" style="left:72%">✗</span><span class="run bad rv" style="left:90%">✗</span></div></div>
-        <div class="lane-note rv"><code style="background:none;border:0;padding:0">npm test</code> worked here 4 times, last 2 days ago; <span class="acc">it worked on main, you're on feat/x now</span>. <span style="color:var(--ink-3)">Compare them: git diff main...feat/x</span></div>
+      <div class="lanes" role="img" aria-label="npm test passed four times on main, then failed twice on feat/x">
+        <div class="lane"><span class="name">main</span><div class="track"><span class="run ok" style="left:6%">✓</span><span class="run ok" style="left:20%">✓</span><span class="run ok" style="left:34%">✓</span><span class="run ok" style="left:48%">✓</span></div></div>
+        <div class="lane"><span class="name">feat/x</span><div class="track" style="background:linear-gradient(90deg,transparent 52%,var(--ink-3) 52%)"><span class="run bad" style="left:72%">✗</span><span class="run bad" style="left:90%">✗</span></div></div>
+        <div class="lane-note"><code style="background:none;border:0;padding:0">npm test</code> worked here 4 times, last 2 days ago; <span class="acc">it worked on main, you're on feat/x now</span>. <span style="color:var(--ink-3)">Compare them: git diff main...feat/x</span></div>
       </div>
       <div class="strips">
-        <div class="runs-strip"><span class="label">flaky</span><span class="cells" aria-label="worked, worked, failed, worked, worked, failed, worked, failed, worked"><i class="c ok rv">✓</i><i class="c ok rv">✓</i><i class="c bad rv">✗</i><i class="c ok rv">✓</i><i class="c ok rv">✓</i><i class="c bad rv">✗</i><i class="c ok rv">✓</i><i class="c bad rv">✗</i><i class="c ok rv">✓</i></span><span class="verdict rv">flips six times, nothing changed in between: "flaky here, try it again"</span></div>
-        <div class="runs-strip"><span class="label">a normal day</span><span class="cells" aria-label="failed three times, worked three times, failed, worked twice"><i class="c bad rv">✗</i><i class="c bad rv">✗</i><i class="c bad rv">✗</i><i class="c ok rv">✓</i><i class="c ok rv">✓</i><i class="c ok rv">✓</i><i class="c bad rv">✗</i><i class="c ok rv">✓</i><i class="c ok rv">✓</i></span><span class="verdict rv">broken, fixed, broken, fixed: you editing code, not flaky</span></div>
+        <div class="runs-strip"><span class="label">flaky</span><span class="cells" aria-label="worked, worked, failed, worked, worked, failed, worked, failed, worked"><i class="c ok">✓</i><i class="c ok">✓</i><i class="c bad">✗</i><i class="c ok">✓</i><i class="c ok">✓</i><i class="c bad">✗</i><i class="c ok">✓</i><i class="c bad">✗</i><i class="c ok">✓</i></span><span class="verdict">flips six times, nothing changed in between: "flaky here, try it again"</span></div>
+        <div class="runs-strip"><span class="label">a normal day</span><span class="cells" aria-label="failed three times, worked three times, failed, worked twice"><i class="c bad">✗</i><i class="c bad">✗</i><i class="c bad">✗</i><i class="c ok">✓</i><i class="c ok">✓</i><i class="c ok">✓</i><i class="c bad">✗</i><i class="c ok">✓</i><i class="c ok">✓</i></span><span class="verdict">broken, fixed, broken, fixed: you editing code, not flaky</span></div>
       </div>
-      <figcaption><b>Fig. 11</b><span>Above, the same test on two branches. Below, two run histories that look alike and aren't.</span></figcaption>
+      <figcaption><b>Fig. 10</b><span>Above, the same test on two branches. Below, two run histories that look alike and aren't.</span></figcaption>
     </figure>
   </div>
 </section>
@@ -767,27 +690,13 @@
         <li><b>Runbook.</b> <code>reman runbook</code> writes how the project is run, by task, from the commands that worked. A local model (Ollama, LM Studio) can arrange and explain it; it never invents a command.</li>
       </ul>
     </div>
-    <div class="figs">
     <figure>
       <div class="term">
         <div class="bar"><span>powershell</span><span></span></div>
-<div class="body wraps"><div class="t-row"><span class="acc">PS C:\&gt; </span><span>rcd alembic</span></div><div class="t-row"><span class="info">→ </span><span>D:\work\planet_naidu_api</span><span class="mut">   (alembic upgrade head, 2 days ago)</span></div><div class="t-row"><span class="mut">  reman: last time here (2 days ago): </span><span class="info">docker compose up -d → alembic upgrade head → pytest -q</span></div><div class="t-row"><span class="acc">PS D:\work\planet_naidu_api&gt; </span><span>reman yesterday</span><span class="caret" style="margin-left:2px"></span></div></div>
+<div class="body wraps"><div class="t-row"><span class="acc">PS C:\&gt; </span><span>rcd alembic</span></div><div class="t-row"><span class="info">→ </span><span>D:\work\planet_naidu_api</span><span class="mut">   (alembic upgrade head, 2 days ago)</span></div><div class="t-row"><span class="mut">  reman: last time here (2 days ago): </span><span class="info">docker compose up -d → alembic upgrade head → pytest -q</span></div><div class="t-row"><span class="acc">PS D:\work\planet_naidu_api&gt; </span><span>reman yesterday</span></div><div class="t-row"><span class="w">Yesterday</span><span class="mut">, 9:12 to 18:40</span></div><div class="t-row"> </div><div class="t-row"><span class="w">planet_naidu_api</span><span class="mut">  (main)   9:12 to 12:30</span></div><div class="t-row"><span>  docker compose up -d → alembic upgrade head → pytest -q (4x)</span></div><div class="t-row"><span class="bad">  ✗ </span><span>docker compose up  →  </span><span class="ok">✓ </span><span>docker compose up --build</span><span class="mut">   (fixed)</span></div><div class="t-row"><span class="mut">  claude-code ran 38 commands here (3 failed)</span></div><div class="t-row"> </div><div class="t-row"><span class="w">web-shop</span><span class="mut">  (feat/cart)   14:05 to 18:40</span></div><div class="t-row"><span>  npm run dev → npm test (3x)</span></div><div class="t-row"><span class="bad">  ✗ </span><span>npm run lint</span><span class="str">   still failing</span><span class="mut"> (2 failures)</span></div></div>
       </div>
-      <figcaption><b>Fig. 12</b><span>Jump to a project by what you did there.</span></figcaption>
+      <figcaption><b>Fig. 11</b><span>Jump to a project by what you did there, and the day before, told back to you.</span></figcaption>
     </figure>
-    <figure>
-      <div class="paper" id="day">
-        <div class="lbl">reman yesterday</div>
-        <div class="day-axis"><span>9:00</span><span>11:00</span><span>13:00</span><span>15:00</span><span>17:00</span><span>19:00</span></div>
-        <div class="day-row"><div class="proj">planet_naidu_api<small>main · 9:12 to 12:30</small></div><div class="day-track" id="day-a"></div>
-          <div class="day-sum" id="day-a-sum"><span class="bad">✗</span> docker compose up → <span class="ok">✓</span> docker compose up --build (fixed) · claude-code ran 38 here, 3 failed</div></div>
-        <div class="day-row"><div class="proj">web-shop<small>feat/cart · 14:05 to 18:40</small></div><div class="day-track" id="day-b"></div>
-          <div class="day-sum" id="day-b-sum">npm run dev → npm test (3x) · <span class="bad">✗</span> npm run lint, still failing</div></div>
-        <div class="day-legend"><span>✓ worked</span><span>✗ failed</span><span>dashed: an agent ran it</span></div>
-      </div>
-      <figcaption><b>Fig. 13</b><span>Your yesterday, replayed: every run in its hour, failures with what fixed them, and what agents did.</span></figcaption>
-    </figure>
-    </div>
   </div>
 </section>
 
@@ -822,7 +731,7 @@
   <span class="str">"last_run"</span>: <span class="ok">"6d ago"</span>
 }]</pre>
       </div>
-      <figcaption><b>Fig. 14</b><span>What an agent gets back: a real command, with its record.</span></figcaption>
+      <figcaption><b>Fig. 12</b><span>What an agent gets back: a real command, with its record.</span></figcaption>
     </figure>
     <figure>
       <div class="paper chat" id="chat">
@@ -831,7 +740,7 @@
         <div class="msg" id="chat-typing"><div class="who">Claude</div><div class="box"><span class="typing"><i></i><i></i><i></i></span></div></div>
         <div class="msg"><div class="who">Claude</div><div class="box">Building again won't help. Let me find where <code>cfg</code> is defined first.</div></div>
       </div>
-      <figcaption><b>Fig. 15</b><span>The loop is broken from inside: the note arrives in Claude's own context, next to the error.</span></figcaption>
+      <figcaption><b>Fig. 13</b><span>The loop is broken from inside: the note arrives in Claude's own context, next to the error.</span></figcaption>
     </figure>
     </div>
   </div>
@@ -1234,12 +1143,10 @@
     }
 
     EX.forEach(([q], i) => {
-      const li = document.createElement("li");
       const b = document.createElement("button");
-      b.innerHTML = `<span class="n">${String(i + 1).padStart(2, "0")}</span><span>“${esc(q)}”</span>`;
+      b.textContent = q;
       b.addEventListener("click", () => play(i));
-      li.appendChild(b);
-      chips.appendChild(li);
+      chips.appendChild(b);
     });
     // plays while on screen; starts once you scroll to it
     draw(EX[0][0], 0, true);
@@ -1253,180 +1160,80 @@
     }
   })();
 
-  // ---------- live figures: each plays while it's on screen, loops, and rests when it's not.
-  // With reduced motion, `run(true)` draws the finished picture once.
-  function onScreen(el, run, rest) {
-    if (!el) return;
-    if (reduced || !("IntersectionObserver" in window)) { run(true); return; }
-    let on = false;
-    new IntersectionObserver((es) => {
-      const v = es[0].isIntersecting;
-      if (v && !on) run(false);
-      if (!v && on && rest) rest();
-      on = v;
-    }, { threshold: 0.3 }).observe(el);
-  }
-  const later = (ms) => new Promise((r) => setTimeout(r, ms));
-
-  // ---------- Fig. 3: fill in the blank ----------
-  (function () {
-    const box = document.getElementById("fib");
-    if (!box) return;
-    const inp = document.getElementById("fib-in"), note = document.getElementById("fib-note"), count = document.getElementById("fib-count");
-    const VALUES = ["fix login", "wip", "bump deps"];
-    let n = 38, mine = false, gen = 0;
-    const size = () => { inp.style.width = Math.max(2, inp.value.length + 1) + "ch"; };
-    const ran = (msg) => {
-      n++;
-      count.textContent = n + "×";
-      note.className = "fib-note ok";
-      note.textContent = `✓ ran git commit -m "${msg}", and it joins the ${n}`;
-    };
-    async function demo(g) {
-      for (let k = 0; g === gen && !mine; k = (k + 1) % VALUES.length) {
-        inp.value = ""; size(); note.className = "fib-note"; note.innerHTML = "&nbsp;";
-        await later(900);
-        for (const ch of VALUES[k]) {
-          if (g !== gen || mine) return;
-          inp.value += ch; size();
-          await later(90 + Math.random() * 70);
-        }
-        await later(500);
-        if (g !== gen || mine) return;
-        ran(VALUES[k]);
-        await later(2600);
-      }
-    }
-    // the person takes over
-    const take = () => { if (!mine) { mine = true; gen++; inp.value = ""; size(); note.className = "fib-note"; note.textContent = "your turn: type, then Enter"; } };
-    inp.addEventListener("focus", take);
-    inp.addEventListener("input", () => { take(); size(); });
-    inp.addEventListener("keydown", (e) => {
-      if (e.key === "Enter") { e.preventDefault(); ran(inp.value.trim() || "wip"); inp.value = ""; size(); }
-    });
-    box.querySelectorAll("[data-v]").forEach((b) => b.addEventListener("click", () => { take(); inp.value = b.dataset.v; size(); inp.focus(); }));
-    size();
-    onScreen(box, (still) => {
-      if (still) { inp.value = "fix login"; size(); return; }
-      if (!mine) demo(++gen);
-    }, () => { if (!mine) gen++; });
-  })();
-
-  // ---------- Fig. 7: what a failure costs, timed ----------
-  (function () {
-    const box = document.getElementById("cost");
-    if (!box) return;
-    const $ = (id) => document.getElementById(id);
-    const A = $("cost-a"), B = $("cost-b"), At = $("cost-a-t"), Bt = $("cost-b-t"), Ag = $("cost-a-tag"), Bg = $("cost-b-tag"), say = $("cost-say");
-    const FULL = 130, FIX = 100; // seconds: the failing run, and the fix's run
-    const clock = (s) => `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, "0")}`;
-    let gen = 0;
-    function paint(t) {
-      // t: seconds of the story, sped up
-      A.className = "cost-fill" + (t >= FULL ? " bad" : "");
-      A.style.width = Math.min(100, (t / FULL) * 100) + "%";
-      At.textContent = clock(Math.min(t, FULL));
-      Ag.textContent = t >= FULL ? "✗ failed, like the last 3 times" : "docker compose up …";
-      // with reman: held at once, then the fix runs and works
-      const fix = Math.max(0, Math.min(t - 2, FIX));
-      B.className = "cost-fill" + (t >= FIX + 2 ? " good" : "");
-      B.style.width = Math.max(2.5, (fix / FULL) * 100) + "%";
-      Bt.textContent = t < 2 ? "0:00" : clock(Math.min(fix, FIX));
-      Bg.textContent = t < 2 ? "held at Enter, in 3 ms" : t >= FIX + 2 ? "✓ docker compose up --build worked" : "Alt+F: docker compose up --build …";
-      say.textContent = t >= FULL ? "Without reman: two minutes, then the same failure. With reman: done in 1:40, with the fix." : "";
-    }
-    async function play(g) {
-      while (g === gen) {
-        for (let t = 0; t <= FULL && g === gen; t += 1.6) { paint(t); await later(40); }
-        await later(3800);
-      }
-    }
-    onScreen(box, (still) => (still ? paint(FULL) : play(++gen)), () => gen++);
-  })();
-
-  // ---------- Fig. 10: runs appear in order ----------
-  (function () {
-    const box = document.getElementById("lanes");
-    if (!box) return;
-    const fig = box.closest("figure");
-    const items = [...fig.querySelectorAll(".rv")];
-    let gen = 0;
-    async function play(g) {
-      items.forEach((e) => e.classList.add("hide"));
-      for (const e of items) {
-        if (g !== gen) return;
-        await later(e.classList.contains("verdict") || e.classList.contains("lane-note") ? 500 : 170);
-        e.classList.remove("hide");
-      }
-    }
-    onScreen(fig, (still) => (still ? null : play(++gen)), () => gen++);
-  })();
-
-  // ---------- Fig. 11: yesterday, hour by hour ----------
-  (function () {
-    const box = document.getElementById("day");
-    if (!box) return;
-    const at = (h, m) => (((h - 9) * 60 + m) / 600) * 100;
-    // [hour, minute, ok | bad | agent]
-    const ROWS = [
-      { track: "day-a", sum: "day-a-sum", from: [9, 12], to: [12, 30],
-        runs: [[9, 12, "ok"], [9, 45, "bad"], [10, 15, "ok"], [10, 50, "ag"], [11, 25, "ag"], [12, 0, "ag"], [12, 30, "ok"]] },
-      { track: "day-b", sum: "day-b-sum", from: [14, 5], to: [18, 40],
-        runs: [[14, 5, "ok"], [15, 0, "ok"], [16, 10, "bad"], [16, 40, "ok"], [17, 30, "ok"], [18, 40, "bad"]] },
-    ];
-    const MARK = { ok: "✓", bad: "✗", ag: "" };
-    ROWS.forEach((r) => {
-      const t = document.getElementById(r.track);
-      t.innerHTML = `<span class="day-block" style="left:${at(...r.from)}%;width:${at(...r.to) - at(...r.from)}%"></span>` +
-        r.runs.map(([h, m, k]) => `<span class="day-dot ${k}" data-t="${at(h, m)}" style="left:${at(h, m)}%">${MARK[k]}</span>`).join("");
-    });
-    const tracks = ROWS.map((r) => document.getElementById(r.track));
-    const clocks = tracks.map((t) => { const c = document.createElement("span"); c.className = "day-clock"; t.appendChild(c); return c; });
-    let gen = 0;
-    function paint(p) {
-      ROWS.forEach((r, i) => {
-        const t = tracks[i];
-        clocks[i].style.left = p + "%";
-        clocks[i].style.display = p >= 100 ? "none" : "";
-        t.querySelector(".day-block").classList.toggle("on", p >= at(...r.from));
-        t.querySelectorAll(".day-dot").forEach((d) => d.classList.toggle("on", p >= +d.dataset.t));
-        document.getElementById(r.sum).classList.toggle("on", p >= at(...r.to));
-      });
-    }
-    async function play(g) {
-      while (g === gen) {
-        for (let p = 0; p <= 100 && g === gen; p += 0.6) { paint(p); await later(40); }
-        paint(100);
-        await later(4500);
-      }
-    }
-    onScreen(box, (still) => (still ? paint(100) : play(++gen)), () => gen++);
-  })();
-
-  // ---------- Fig. 13: the conversation, as it happens ----------
+  // ---------- an agent's loop, as it happens: plays while on screen, still with reduced motion ----------
   (function () {
     const box = document.getElementById("chat");
     if (!box) return;
     const msgs = [...box.querySelectorAll(".msg")];
     const typing = document.getElementById("chat-typing");
-    let gen = 0;
-    const show = (i, on) => msgs[i].classList.toggle("on", on);
+    const later = (ms) => new Promise((r) => setTimeout(r, ms));
+    const still = () => { typing.style.display = "none"; msgs.forEach((m) => m.classList.add("on")); };
+    if (reduced || !("IntersectionObserver" in window)) { still(); return; }
+    let gen = 0, on = false;
     async function play(g) {
       while (g === gen) {
         msgs.forEach((m) => m.classList.remove("on"));
         typing.style.display = "";
-        const steps = [[0, 700], [1, 1500], [2, 1100]];
-        for (const [i, wait] of steps) { await later(wait); if (g !== gen) return; show(i, true); }
+        for (const [i, wait] of [[0, 700], [1, 1500], [2, 1100]]) { await later(wait); if (g !== gen) return; msgs[i].classList.add("on"); }
         await later(1400); if (g !== gen) return;
         typing.style.display = "none";
-        show(3, true);
+        msgs[3].classList.add("on");
         await later(5200);
       }
     }
-    onScreen(box, (still) => {
-      if (still) { typing.style.display = "none"; msgs.forEach((m) => m.classList.add("on")); return; }
-      play(++gen);
-    }, () => gen++);
+    new IntersectionObserver((es) => {
+      const v = es[0].isIntersecting;
+      if (v && !on) play(++gen);
+      if (!v && on) gen++;
+      on = v;
+    }, { threshold: 0.3 }).observe(box);
+  })();
+
+  // ---------- Fig. 3: a command with a blank ----------
+  (function () {
+    const body = document.getElementById("blank-body");
+    if (!body) return;
+    const VALUES = ["fix login", "wip", "bump deps"];
+    const B = (k) => `<span class="blank">‹${k}›</span>`;
+    function finder() {
+      body.innerHTML =
+        `<div class="t-row"><span class="t-head">   in this folder </span><span class="t-rule">${"─".repeat(60)}</span></div>` +
+        `<div class="t-row t-sel"><span class="ok">✓ </span><span class="t-cmd">git commit -m "${B("message")}"</span><span class="t-meta">38×   1h</span></div>` +
+        `<div class="t-row"><span class="ok">✓ </span><span class="t-cmd">kubectl logs ${B("name")} -n prod</span><span class="t-meta">12×   3d</span></div>` +
+        `<div class="t-row"><span class="ok">✓ </span><span class="t-cmd">cd ${B("folder")}</span><span class="t-meta">90×   2m</span></div>` +
+        `<div class="t-row"> </div>` +
+        `<div class="t-row"><span class="info">38 variants</span><span class="mut"> · recent: "fix login", "wip", "bump deps"</span></div>` +
+        `<div class="t-query"><span class="p">›</span><span>git commit</span><span class="caret"></span></div>` +
+        `<div class="t-actions"><button class="fillbtn" id="blank-enter">Enter ↵</button><span class="mut">puts it on your prompt</span></div>`;
+      document.getElementById("blank-enter").addEventListener("click", prompt);
+    }
+    function prompt() {
+      body.innerHTML =
+        `<div class="t-row"><span class="acc">PS&gt; </span><span>git commit -m "</span><span class="fill"><input id="blank-in" aria-label="Commit message: type into the blank" placeholder="type here" spellcheck="false" maxlength="40"></span><span>"</span></div>` +
+        `<div class="t-row"> </div>` +
+        `<div class="t-row"><span class="mut">went in the blank lately:&nbsp;</span><span class="vals">${VALUES.map((v) => `<button data-v="${v}">${v}</button>`).join("")}</span></div>` +
+        `<div class="t-actions"><span class="mut">Enter runs it · Esc starts over</span></div>`;
+      const inp = document.getElementById("blank-in");
+      const size = () => { inp.style.width = (inp.value ? inp.value.length + 1 : 10) + "ch"; };
+      size();
+      inp.addEventListener("input", size);
+      inp.addEventListener("keydown", (e) => {
+        if (e.key === "Enter") { e.preventDefault(); ran(inp.value.trim() || "wip"); }
+        if (e.key === "Escape") { e.preventDefault(); finder(); }
+      });
+      body.querySelectorAll("[data-v]").forEach((b) => b.addEventListener("click", () => { inp.value = b.dataset.v; size(); inp.focus(); }));
+      inp.focus({ preventScroll: true });
+    }
+    function ran(msg) {
+      body.innerHTML =
+        `<div class="t-row"><span class="acc">PS&gt; </span><span>git commit -m "${esc(msg)}"</span></div>` +
+        `<div class="t-row"><span>[main 3f2a91c] ${esc(msg)}</span></div>` +
+        `<div class="t-row"><span class="mut"> 2 files changed, 14 insertions(+), 3 deletions(-)</span></div>` +
+        `<div class="t-row"><span class="acc">PS&gt; </span><span class="caret"></span></div>` +
+        `<div class="t-actions"><button class="fillbtn" id="blank-again">Again</button></div>`;
+      document.getElementById("blank-again").addEventListener("click", finder);
+    }
+    finder();
   })();
 
   // ---------- Fig. 4: time is a search word ----------
