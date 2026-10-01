@@ -258,7 +258,7 @@
   .colophon a:hover { color: var(--signal); }
 
   /* ---------- Fig. 2: search by meaning, one example at a time ---------- */
-  #mean .body { min-height: 236px; display: flex; flex-direction: column; }
+  #mean .body { min-height: 200px; display: flex; flex-direction: column; }
   .m-query { display: flex; gap: 10px; font-size: 15px; }
   .m-query .p { color: var(--signal); }
   .m-hit { margin: 18px -18px 0; padding: 9px 18px; background: var(--t-sel); box-shadow: inset 3px 0 0 var(--signal); display: flex; gap: 10px; align-items: baseline; flex-wrap: wrap; }
@@ -269,9 +269,12 @@
   .m-facts dt { color: var(--term-dim); }
   .m-facts dd { margin: 0; color: var(--term-fg); }
   .m-facts .none { color: var(--signal); font-weight: 600; }
-  .m-wait { color: var(--term-dim); margin-top: 18px; }
-  .mean-chips { margin: 28px 0 0; }
-  .mean-chips button { font-size: 12px; padding: 3px 9px; }
+  .m-hit { min-height: 44px; }
+  .m-ghost { background: rgba(255, 255, 255, .03); box-shadow: inset 3px 0 0 #3a3936; align-items: center; }
+  .sk { display: inline-block; height: 9px; background: #2f2e2b; vertical-align: middle; animation: pulse 1.3s ease-in-out infinite; }
+  @keyframes pulse { 50% { opacity: .4; } }
+  .chips.mean-chips { margin: 30px 0 0; gap: 8px; }
+  .chips.mean-chips button { font-size: 12px; padding: 3px 9px; }
 
   /* ---------- an agent's loop, as a conversation ---------- */
   .paper { background: #fbf9f4; border: 1.5px solid var(--ink); box-shadow: 8px 8px 0 var(--ink); padding: 18px 20px; }
@@ -348,7 +351,7 @@
   @keyframes slidein { from { opacity: 0; transform: translateY(14px); } }
   .figs { display: grid; gap: 34px; min-width: 0; }
 
-  @media (prefers-reduced-motion: reduce) { .caret, .bitmap .cur { animation: none; } .fade, .toast, .tw-list .t-row { animation: none; } .strip .day { transition: none; } html { scroll-behavior: auto; } }
+  @media (prefers-reduced-motion: reduce) { .caret, .bitmap .cur, .sk { animation: none; } .fade, .toast, .tw-list .t-row { animation: none; } .strip .day { transition: none; } html { scroll-behavior: auto; } }
   @media (max-width: 560px) { .runs-strip { grid-template-columns: minmax(0, 1fr); } .runs-strip .verdict { grid-column: 1; margin-top: 0; } .strip .day { min-height: 76px; } .strip .day .d { font-size: 9px; } }
 </style>
 </head>
@@ -1117,7 +1120,9 @@
         hit = `<div class="m-hit fade"><span class="ok">✓</span><span class="cmd">${marked}</span><span class="close">close match</span></div>` +
           `<dl class="m-facts fade"><dt>shared words</dt><dd>${share}</dd><dt>what it does</dt><dd>${esc(what)}</dd></dl>`;
       } else {
-        hit = `<div class="m-wait">…</div>`;
+        // while it types: the shape of the answer, so the figure keeps its height
+        hit = `<div class="m-hit m-ghost"><span class="sk" style="width:58%"></span></div>` +
+          `<dl class="m-facts"><dt>shared words</dt><dd><span class="sk" style="width:34%"></span></dd><dt>what it does</dt><dd><span class="sk" style="width:66%"></span></dd></dl>`;
       }
       body.innerHTML = `<div class="m-query"><span class="p">›</span><span>${esc(q)}</span><span class="caret"></span></div>${hit}`;
       count.textContent = `${i + 1} of ${EX.length}`;
