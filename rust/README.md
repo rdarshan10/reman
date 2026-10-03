@@ -98,6 +98,8 @@ Each tab keeps its own query, so switching tabs never carries "run migrations" i
 | `F1` | all keys |
 | `Esc` | back (out of an open flow) / close |
 
+**Your own keys.** Every key above, and the shell's (↑, Ctrl+R, Tab, Alt+F, Alt+N, Enter), can be changed or turned off in `reman settings` (Keys) or with `reman keys set <action> <key>` / `off`; `reman keys` lists the actions. A preset is the starting point: *standard* (these), *gentle* (reman leaves ↑, Tab and Enter to the shell) or *vim*. The map is `key_preset` and `keys` in config.json (`"keys": {"find_all": ["Alt+J"], "find_here": []}`); `reman init` writes it in each shell's own key syntax, and an open PowerShell takes a change at its next prompt.
+
 **Vim keys** (`reman settings`, Finder): typing works as usual until `Esc`, which turns on normal mode (an `N` where the prompt mark was). There `j` / `k` move, `h` / `l` change the folder scope, `G` goes back to the nearest result, `dd` forgets (in `Ctrl+O`, one run), `i`, `a` or `/` type again, `c` clears the query to type anew, and `q` or `Esc` closes.
 
 What never gets offered back:

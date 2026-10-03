@@ -58,6 +58,12 @@ pub struct Settings {
     /// shells open inside `reman shell` (so what your commands print is kept too)
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub shell_layer: bool,
+    /// reman's keys: a preset (standard, gentle, vim; absent = standard) ...
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key_preset: Option<String>,
+    /// ... and the actions the user changed: action -> keys (`"runs": ["Ctrl+E"]`; [] = off). See keys.rs
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub keys: std::collections::BTreeMap<String, Vec<String>>,
 }
 
 impl Settings {

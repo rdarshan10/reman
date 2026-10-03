@@ -88,7 +88,7 @@ __reman_accept() {
       __reman_field "$reply" error && print -P -- "%F{8}         last error: ${REPLY//\%/%%}%f"
       if __reman_field "$reply" fix; then
         __reman_fix=$REPLY
-        local how="Alt-F inserts"
+        local how="__FIX_HINT__"
         __reman_field "$reply" diff && how="$REPLY; $how"
         print -P -- "%F{8}  reman: worked instead -> %F{6}${__reman_fix//\%/%%}%F{8}   (${how//\%/%%})%f"
       fi
@@ -100,7 +100,6 @@ __reman_accept() {
   zle accept-line
 }
 zle -N __reman_accept
-bindkey '^M' __reman_accept
 
 # Alt-N on an empty line: what you'd run next here, ready to edit (Alt-N again: the next idea, up
 # to 3). With other text typed, what Alt-N did before reman.
@@ -126,12 +125,9 @@ __reman_nextup() {
     fi
     (( empty )) && return
   fi
-  [[ -n $__reman_altn_prev ]] && zle $__reman_altn_prev
+  __reman_prev
 }
 zle -N __reman_nextup
-__reman_altn_prev=${${(z)"$(bindkey '^[n')"}[2]}
-[[ $__reman_altn_prev == (__reman_nextup|undefined-key) ]] && __reman_altn_prev=
-bindkey '^[n' __reman_nextup
 
 __reman_welcome() { # "last time here": asked when the folder changes (the daemon answers once)
   [[ $PWD == $__reman_pwd ]] && return
@@ -181,7 +177,7 @@ __reman_precmd() {
     [[ $reply == *'"kind":"same_error"'* ]] && lead="the same error was fixed by"
     __reman_fix=$fix
     # what it changes, when it's a variant of what failed (adds --build, gti -> git)
-    local how="Alt-F inserts"
+    local how="__FIX_HINT__"
     __reman_field "$reply" diff && how="$REPLY; $how"
     print -P -- "%F{8}  reman: $lead -> %F{6}${fix//\%/%%}%F{8}   (${how//\%/%%})%f" >&2
   fi
@@ -206,7 +202,7 @@ __reman_find_here() { __reman_find_widget folder }
 __reman_insert_fix() {
   # no fix waiting: what Alt-F did before reman (forward-word, which zsh-autosuggestions also uses
   # to accept one word of a suggestion)
-  [[ -n $__reman_fix ]] || { [[ -n $__reman_altf_prev ]] && zle $__reman_altf_prev; return }
+  [[ -n $__reman_fix ]] || { __reman_prev; return }
   BUFFER=$__reman_fix
   CURSOR=${#BUFFER}
 }
@@ -215,7 +211,6 @@ __reman_tab() {
   if [[ -z $BUFFER ]]; then __reman_find_widget folder; else zle expand-or-complete; fi
 }
 zle -N __reman_tab
-bindkey '^I' __reman_tab
 
 # Tab completion for reman itself (the same engine every shell uses: `reman complete`)
 _reman() {
@@ -233,9 +228,20 @@ compdef _reman reman reman.exe
 zle -N __reman_find_all
 zle -N __reman_find_here
 zle -N __reman_insert_fix
-bindkey '^R' __reman_find_all
-bindkey '^[[A' __reman_find_here
-bindkey '^[OA' __reman_find_here
-__reman_altf_prev=${${(z)"$(bindkey '^[f')"}[2]}
-[[ $__reman_altf_prev == (__reman_insert_fix|undefined-key) ]] && __reman_altf_prev=
-bindkey '^[f' __reman_insert_fix
+
+# What a key did before reman bound it, by reman's widget (its first key): Alt-F's forward-word
+# (which zsh-autosuggestions also uses to accept a word), Alt-N's own, for when reman has nothing
+# to do with it.
+typeset -gA __reman_prev_widget
+__reman_bind() {
+  local w=${${(z)"$(bindkey "$1")"}[2]}
+  [[ $w == (__reman_*|undefined-key) || -n ${__reman_prev_widget[$2]} ]] || __reman_prev_widget[$2]=$w
+  bindkey "$1" $2
+}
+# what the key that ran this reman widget did before
+__reman_prev() {
+  local w=${__reman_prev_widget[$WIDGET]}
+  [[ -n $w ]] && zle $w
+}
+# reman's keys (`reman settings`, Keys)
+__KEYS__

@@ -113,7 +113,7 @@ __reman_precmd() {
     [[ $reply == *'"kind":"same_error"'* ]] && lead="the same error was fixed by"
     __reman_fix=$fix
     # what it changes, when it's a variant of what failed (adds --build, gti -> git)
-    local how="Alt-F inserts"
+    local how="__FIX_HINT__"
     if [[ $reply =~ \"diff\":\"(([^\"\\]|\\.)*)\" ]]; then how="${BASH_REMATCH[1]}; $how"; fi
     printf '\e[90m  reman: %s -> \e[36m%s\e[90m   (%s)\e[0m\n' "$lead" "$fix" "$how" >&2
   fi
@@ -182,7 +182,6 @@ __reman_tab_empty() {
   # (completion can't place the cursor: a blank's marker is just dropped)
   [ -n "$picked" ] && COMPREPLY=("${picked//$'\x01'/}")
 }
-complete -o nospace -E -F __reman_tab_empty 2>/dev/null
 
 # Tab completion for reman itself (the same engine every shell uses: `reman complete`). reman
 # splits the line itself, so `D:\x` isn't broken at the colon by COMP_WORDBREAKS.
@@ -203,7 +202,5 @@ __reman_complete() {
   if (( ${#COMPREPLY[@]} )) && [[ ${COMPREPLY[0]} == */ || ${COMPREPLY[0]} == *\\ ]]; then compopt -o nospace 2>/dev/null; fi
 }
 complete -F __reman_complete reman reman.exe
-bind -x '"\C-r": __reman_find all'
-bind -x '"\e[A": __reman_find folder'
-bind -x '"\ef": __reman_insert_fix'
-bind -x '"\en": __reman_nextup'
+# reman's keys (`reman settings`, Keys)
+__KEYS__

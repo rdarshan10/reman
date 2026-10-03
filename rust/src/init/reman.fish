@@ -135,7 +135,7 @@ function __reman_enter
             end
             if test -n "$parts[2]"
                 set -g __reman_fix $parts[2]
-                set -l how "Alt-F inserts"
+                set -l how "__FIX_HINT__"
                 test -n "$parts[4]"; and set how "$parts[4]; $how"
                 set_color brblack; echo -n "  reman: worked instead -> "; set_color cyan; echo -n $parts[2]; set_color brblack; echo "   ($how)"; set_color normal
             end
@@ -183,7 +183,6 @@ function __reman_tab
     end
 end
 
-bind \t __reman_tab
 
 # Tab completion for reman itself (the same engine every shell uses: `reman complete`);
 # fish reads `value<TAB>description` natively
@@ -192,8 +191,5 @@ function __reman_complete
 end
 complete -c reman -f -a '(__reman_complete)'
 complete -c reman.exe -f -a '(__reman_complete)'
-bind \cr '__reman_find all'
-bind \e\[A '__reman_find folder'
-bind \ef __reman_insert_fix
-bind \r __reman_enter
-bind \en __reman_nextup
+# reman's keys (`reman settings`, Keys)
+__KEYS__

@@ -119,11 +119,6 @@ $env.config.hooks.pre_execution = ($env.config.hooks.pre_execution? | default []
 $env.config.hooks.pre_prompt = ($env.config.hooks.pre_prompt? | default [] | append {|| __reman_precmd })
 $env.config.hooks.env_change = ($env.config.hooks.env_change? | default {})
 $env.config.hooks.env_change.PWD = ($env.config.hooks.env_change.PWD? | default [] | append {|before, after| __reman_welcome $after })
-$env.config.keybindings = ($env.config.keybindings? | default [] | append [
-  {name: reman_find_all, modifier: control, keycode: char_r, mode: [emacs, vi_insert, vi_normal], event: {send: executehostcommand, cmd: "__reman_find all"}}
-  # a menu that's open keeps Up
-  {name: reman_find_here, modifier: none, keycode: up, mode: [emacs, vi_insert], event: {until: [{send: menuup}, {send: executehostcommand, cmd: "__reman_find folder"}]}}
-  {name: reman_fix, modifier: alt, keycode: char_f, mode: [emacs, vi_insert], event: {send: executehostcommand, cmd: "__reman_insert_fix"}}
-  {name: reman_next, modifier: alt, keycode: char_n, mode: [emacs, vi_insert], event: {send: executehostcommand, cmd: "__reman_nextup"}}
-])
+# reman's keys (`reman settings`, Keys)
+__KEYS__
 __reman_welcome $env.PWD

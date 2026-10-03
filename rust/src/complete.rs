@@ -131,6 +131,15 @@ fn positional_values(name: &str, pos: usize, cur: &str) -> Vec<Cand> {
             .as_array()
             .map(|a| a.iter().map(|t| cand(t["name"].as_str().unwrap_or(""), first_sentence(t["description"].as_str().unwrap_or("")))).collect())
             .unwrap_or_default(),
+        ("keys", 0) => [("list", "every key reman has"), ("set", "change an action's key: set <action> <key> (or off)"), ("preset", "start over from standard, gentle or vim"), ("reset", "back to the standard keys")]
+            .iter()
+            .map(|(s, h)| cand(*s, *h))
+            .collect(),
+        ("keys", 1) => crate::keys::ACTIONS
+            .iter()
+            .map(|a| cand(a.id, a.what))
+            .chain(crate::keys::PRESETS.iter().map(|(p, h)| cand(*p, *h)))
+            .collect(),
         ("stats", 0) => [("today", "what ran today"), ("yesterday", "what ran yesterday"), ("week", "this week"), ("month", "this month"), ("year", "this year")]
             .iter()
             .map(|(s, h)| cand(*s, *h))

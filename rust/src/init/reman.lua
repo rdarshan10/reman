@@ -94,7 +94,7 @@ clink.onbeginedit(function()
     if out and #out > 0 then
         for l in out:gmatch("[^\r\n]+") do
             if l:find("reman:", 1, true) then
-                clink.print(l .. "\x1b[90m   (Alt+F inserts)\x1b[0m")
+                clink.print(l .. "\x1b[90m   (__FIX_HINT__)\x1b[0m")
             elseif not l:find("\x1b", 1, true) then
                 reman_fix = l
             end
@@ -166,10 +166,8 @@ function reman_nextup(rl_buffer)
     rl_buffer:refreshline()
 end
 
-rl.setbinding([["\e[A"]], [["luafunc:reman_find_folder"]])
-rl.setbinding([["\C-r"]], [["luafunc:reman_find_all"]])
-rl.setbinding([["\ef"]], [["luafunc:reman_insert_fix"]])
-rl.setbinding([["\en"]], [["luafunc:reman_nextup"]])
+-- reman's keys (`reman settings`, Keys)
+__KEYS__
 
 -- ---- Tab completion for reman itself -----------------------------------------------------------
 local gen = clink.generator(1)

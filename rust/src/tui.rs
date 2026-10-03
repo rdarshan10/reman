@@ -347,6 +347,8 @@ struct App {
     /// vim keys (a setting), and whether normal mode is on
     vim: bool,
     normal: bool,
+    /// the finder's keys, as the user has them (`reman settings`, Keys)
+    keys: crate::keys::Map,
 }
 
 struct Inspect {
@@ -790,7 +792,7 @@ fn draw(buf: &mut Buffer, app: &App) -> ((u16, u16), Hits) {
     let mut row = vec![Span::styled(prompt, prompt_st), Span::raw(if app.normal { " " } else { "" })];
     if app.query.is_empty() {
         let hint = match (app.mode, app.flow.is_some()) {
-            _ if app.normal => "normal mode · j k move · dd forgets · ^O runs · i types · q closes",
+            _ if app.normal => "normal mode · j k move · dd forgets · i types · q closes",
             (_, true) => "↵ runs the selected step and queues the rest",
             (Mode::Recall, _) => "describe it in words, or type part of the command",
             (Mode::Fixes, _) => "type the command that failed",
@@ -815,7 +817,7 @@ fn draw(buf: &mut Buffer, app: &App) -> ((u16, u16), Hits) {
     let cursor = ((pw + UnicodeWidthStr::width(shown_q.as_str())).min(w - 1) as u16, input_y);
 
     // the line above: filters as a sentence (or the question / message of the moment)
-    let again = if app.normal { "d again" } else { "Del again" };
+    let again = if app.normal { "d again".to_string() } else { format!("{} again", app.keys.short("forget").unwrap_or_else(|| "Del".into())) };
     let line = if let Some(c) = &app.confirm_forget {
         Line::from(vec![Span::styled(format!(" {again} forgets `{}` everywhere", one_line(c)), Style::default().fg(BAD).add_modifier(Modifier::BOLD)), Span::styled("  ·  any other key keeps it", muted())])
     } else if let Some(r) = app.inspect.as_ref().and_then(|i| i.confirm.and_then(|id| i.runs.iter().find(|r| r["id"] == json!(id)))) {
@@ -855,7 +857,7 @@ fn draw(buf: &mut Buffer, app: &App) -> ((u16, u16), Hits) {
         draw_logo_corner(buf, card);
     }
     if app.help {
-        draw_help(buf, area);
+        draw_help(buf, area, &app.keys);
     }
     (cursor, hits)
 }
@@ -880,6 +882,7 @@ fn filter_line<'a>(app: &App, items: &[&Item], w: usize) -> Line<'a> {
             (_, s) => s.phrase(),
         };
         row.extend([val(app.scope != ScopeSel::Folder, scope_txt), key("←→")]);
+        let ks = |id: &str| app.keys.short(id).unwrap_or_default();
         if app.mode == Mode::Recall {
             let actor = match app.actor {
                 "you" => "by you",
@@ -891,13 +894,13 @@ fn filter_line<'a>(app: &App, items: &[&Item], w: usize) -> Line<'a> {
                 "fail" => "failed",
                 _ => "any outcome",
             };
-            row.extend([dot(), val(app.actor != "you", actor), key("F3"), dot(), val(app.status != "all", status), key("F2")]);
+            row.extend([dot(), val(app.actor != "you", actor), key(&ks("who")), dot(), val(app.status != "all", status), key(&ks("outcome"))]);
             // the time the query named: only what ran then
             if let Some(w) = app.window.as_deref().filter(|_| !app.query.trim().is_empty()) {
                 row.extend([dot(), val(true, &format!("ran {w}"))]);
             }
             if !app.query.trim().is_empty() {
-                row.extend([dot(), val(!app.group, if app.group { "variants folded" } else { "every variant" }), key("^G")]);
+                row.extend([dot(), val(!app.group, if app.group { "variants folded" } else { "every variant" }), key(&ks("fold"))]);
             }
         }
         right = if !app.loaded {
@@ -919,18 +922,22 @@ fn filter_line<'a>(app: &App, items: &[&Item], w: usize) -> Line<'a> {
 }
 
 fn hint_line<'a>(app: &App) -> Line<'a> {
-    let k: Vec<(&str, &str)> = if app.inspect.is_some() {
-        vec![("↵", "insert"), ("↑↓", "move"), (if app.normal { "dd" } else { "Del" }, "forget this run"), ("^O", "back"), ("esc", "back")]
+    // an action's key as the user has it; an action with none is left out
+    let a = |id: &str, what: &'static str| app.keys.short(id).map(|k| (if k == "Tab" { "tab".to_string() } else { k }, what));
+    let f = |k: &str, what: &'static str| Some((k.to_string(), what));
+    let forget = if app.normal { Some(("dd".to_string(), "forget this run")) } else { a("forget", "forget this run") };
+    let k: Vec<Option<(String, &str)>> = if app.inspect.is_some() {
+        vec![f("↵", "insert"), f("↑↓", "move"), forget, a("runs", "back"), f("esc", "back")]
     } else if app.flow.is_some() {
-        vec![("↵", "run this step, queue the rest"), ("^A", "insert all steps"), ("↑↓", "move"), ("←", "back to flows")]
+        vec![f("↵", "run this step, queue the rest"), a("all_steps", "insert all steps"), f("↑↓", "move"), f("←", "back to flows")]
     } else if app.mode == Mode::Flows {
-        vec![("↵", "open flow"), ("^A", "insert all steps"), ("↑↓", "move"), ("tab", "next tab"), ("F1", "keys"), ("esc", "close")]
+        vec![f("↵", "open flow"), a("all_steps", "insert all steps"), f("↑↓", "move"), a("next_tab", "next tab"), a("help", "keys"), f("esc", "close")]
     } else {
         let enter = if app.selected().is_some_and(|it| app.fix_of(&it).is_some()) { "insert the fix" } else { "insert" };
-        vec![("↵", enter), ("↑↓", "move"), ("tab", "Recall · Fixes · Flows"), ("^O", "every run"), ("Del", "forget"), ("^P", "pin"), ("F1", "keys"), ("esc", "close")]
+        vec![f("↵", enter), f("↑↓", "move"), a("next_tab", "Recall · Fixes · Flows"), a("runs", "every run"), a("forget", "forget"), a("pin", "pin"), a("help", "keys"), f("esc", "close")]
     };
     let mut sp = vec![Span::raw(" ")];
-    for (key, what) in k {
+    for (key, what) in k.into_iter().flatten() {
         sp.push(Span::styled(key.to_string(), Style::default().add_modifier(Modifier::BOLD)));
         sp.push(Span::styled(format!(" {what}   "), muted()));
     }
@@ -1357,27 +1364,22 @@ fn draw_logo_corner(buf: &mut Buffer, card: Rect) {
     }
 }
 
-fn draw_help(buf: &mut Buffer, area: Rect) {
-    let keys: &[(&str, &str)] = &[
-        ("↵", "put the command on your prompt (it does not run)"),
-        ("↑ ↓  PgUp PgDn", "move (↑ goes further back)"),
-        ("tab  shift-tab", "next / previous: Recall → Fixes → Flows"),
-        ("alt-1  2  3", "jump straight to Recall / Fixes / Flows"),
-        ("← →", "where: this folder → this repo → everywhere"),
-        ("F3", "who: you → you and agents → agents"),
-        ("^O", "every run of a command: when, where, how long, who"),
-        ("F2", "outcome: any → worked → failed"),
-        ("^G", "fold variants of a command / show each"),
-        ("^P", "pin: pinned commands rank first"),
-        ("Del Del", "forget a command everywhere (in ^O: one run)"),
-        ("Flows ↵", "open a flow; ↵ on a step runs from there, the rest queue"),
-        ("Flows ^A", "insert every step as one line"),
-        ("^X", "stop the flow in progress"),
-        ("^U  ^W", "clear the query / delete a word"),
-        ("mouse", "click a tab or a row, wheel to scroll"),
-        ("F10", "settings: coding tools, shared folders, privacy"),
-        ("esc", "back / close"),
+fn draw_help(buf: &mut Buffer, area: Rect, map: &crate::keys::Map) {
+    let all = |id: &str| map.get(id).iter().map(crate::keys::Key::short).collect::<Vec<_>>().join("  ");
+    let mut keys: Vec<(String, String)> = vec![
+        ("↵".into(), "put the command on your prompt (it does not run)".into()),
+        ("↑ ↓  PgUp PgDn".into(), "move (↑ goes further back)".into()),
+        ("alt-1  2  3".into(), "jump straight to Recall / Fixes / Flows".into()),
+        ("← →".into(), "where: this folder → this repo → everywhere".into()),
     ];
+    for a in crate::keys::ACTIONS.iter().filter(|a| a.layer == crate::keys::Layer::Finder) {
+        let k = all(a.id);
+        if !k.is_empty() {
+            keys.push((k, a.what.to_string()));
+        }
+    }
+    keys.push(("mouse".into(), "click a tab or a row, wheel to scroll".into()));
+    keys.push(("esc".into(), "back / close   (change keys: reman settings, Keys)".into()));
     let bw = (area.width as usize).min(78) as u16;
     let bh = (keys.len() as u16 + 4).min(area.height);
     let r = Rect::new((area.width - bw) / 2, (area.height - bh) / 2, bw, bh);
@@ -1389,8 +1391,8 @@ fn draw_help(buf: &mut Buffer, area: Rect) {
     let inner = block.inner(r);
     block.render(r, buf);
     let mut l = vec![Line::raw("")];
-    for (k, what) in keys {
-        l.push(Line::from(vec![Span::styled(format!(" {k:<16}"), Style::default().add_modifier(Modifier::BOLD)), Span::styled(what.to_string(), muted())]));
+    for (k, what) in &keys {
+        l.push(Line::from(vec![Span::styled(format!(" {:<16}", fit(k, 16)), Style::default().add_modifier(Modifier::BOLD)), Span::styled(what.to_string(), muted())]));
     }
     Paragraph::new(l).render(inner, buf);
 }
@@ -1610,6 +1612,7 @@ pub fn run(o: Opts) -> Result<()> {
         inspect: None,
         vim: st.finder_vim(),
         normal: false,
+        keys: crate::keys::Map::of(st.key_preset.as_deref(), &st.keys),
     };
     app.refresh();
 
@@ -1796,6 +1799,8 @@ fn enter(app: &mut App) -> Act {
 enum Vim {
     /// handled here
     Done,
+    /// do this action (as its key would)
+    Action(&'static str),
     /// handle as this key
     As(KeyCode),
     /// as usual
@@ -1825,7 +1830,7 @@ fn vim_key(app: &mut App, k: KeyEvent, ctrl: bool) -> Vim {
         KeyCode::Char('k') => Vim::As(KeyCode::Up),
         KeyCode::Char('h') => Vim::As(KeyCode::Left),
         KeyCode::Char('l') => Vim::As(KeyCode::Right),
-        KeyCode::Char('d') => Vim::As(KeyCode::Delete),
+        KeyCode::Char('d') => Vim::Action("forget"),
         KeyCode::Char('q') => Vim::As(KeyCode::Esc),
         KeyCode::Char('G') => {
             match app.inspect.as_mut() {
@@ -1845,6 +1850,86 @@ fn vim_key(app: &mut App, k: KeyEvent, ctrl: bool) -> Vim {
         KeyCode::Char(_) | KeyCode::Backspace => Vim::Done,
         _ => Vim::Pass,
     }
+}
+
+/// What an action's key does in the list (`reman settings`, Keys, says which key that is).
+fn finder_action(app: &mut App, a: &str) -> Act {
+    match a {
+        "runs" => app.open_inspect(),
+        "help" => app.help = true,
+        "settings" => {
+            app.open_settings = true;
+            return Act::Quit;
+        }
+        "next_tab" => app.cycle_mode(true),
+        "prev_tab" => app.cycle_mode(false),
+        "who" => {
+            app.actor = match app.actor {
+                "you" => "all",
+                "all" => "agent",
+                _ => "you",
+            };
+            app.reset();
+        }
+        "outcome" => {
+            app.status = match app.status {
+                "all" => "ok",
+                "ok" => "fail",
+                _ => "all",
+            };
+            app.reset();
+        }
+        "all_steps" => {
+            // every step of the flow, as one line
+            let steps: Vec<String> = match &app.flow {
+                Some(f) => f.steps.iter().map(|s| s.command.clone()).collect(),
+                None if app.mode == Mode::Flows => app.selected().and_then(|it| it.meta["sequence"].as_array().cloned()).unwrap_or_default().iter().filter_map(Value::as_str).map(String::from).collect(),
+                None => vec![],
+            };
+            if !steps.is_empty() {
+                return Act::Pick(Some(steps.join("; ")));
+            }
+        }
+        "stop_flow" => {
+            if !app.session.is_empty() {
+                let r = crate::client::call(&json!({"op": "flow_stop", "session": app.session}));
+                app.message = Some(if r.is_ok_and(|v| v["stopped"] == json!(true)) { "flow stopped".into() } else { "no flow in progress".into() });
+                app.reset();
+            }
+        }
+        "fold" => {
+            app.group = !app.group;
+            app.reset();
+        }
+        "pin" => {
+            if let Some(it) = app.selected().filter(|_| app.mode != Mode::Flows || app.flow.is_some()) {
+                app.message = Some(if it.pinned { "unpinned".into() } else { "pinned - it ranks first from now on".into() });
+                let _ = app.jobs.send(Job::Other("pin", json!({"op": "pin", "command": it.command, "on": !it.pinned})));
+            }
+        }
+        "forget" => {
+            if let Some(it) = app.selected().filter(|_| app.mode != Mode::Flows) {
+                if app.confirm_forget.as_deref() == Some(it.command.as_str()) {
+                    let _ = app.jobs.send(Job::Other("forget", json!({"op": "forget", "command": it.command})));
+                    app.confirm_forget = None;
+                } else {
+                    app.confirm_forget = Some(it.command);
+                }
+            }
+        }
+        "clear" => {
+            app.close_flow();
+            app.query.clear();
+            app.reset();
+        }
+        "delete_word" => {
+            let t = app.query.trim_end().to_string();
+            app.query = t.rfind(' ').map(|i| t[..=i].to_string()).unwrap_or_default();
+            app.reset();
+        }
+        _ => {}
+    }
+    Act::None
 }
 
 fn move_run(i: &mut Inspect, by: isize) -> Act {
@@ -2019,30 +2104,33 @@ fn event_loop(screen: &mut Screen, app: &mut App, replies: &Receiver<Reply>, row
         let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
         // vim keys: Esc leaves typing for normal mode, where letters are commands
         let mut k = k;
+        let mut forced: Option<&'static str> = None;
         if app.vim {
             match vim_key(app, k, ctrl) {
                 Vim::Done => continue,
+                Vim::Action(a) => forced = Some(a),
                 Vim::As(code) => k = KeyEvent::new(code, KeyModifiers::NONE),
                 Vim::Pass => {}
             }
         }
+        // an action's key (`reman settings`, Keys), before the keys that move, pick and type
+        let action = forced.or_else(|| app.keys.finder_action(&k));
         let (ctrl, alt) = (k.modifiers.contains(KeyModifiers::CONTROL), k.modifiers.contains(KeyModifiers::ALT));
-        if k.code != KeyCode::Delete {
+        if action != Some("forget") {
             app.confirm_forget = None;
         }
         if let Some(i) = app.inspect.as_mut() {
-            if k.code != KeyCode::Delete {
+            if action != Some("forget") {
                 i.confirm = None;
             }
-            let handled = match k.code {
-                KeyCode::Esc | KeyCode::Left => Some(Act::Quit),
-                KeyCode::Char('o') if ctrl => Some(Act::Quit),
-                KeyCode::Up => Some(move_run(i, 1)),
-                KeyCode::Down => Some(move_run(i, -1)),
-                KeyCode::PageUp => Some(move_run(i, 10)),
-                KeyCode::PageDown => Some(move_run(i, -10)),
-                KeyCode::Enter => Some(Act::Pick(Some(i.command.clone()))),
-                KeyCode::Delete => {
+            let handled = match (action, k.code) {
+                (Some("runs"), _) | (None, KeyCode::Esc | KeyCode::Left) => Some(Act::Quit),
+                (None, KeyCode::Up) => Some(move_run(i, 1)),
+                (None, KeyCode::Down) => Some(move_run(i, -1)),
+                (None, KeyCode::PageUp) => Some(move_run(i, 10)),
+                (None, KeyCode::PageDown) => Some(move_run(i, -10)),
+                (None, KeyCode::Enter) => Some(Act::Pick(Some(i.command.clone()))),
+                (Some("forget"), _) => {
                     if let Some(id) = i.runs.get(i.sel).and_then(|r| r["id"].as_i64()) {
                         if i.confirm == Some(id) {
                             let _ = app.jobs.send(Job::Other("forget_run", json!({"op": "forget_run", "id": id})));
@@ -2054,7 +2142,7 @@ fn event_loop(screen: &mut Screen, app: &mut App, replies: &Receiver<Reply>, row
                     Some(Act::None)
                 }
                 // typing goes back to the list, as a search
-                KeyCode::Char(_) | KeyCode::Backspace if !ctrl => {
+                (None, KeyCode::Char(_) | KeyCode::Backspace) if !ctrl => {
                     app.inspect = None;
                     None
                 }
@@ -2067,29 +2155,17 @@ fn event_loop(screen: &mut Screen, app: &mut App, replies: &Receiver<Reply>, row
                 Some(Act::Pick(p)) => return Ok(p),
                 Some(Act::None) | None => {}
             }
-            // the function keys (help, filters, settings) still work; other keys wait
-            if took || app.inspect.is_some() && !matches!(k.code, KeyCode::F(_)) {
+            // help, the filters and settings still work; other keys wait
+            if took || app.inspect.is_some() && !matches!(action, Some("help" | "settings" | "who" | "outcome")) {
                 continue;
             }
         }
-        let act = match k.code {
-            KeyCode::Char('o') if ctrl => {
-                app.open_inspect();
-                Act::None
-            }
+        let act = if let Some(a) = action { finder_action(app, a) } else { match k.code {
             KeyCode::Esc => {
                 if app.close_flow() { Act::None } else { Act::Quit }
             }
             KeyCode::Char('c') | KeyCode::Char('d') if ctrl => Act::Quit,
             KeyCode::Enter => enter(app),
-            KeyCode::F(1) => {
-                app.help = true;
-                Act::None
-            }
-            KeyCode::F(10) => {
-                app.open_settings = true;
-                Act::Quit
-            }
             // bottom-up: ↑ goes further back, ↓ comes toward the prompt
             KeyCode::Up => {
                 move_sel(app, 1);
@@ -2107,18 +2183,6 @@ fn event_loop(screen: &mut Screen, app: &mut App, replies: &Receiver<Reply>, row
                 move_sel(app, -10);
                 Act::None
             }
-            KeyCode::Tab => {
-                app.cycle_mode(true);
-                Act::None
-            }
-            KeyCode::BackTab => {
-                app.cycle_mode(false);
-                Act::None
-            }
-            KeyCode::Char('t') if ctrl => {
-                app.cycle_mode(true);
-                Act::None
-            }
             KeyCode::Char(c @ '1'..='3') if alt => {
                 app.set_mode(MODES[(c as u8 - b'1') as usize]);
                 Act::None
@@ -2134,76 +2198,6 @@ fn event_loop(screen: &mut Screen, app: &mut App, replies: &Receiver<Reply>, row
                     (ScopeSel::Repo, true) | (ScopeSel::Folder, false) => ScopeSel::All,
                     _ => ScopeSel::Folder,
                 };
-                app.reset();
-                Act::None
-            }
-            KeyCode::F(3) => {
-                app.actor = match app.actor {
-                    "you" => "all",
-                    "all" => "agent",
-                    _ => "you",
-                };
-                app.reset();
-                Act::None
-            }
-            KeyCode::F(2) => {
-                app.status = match app.status {
-                    "all" => "ok",
-                    "ok" => "fail",
-                    _ => "all",
-                };
-                app.reset();
-                Act::None
-            }
-            KeyCode::Char('a') if ctrl => {
-                // every step of the flow, as one line
-                let steps: Vec<String> = match &app.flow {
-                    Some(f) => f.steps.iter().map(|s| s.command.clone()).collect(),
-                    None if app.mode == Mode::Flows => app.selected().and_then(|it| it.meta["sequence"].as_array().cloned()).unwrap_or_default().iter().filter_map(Value::as_str).map(String::from).collect(),
-                    None => vec![],
-                };
-                if steps.is_empty() { Act::None } else { Act::Pick(Some(steps.join("; "))) }
-            }
-            KeyCode::Char('x') if ctrl => {
-                if !app.session.is_empty() {
-                    let r = crate::client::call(&json!({"op": "flow_stop", "session": app.session}));
-                    app.message = Some(if r.is_ok_and(|v| v["stopped"] == json!(true)) { "flow stopped".into() } else { "no flow in progress".into() });
-                    app.reset();
-                }
-                Act::None
-            }
-            KeyCode::Char('g') if ctrl => {
-                app.group = !app.group;
-                app.reset();
-                Act::None
-            }
-            KeyCode::Char('p') if ctrl => {
-                if let Some(it) = app.selected().filter(|_| app.mode != Mode::Flows || app.flow.is_some()) {
-                    app.message = Some(if it.pinned { "unpinned".into() } else { "pinned - it ranks first from now on".into() });
-                    let _ = app.jobs.send(Job::Other("pin", json!({"op": "pin", "command": it.command, "on": !it.pinned})));
-                }
-                Act::None
-            }
-            KeyCode::Delete => {
-                if let Some(it) = app.selected().filter(|_| app.mode != Mode::Flows) {
-                    if app.confirm_forget.as_deref() == Some(it.command.as_str()) {
-                        let _ = app.jobs.send(Job::Other("forget", json!({"op": "forget", "command": it.command})));
-                        app.confirm_forget = None;
-                    } else {
-                        app.confirm_forget = Some(it.command);
-                    }
-                }
-                Act::None
-            }
-            KeyCode::Char('u') if ctrl => {
-                app.close_flow();
-                app.query.clear();
-                app.reset();
-                Act::None
-            }
-            KeyCode::Char('w') if ctrl => {
-                let t = app.query.trim_end().to_string();
-                app.query = t.rfind(' ').map(|i| t[..=i].to_string()).unwrap_or_default();
                 app.reset();
                 Act::None
             }
@@ -2229,7 +2223,7 @@ fn event_loop(screen: &mut Screen, app: &mut App, replies: &Receiver<Reply>, row
                 Act::None
             }
             _ => Act::None,
-        };
+        } };
         match act {
             Act::Pick(p) => return Ok(p),
             Act::Quit => return Ok(None),

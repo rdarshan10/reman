@@ -128,15 +128,12 @@ def _reman_keys(bindings, **kw):
     # a single line, no completion menu open: Up opens the finder (otherwise Up as usual)
     one_line = Condition(lambda: "\n" not in get_app().current_buffer.text and get_app().current_buffer.complete_state is None)
 
-    @bindings.add("c-r")
     def _all(event):
         find(event, "all")
 
-    @bindings.add("up", filter=one_line)
     def _here(event):
         find(event, "folder")
 
-    @bindings.add("escape", "f")
     def _fix(event):
         if _reman_state["fix"]:
             event.current_buffer.text = _reman_state["fix"]
@@ -147,7 +144,6 @@ def _reman_keys(bindings, **kw):
 
     # Alt-N on an empty line: what you'd run next here, ready to edit (Alt-N again: the next idea,
     # up to 3)
-    @bindings.add("escape", "n")
     def _next(event):
         buf = event.current_buffer
         i = 0
@@ -165,3 +161,6 @@ def _reman_keys(bindings, **kw):
             run_in_terminal(lambda: print(f"\x1b[90m  reman: {parts[1]}\x1b[0m"))
         buf.text = parts[0]
         buf.cursor_position = len(parts[0])
+
+    # reman's keys (`reman settings`, Keys)
+__KEYS__

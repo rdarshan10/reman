@@ -22,6 +22,7 @@ mod mcp;
 mod notify;
 mod output;
 mod pty;
+mod keys;
 mod predict;
 mod redact;
 mod search;
@@ -311,6 +312,19 @@ enum Cmd {
         status: Option<String>,
         #[arg(long, default_value = "")]
         query: String,
+    },
+    /// reman's keys: in your shell (what opens the finder, inserts a fix, ...) and in the finder.
+    /// `reman keys` lists them; `set <action> <key>...` or `set <action> off` changes one;
+    /// `preset standard|gentle|vim` starts over from a preset; `reset` goes back to standard.
+    /// Also on one page in `reman settings` (Keys). New terminals pick changes up; open PowerShell
+    /// windows at their next prompt
+    Keys {
+        /// list | set | preset | reset
+        what: Option<String>,
+        args: Vec<String>,
+        /// print one shell's key bindings (what `reman init` puts in)
+        #[arg(long)]
+        print: Option<String>,
     },
     /// Usage statistics; with a period (today, week, month, year, yesterday, "last week", monday,
     /// 2026-09-28), what ran then: how it went, time spent, top commands and tools
@@ -671,6 +685,7 @@ fn real_main() -> Result<()> {
             Ok(())
         }
         Cmd::Shell { program } => std::process::exit(pty::run(program)?),
+        Cmd::Keys { what, args, print } => keys_cmd(what.as_deref(), &args, print.as_deref()),
         Cmd::Output { words, failed, limit, full, json: as_json } => {
             let r = client::call(&json!({"op": "outputs", "query": words.join(" "), "failed": failed, "k": limit}))?;
             if as_json {
@@ -1121,7 +1136,13 @@ fn init_script(shell: &str, exe: &Path) -> Result<String> {
         "powershell" | "pwsh" => if layer { "$true" } else { "$false" },
         _ => if layer { "1" } else { "0" },
     };
+    // reman's keys, as the user has them (`reman settings`, Keys), in this shell's own words
+    let map = keys::Map::load();
     Ok(tpl
+        .replace("__KEYS__", &keys::bindings(shell, &map))
+        .replace("__FIX_HINT__", &keys::fix_hint(&map))
+        .replace("__NEXT_KEY__", &map.label("next").unwrap_or_else(|| "it".into()))
+        .replace("__CONFIG__", &fix(&settings::path()))
         .replace("__SHELL_LAYER__", layer)
         .replace("__REMAN__", &fix(exe))
         .replace("__HOOK__", &fix(&hook_exe(exe)))
@@ -1217,6 +1238,69 @@ fn remove_after_asking(mut req: Value, yes: bool) -> Result<()> {
 }
 
 /// `reman yesterday` / `today` / `day <date>`: the day's story, by project.
+/// `reman keys`: list the keys, change one, pick a preset, or start over.
+fn keys_cmd(what: Option<&str>, args: &[String], print: Option<&str>) -> Result<()> {
+    if let Some(shell) = print {
+        println!("{}", keys::bindings(shell, &keys::Map::load()));
+        return Ok(());
+    }
+    let mut st = settings::load();
+    match what.unwrap_or("list") {
+        "list" => {}
+        "set" => {
+            let Some((id, rest)) = args.split_first() else { bail!("reman keys set <action> <key>... (or off): actions are listed by `reman keys`") };
+            let Some(a) = keys::action(id) else { bail!("`{id}` isn't an action: `reman keys` lists them") };
+            let off = rest.is_empty() || (rest.len() == 1 && rest[0].eq_ignore_ascii_case("off"));
+            let mut chosen: Vec<String> = Vec::new();
+            if !off {
+                let map = keys::Map::of(st.key_preset.as_deref(), &st.keys);
+                for k in rest {
+                    let key = keys::Key::parse(k)?;
+                    match keys::check(&map, a.id, &key) {
+                        Some((true, why)) => bail!("{}: {why}", key.label()),
+                        Some((false, why)) => println!("  note: {} - {why}", key.label()),
+                        None => {}
+                    }
+                    chosen.push(key.label());
+                }
+            }
+            st.keys.insert(a.id.to_string(), chosen);
+            settings::save(&st)?;
+        }
+        "preset" => {
+            let Some(p) = args.first().filter(|p| keys::PRESETS.iter().any(|x| x.0 == p.as_str())) else {
+                bail!("reman keys preset standard|gentle|vim")
+            };
+            st.key_preset = (p != "standard").then(|| p.clone());
+            st.finder_keys = (p == "vim").then(|| "vim".to_string());
+            st.keys.clear();
+            settings::save(&st)?;
+        }
+        "reset" => {
+            st.key_preset = None;
+            st.keys.clear();
+            settings::save(&st)?;
+        }
+        other => bail!("reman keys {other}: use list, set, preset or reset"),
+    }
+    let st = settings::load();
+    let map = keys::Map::of(st.key_preset.as_deref(), &st.keys);
+    println!("preset: {}{}", map.preset, if st.keys.is_empty() { String::new() } else { format!(", with {} change(s)", st.keys.len()) });
+    for (layer, title) in [(keys::Layer::Shell, "in your shell"), (keys::Layer::Finder, "in the finder")] {
+        println!("\n{title}");
+        for a in keys::ACTIONS.iter().filter(|a| a.layer == layer) {
+            let k: Vec<String> = map.get(a.id).iter().map(keys::Key::label).collect();
+            let shown = if k.is_empty() { "\x1b[90moff\x1b[0m".to_string() } else { k.join(", ") };
+            let changed = if st.keys.contains_key(a.id) { " \x1b[33m*\x1b[0m" } else { "" };
+            println!("  {:<12} {:<18}{changed} \x1b[90m{}\x1b[0m", a.id, shown, a.what);
+        }
+    }
+    if what.is_some_and(|w| w != "list") {
+        println!("\nNew terminals use these; open PowerShell windows take them at their next prompt.");
+    }
+    Ok(())
+}
+
 fn print_sessions(r: &Value) {
     let list = r["results"].as_array().cloned().unwrap_or_default();
     let words = r["query"].as_str().unwrap_or("");
@@ -2364,7 +2448,8 @@ mod tests {
     fn init_templates_substitute() {
         for sh in ["powershell", "bash", "zsh", "fish", "nu", "xonsh", "cmd"] {
             let s = init_script(sh, Path::new("/x/reman")).unwrap();
-            assert!(!s.contains("__REMAN__") && !s.contains("__PORT__") && !s.contains("__SPOOL__") && !s.contains("__HOOK__") && !s.contains("__SHELL_LAYER__"), "{sh}");
+            assert!(!s.contains("__REMAN__") && !s.contains("__PORT__") && !s.contains("__SPOOL__") && !s.contains("__HOOK__") && !s.contains("__SHELL_LAYER__")
+                    && !s.contains("__KEYS__") && !s.contains("__FIX_HINT__") && !s.contains("__NEXT_KEY__") && !s.contains("__CONFIG__"), "{sh}");
         }
     }
 }
