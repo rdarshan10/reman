@@ -254,6 +254,8 @@
   .colophon .wordmark { color: var(--paper); }
   .colophon .wordmark .mini { height: 14px; }
   .colophon nav { display: flex; gap: 22px; flex-wrap: wrap; }
+  .credits { margin-top: 18px; font: 12px/1.7 var(--mono); color: #8a857b; max-width: 860px; }
+  .credits a { color: #b9b3a7; }
   .colophon a { text-decoration: none; }
   .colophon a:hover { color: var(--signal); }
 
@@ -375,7 +377,7 @@
     <div class="meta">
       <button class="acro" id="acro" title="What reman stands for (click for another)"></button>
       <div><b>Shell history, searchable by meaning</b></div>
-      <div>v0.2.0 · Windows, macOS, Linux</div>
+      <div>v0.3.0 · Windows, macOS, Linux</div>
       <div>One Rust binary · free · runs on your machine</div>
     </div>
   </div>
@@ -409,7 +411,7 @@
     </figure>
 
     <div class="works">
-      <b>Connects itself at install</b> to Claude Code, OpenAI Codex CLI, Cursor, VS Code, Windsurf, Gemini CLI, opencode, pi and Claude Desktop. <b>Captures</b> PowerShell, bash, zsh, fish and Command Prompt, and what those agents run.
+      <b>Connects itself at install</b> to Claude Code, OpenAI Codex CLI, Cursor, VS Code, Windsurf, Gemini CLI, opencode, pi and Claude Desktop. <b>Captures</b> PowerShell, bash, zsh, fish, nushell, xonsh and Command Prompt, and what those agents run.
     </div>
   </div>
 </section>
@@ -430,6 +432,8 @@
         <li>Knows how long a command usually takes</li>
         <li>Notifies you when a long command finishes</li>
         <li>Only gives back commands that really ran</li>
+        <li>Opens under your prompt, not over your screen</li>
+        <li><span class="k">Ctrl+O</span> shows every run of a command, and what it printed</li>
       </ul>
     </div></div>
     <div class="row"><div class="row-track rev">
@@ -443,7 +447,9 @@
         <li>Reminds you what you did last time you opened a folder</li>
         <li>Writes how a project is run, from commands that worked</li>
         <li>Masks passwords and tokens before saving anything</li>
-        <li>One history for PowerShell, bash, zsh, fish and cmd</li>
+        <li>One history for PowerShell, bash, zsh, fish, nushell, xonsh and cmd</li>
+        <li>Finds the agent session that did it, and reopens it</li>
+        <li>Keeps what your commands printed, and finds it by its text</li>
         <li>Everything stays on your machine</li>
       </ul>
     </div></div>
@@ -454,18 +460,20 @@
   <h2>Contents</h2>
   <ol class="toc">
     <li><a href="#recall"><span class="n">1</span><span class="t">Recall by meaning</span><span class="dots"></span><span class="s">↑</span></a></li>
-    <li><a href="#blanks"><span class="n">2</span><span class="t">Commands with a blank<span class="new">new</span></span><span class="dots"></span><span class="s">‹ ›</span></a></li>
-    <li><a href="#time"><span class="n">3</span><span class="t">Time is a search word<span class="new">new</span></span><span class="dots"></span><span class="s">⏱</span></a></li>
-    <li><a href="#proof"><span class="n">4</span><span class="t">Proof, and how long it takes</span><span class="dots"></span><span class="s">✓</span></a></li>
-    <li><a href="#hold"><span class="n">5</span><span class="t">Before you press Enter<span class="new">new</span></span><span class="dots"></span><span class="s">↵</span></a></li>
-    <li><a href="#fixes"><span class="n">6</span><span class="t">Fixes, learned from you</span><span class="dots"></span><span class="s">Alt+F</span></a></li>
-    <li><a href="#flows"><span class="n">7</span><span class="t">The next step, one key away</span><span class="dots"></span><span class="s">Alt+N</span></a></li>
-    <li><a href="#broke"><span class="n">8</span><span class="t">When it breaks<span class="new">new</span></span><span class="dots"></span><span class="s">git</span></a></li>
-    <li><a href="#folders"><span class="n">9</span><span class="t">Your folders, your day</span><span class="dots"></span><span class="s">rcd</span></a></li>
-    <li><a href="#agents"><span class="n">10</span><span class="t">For AI agents</span><span class="dots"></span><span class="s">MCP</span></a></li>
-    <li><a href="#spec"><span class="n">11</span><span class="t">Specifications</span><span class="dots"></span><span class="s">ms</span></a></li>
-    <li><a href="#install"><span class="n">12</span><span class="t">Installation</span><span class="dots"></span><span class="s">$</span></a></li>
-    <li><a href="#keys"><span class="n">13</span><span class="t">Key reference</span><span class="dots"></span><span class="s">F1</span></a></li>
+    <li><a href="#blanks"><span class="n">2</span><span class="t">Commands with a blank</span><span class="dots"></span><span class="s">‹ ›</span></a></li>
+    <li><a href="#time"><span class="n">3</span><span class="t">Time is a search word</span><span class="dots"></span><span class="s">⏱</span></a></li>
+    <li><a href="#runs"><span class="n">4</span><span class="t">Every run, and what it printed<span class="new">new</span></span><span class="dots"></span><span class="s">^O</span></a></li>
+    <li><a href="#proof"><span class="n">5</span><span class="t">Proof, and how long it takes</span><span class="dots"></span><span class="s">✓</span></a></li>
+    <li><a href="#hold"><span class="n">6</span><span class="t">Before you press Enter</span><span class="dots"></span><span class="s">↵</span></a></li>
+    <li><a href="#fixes"><span class="n">7</span><span class="t">Fixes, learned from you</span><span class="dots"></span><span class="s">Alt+F</span></a></li>
+    <li><a href="#flows"><span class="n">8</span><span class="t">The next step, one key away</span><span class="dots"></span><span class="s">Alt+N</span></a></li>
+    <li><a href="#broke"><span class="n">9</span><span class="t">When it breaks</span><span class="dots"></span><span class="s">git</span></a></li>
+    <li><a href="#folders"><span class="n">10</span><span class="t">Your folders, your day</span><span class="dots"></span><span class="s">rcd</span></a></li>
+    <li><a href="#agents"><span class="n">11</span><span class="t">For AI agents</span><span class="dots"></span><span class="s">MCP</span></a></li>
+    <li><a href="#sessions"><span class="n">12</span><span class="t">The session that did it<span class="new">new</span></span><span class="dots"></span><span class="s">resume</span></a></li>
+    <li><a href="#spec"><span class="n">13</span><span class="t">Specifications</span><span class="dots"></span><span class="s">ms</span></a></li>
+    <li><a href="#install"><span class="n">14</span><span class="t">Installation</span><span class="dots"></span><span class="s">$</span></a></li>
+    <li><a href="#keys"><span class="n">15</span><span class="t">Key reference</span><span class="dots"></span><span class="s">F1</span></a></li>
   </ol>
 </section>
 
@@ -543,9 +551,33 @@
   </div>
 </section>
 
+<section class="chapter" id="runs">
+  <div class="wrap ch-grid">
+    <div class="ch-side"><div class="ch-num">4</div><div class="ch-label">Every run</div></div>
+    <div>
+      <h2>Every run, and <em>what it printed</em>.</h2>
+      <p>The finder opens in the lines under your prompt, so whatever you were reading stays on screen. It lists your own commands; <kbd>F3</kbd> adds what your agents ran. Press <kbd>Ctrl</kbd>+<kbd>O</kbd> on a command and you get its whole history: every run, and what that run printed.</p>
+      <ul class="notes">
+        <li><b>Every run.</b> When, how long, whether it worked, the branch, the folder and who ran it. <kbd>Del</kbd> <kbd>Del</kbd> forgets one run and keeps the command.</li>
+        <li><b>What it printed.</b> Your agents' output is kept as they run. For your own, <code>reman shell</code> runs your shell inside a terminal layer of reman's own (ConPTY on Windows) and keeps each command's output the way your terminal drew it: colours gone, a progress bar as it ended, long output whole.</li>
+        <li><b>Find it again.</b> <code>reman output --failed</code>, <code>reman output npm test</code>, or by what it said: <code>reman output ECONNREFUSED</code>. Agents read it through <code>reman_output</code> instead of running the command again.</li>
+        <li><b>Small and private.</b> Secrets masked, only the end of a long output, only your newest 3000 runs. <code>reman settings</code> can open every new shell inside it.</li>
+        <li><b>Your keys.</b> Vim keys are a setting: <kbd>Esc</kbd>, then <kbd>j</kbd> <kbd>k</kbd> to move, <kbd>dd</kbd> to forget, <kbd>q</kbd> to close.</li>
+      </ul>
+    </div>
+    <figure>
+      <div class="term">
+        <div class="bar"><span>powershell</span><span>Ctrl+O on npm test</span></div>
+<div class="body"><div class="t-row"><span class="acc">PS C:\code\web-shop&gt; </span><span class="caret"></span></div><div class="t-row"><span class="info"> what it printed</span></div><div class="t-row"><span>   FAIL src/cart.test.ts</span></div><div class="t-row"><span>     ● cart › applies the coupon</span></div><div class="t-row"><span class="bad">       expected 90, got 100</span></div><div class="t-row"><span>   Tests: 1 failed, 41 passed</span></div><div class="t-row"><span class="mut"> ─────────────────────────────────────────────</span></div><div class="t-row"><span class="ok">  ✓   </span><span>09-30 16:02  1m 49s  </span><span class="mut">you     main</span></div><div class="t-row"><span class="ok">  ✓   </span><span>10-01 11:20  1m 55s  </span><span class="str">claude  </span><span class="mut">main</span></div><div class="t-row"><span class="ok">  ✓   </span><span>10-01 18:40  1m 52s  </span><span class="mut">you     main</span></div><div class="t-row t-sel"><span class="acc"> ▌</span><span class="bad">✗1  </span><span class="t-cmd">10-02 14:05  2m 10s  </span><span class="mut">you     feat/cart</span></div><div class="t-row"><span class="mut">      when         took    who     branch</span></div><div class="t-row"><span class="info">   every run of `npm test`</span><span class="mut">        run 1 of 4</span></div><div class="t-row"><span class="acc"> › </span><span>npm test</span><span class="mut">              ^O back</span></div></div>
+      </div>
+      <figcaption><b>Fig. 5</b><span>Under the prompt, not over it: four runs of one test, and what the failing one said.</span></figcaption>
+    </figure>
+  </div>
+</section>
+
 <section class="chapter" id="proof">
   <div class="wrap ch-grid">
-    <div class="ch-side"><div class="ch-num">4</div><div class="ch-label">Track record</div></div>
+    <div class="ch-side"><div class="ch-num">5</div><div class="ch-label">Track record</div></div>
     <div>
       <h2>Reuse the one that <em>worked</em>, not the newest.</h2>
       <p>Every command carries its history: how often it ran, where, who ran it, whether it succeeded, and how long it usually takes. Of five variants you tried last spring, you see which one held up.</p>
@@ -563,7 +595,7 @@
           <div class="bar"><span>the card beside every result</span><span></span></div>
 <div class="body" style="white-space:normal"><div class="w">npm install</div><div class="mut" style="font-style:italic">npm: Install Node packages</div><div style="margin-top:8px"><span style="color:#e8c07d">~ worked 88% of 16 runs</span><span class="mut"> · usually 41s · last 2 days ago · by you</span></div><div class="mut">in ~/work/web</div><div style="margin-top:8px"><span class="ok">✓ npm install --legacy-peer-deps</span></div><div class="mut">worked every time (2 runs) · usually 38s</div></div>
         </div>
-        <figcaption><b>Fig. 5</b><span>In the same folder, the plain command fails now and then; the variant never has.</span></figcaption>
+        <figcaption><b>Fig. 6</b><span>In the same folder, the plain command fails now and then; the variant never has.</span></figcaption>
       </figure>
       <figure>
         <div class="toast-wrap">
@@ -573,7 +605,7 @@
             <span>3m 04s, faster than usual (3m 40s) · in api</span>
           </div>
         </div>
-        <figcaption><b>Fig. 6</b><span>You switched to the browser three minutes ago. The build tells you it's done.</span></figcaption>
+        <figcaption><b>Fig. 7</b><span>You switched to the browser three minutes ago. The build tells you it's done.</span></figcaption>
       </figure>
     </div>
   </div>
@@ -581,7 +613,7 @@
 
 <section class="chapter" id="hold">
   <div class="wrap ch-grid">
-    <div class="ch-side"><div class="ch-num">5</div><div class="ch-label">Before Enter</div></div>
+    <div class="ch-side"><div class="ch-num">6</div><div class="ch-label">Before Enter</div></div>
     <div>
       <h2>It tells you it'll fail <em>before</em> you wait for it.</h2>
       <p>You run the command you remember, and two minutes later it fails the way it failed the last three times. reman checks when you press Enter. If the history here says it will fail, and failing costs you something, it holds the command once and says why.</p>
@@ -598,14 +630,14 @@
         <div class="bar"><span>powershell · ~/work/api</span><span>you pressed Enter once</span></div>
 <div class="body wraps"><div class="t-row"><span class="acc">PS&gt; </span><span>docker compose up</span></div><div class="t-row"><span class="str">  reman: this failed the last 3 times here, after about 2m each time (it worked 14 times before that)</span></div><div class="t-row"><span class="mut">         last error: pull access denied for api, repository does not exist</span></div><div class="t-row"><span class="mut">  reman: worked instead -&gt; </span><span class="info">docker compose up --build</span><span class="mut">   (adds --build; Alt+F inserts)</span></div><div class="t-row"><span class="mut">  Enter again runs it anyway</span></div><div class="t-row"><span class="acc">PS&gt; </span><span>docker compose up</span><span class="caret" style="margin-left:2px"></span></div></div>
       </div>
-      <figcaption><b>Fig. 7</b><span>Held once, with your line kept on a fresh prompt: two minutes saved, and the fix one key away.</span></figcaption>
+      <figcaption><b>Fig. 8</b><span>Held once, with your line kept on a fresh prompt: two minutes saved, and the fix one key away.</span></figcaption>
     </figure>
   </div>
 </section>
 
 <section class="chapter" id="fixes">
   <div class="wrap ch-grid">
-    <div class="ch-side"><div class="ch-num">6</div><div class="ch-label">Fixes</div></div>
+    <div class="ch-side"><div class="ch-num">7</div><div class="ch-label">Fixes</div></div>
     <div>
       <h2>After a failure, the fix is <em>waiting</em>.</h2>
       <p>When a command fails, reman prints what you ran next the last time, when that worked, and what it changes. It learns these pairs from you, so it knows your missing upstream and your peer-dependency flag, not just typos. <kbd>Alt</kbd>+<kbd>F</kbd> puts the fix on your prompt.</p>
@@ -622,14 +654,14 @@
         <div class="bar"><span>powershell · ~/work/api</span><span></span></div>
 <div class="body wraps"><div class="t-row"><span class="acc">PS&gt; </span><span>git push</span></div><div class="t-row"><span class="bad">fatal: The current branch feat/search has no upstream branch.</span></div><div class="t-row"><span class="mut">  reman: last time this failed you ran -&gt; </span><span class="info">git push --set-upstream origin feat/search</span></div><div class="t-row"><span class="mut">  (adds --set-upstream origin feat/search; Alt+F inserts)</span></div><div class="t-row"><span class="acc">PS&gt; </span><span>git push --set-upstream origin feat/search</span><span class="caret" style="margin-left:2px"></span></div><div class="t-row"> </div><div class="t-row"><span class="acc">PS&gt; </span><span>gti status</span></div><div class="t-row"><span class="bad">gti : The term 'gti' is not recognized as the name of a cmdlet</span></div><div class="t-row"><span class="mut">  reman: did you mean -&gt; </span><span class="info">git status</span><span class="mut">   (gti → git; Alt+F inserts)</span></div></div>
       </div>
-      <figcaption><b>Fig. 8</b><span>The first fix was learned from what was run right after the same failure; the second is a typo of a command you run every day.</span></figcaption>
+      <figcaption><b>Fig. 9</b><span>The first fix was learned from what was run right after the same failure; the second is a typo of a command you run every day.</span></figcaption>
     </figure>
   </div>
 </section>
 
 <section class="chapter" id="flows">
   <div class="wrap ch-grid">
-    <div class="ch-side"><div class="ch-num">7</div><div class="ch-label">Next step</div></div>
+    <div class="ch-side"><div class="ch-num">8</div><div class="ch-label">Next step</div></div>
     <div>
       <h2>The next step, <em>one key</em> away.</h2>
       <p>On an empty prompt, <kbd>Alt</kbd>+<kbd>N</kbd> puts what you'd run next here: the next step of a flow you started, the fix for what just failed, or what you usually run after your last command. It lands on your prompt, never runs. Press it again for the next idea.</p>
@@ -646,14 +678,14 @@
         <div class="body wraps" id="altn-body"></div>
       </div>
       <div class="t-actions"><button class="keybtn" id="altn-btn"><kbd>Alt</kbd> + <kbd>N</kbd></button><span class="mut" id="altn-hint" style="font:12px var(--mono);color:var(--ink-3)">press it a few times</span></div>
-      <figcaption><b>Fig. 9</b><span>After <code>docker compose up -d</code>, three ideas in order: the flow's next step, what usually follows, what you often run here.</span></figcaption>
+      <figcaption><b>Fig. 10</b><span>After <code>docker compose up -d</code>, three ideas in order: the flow's next step, what usually follows, what you often run here.</span></figcaption>
     </figure>
   </div>
 </section>
 
 <section class="chapter" id="broke">
   <div class="wrap ch-grid">
-    <div class="ch-side"><div class="ch-num">8</div><div class="ch-label">When it breaks</div></div>
+    <div class="ch-side"><div class="ch-num">9</div><div class="ch-label">When it breaks</div></div>
     <div>
       <h2>When it breaks, it knows <em>what changed</em>.</h2>
       <p>Every run keeps the git branch and commit it ran on. So when a command that kept working starts failing, reman can say more than "it failed": it worked on <code>main</code> and you're on a feature branch now, or new commits came in, or the commit is the same and the change is somewhere else.</p>
@@ -674,20 +706,20 @@
         <div class="runs-strip"><span class="label">flaky</span><span class="cells" aria-label="worked, worked, failed, worked, worked, failed, worked, failed, worked"><i class="c ok">✓</i><i class="c ok">✓</i><i class="c bad">✗</i><i class="c ok">✓</i><i class="c ok">✓</i><i class="c bad">✗</i><i class="c ok">✓</i><i class="c bad">✗</i><i class="c ok">✓</i></span><span class="verdict">flips six times, nothing changed in between: "flaky here, try it again"</span></div>
         <div class="runs-strip"><span class="label">a normal day</span><span class="cells" aria-label="failed three times, worked three times, failed, worked twice"><i class="c bad">✗</i><i class="c bad">✗</i><i class="c bad">✗</i><i class="c ok">✓</i><i class="c ok">✓</i><i class="c ok">✓</i><i class="c bad">✗</i><i class="c ok">✓</i><i class="c ok">✓</i></span><span class="verdict">broken, fixed, broken, fixed: you editing code, not flaky</span></div>
       </div>
-      <figcaption><b>Fig. 10</b><span>Above, the same test on two branches. Below, two run histories that look alike and aren't.</span></figcaption>
+      <figcaption><b>Fig. 11</b><span>Above, the same test on two branches. Below, two run histories that look alike and aren't.</span></figcaption>
     </figure>
   </div>
 </section>
 
 <section class="chapter" id="folders">
   <div class="wrap ch-grid">
-    <div class="ch-side"><div class="ch-num">9</div><div class="ch-label">Your folders</div></div>
+    <div class="ch-side"><div class="ch-num">10</div><div class="ch-label">Your folders</div></div>
     <div>
       <h2>Walk back in where you <em>left off</em>.</h2>
       <p>reman knows what happened in each folder, and when. Open a terminal in a project you left days ago and it tells you what you did there. Go to a folder by what you did in it. Ask it what yesterday looked like.</p>
       <ul class="notes">
         <li><b>Last time here.</b> One line, once, when you come back to a folder after a while.</li>
-        <li><b>rcd.</b> <code>rcd alembic</code> goes to the folder where you ran it; <code>rcd planet api</code> goes by the folder's name. <code>rcd</code> alone lists where you were lately, and <code>rcd 3</code> goes there.</li>
+        <li><b>rcd.</b> <code>rcd alembic</code> goes to the folder where you ran it; <code>rcd billing api</code> goes by the folder's name. <code>rcd</code> alone lists where you were lately, and <code>rcd 3</code> goes there.</li>
         <li><b>Your day.</b> <code>reman yesterday</code>, <code>reman today</code>, <code>reman day monday</code>: what you ran, by project, with failures and what fixed them, and what each agent did there. Good for a standup.</li>
         <li><b>What broke it?</b> After a command that kept working here fails: what ran in this folder since. <code>reman why</code> tells the whole story.</li>
         <li><b>Runbook.</b> <code>reman runbook</code> writes how the project is run, by task, from the commands that worked. A local model (Ollama, LM Studio) can arrange and explain it; it never invents a command.</li>
@@ -696,21 +728,21 @@
     <figure>
       <div class="term">
         <div class="bar"><span>powershell</span><span></span></div>
-<div class="body wraps"><div class="t-row"><span class="acc">PS C:\&gt; </span><span>rcd alembic</span></div><div class="t-row"><span class="info">→ </span><span>D:\work\planet_naidu_api</span><span class="mut">   (alembic upgrade head, 2 days ago)</span></div><div class="t-row"><span class="mut">  reman: last time here (2 days ago): </span><span class="info">docker compose up -d → alembic upgrade head → pytest -q</span></div><div class="t-row"><span class="acc">PS D:\work\planet_naidu_api&gt; </span><span>reman yesterday</span></div><div class="t-row"><span class="w">Yesterday</span><span class="mut">, 9:12 to 18:40</span></div><div class="t-row"> </div><div class="t-row"><span class="w">planet_naidu_api</span><span class="mut">  (main)   9:12 to 12:30</span></div><div class="t-row"><span>  docker compose up -d → alembic upgrade head → pytest -q (4x)</span></div><div class="t-row"><span class="bad">  ✗ </span><span>docker compose up  →  </span><span class="ok">✓ </span><span>docker compose up --build</span><span class="mut">   (fixed)</span></div><div class="t-row"><span class="mut">  claude-code ran 38 commands here (3 failed)</span></div><div class="t-row"> </div><div class="t-row"><span class="w">web-shop</span><span class="mut">  (feat/cart)   14:05 to 18:40</span></div><div class="t-row"><span>  npm run dev → npm test (3x)</span></div><div class="t-row"><span class="bad">  ✗ </span><span>npm run lint</span><span class="str">   still failing</span><span class="mut"> (2 failures)</span></div></div>
+<div class="body wraps"><div class="t-row"><span class="acc">PS C:\&gt; </span><span>rcd alembic</span></div><div class="t-row"><span class="info">→ </span><span>C:\code\billing-api</span><span class="mut">   (alembic upgrade head, 2 days ago)</span></div><div class="t-row"><span class="mut">  reman: last time here (2 days ago): </span><span class="info">docker compose up -d → alembic upgrade head → pytest -q</span></div><div class="t-row"><span class="acc">PS C:\code\billing-api&gt; </span><span>reman yesterday</span></div><div class="t-row"><span class="w">Yesterday</span><span class="mut">, 9:12 to 18:40</span></div><div class="t-row"> </div><div class="t-row"><span class="w">billing-api</span><span class="mut">  (main)   9:12 to 12:30</span></div><div class="t-row"><span>  docker compose up -d → alembic upgrade head → pytest -q (4x)</span></div><div class="t-row"><span class="bad">  ✗ </span><span>docker compose up  →  </span><span class="ok">✓ </span><span>docker compose up --build</span><span class="mut">   (fixed)</span></div><div class="t-row"><span class="mut">  claude-code ran 38 commands here (3 failed)</span></div><div class="t-row"> </div><div class="t-row"><span class="w">web-shop</span><span class="mut">  (feat/cart)   14:05 to 18:40</span></div><div class="t-row"><span>  npm run dev → npm test (3x)</span></div><div class="t-row"><span class="bad">  ✗ </span><span>npm run lint</span><span class="str">   still failing</span><span class="mut"> (2 failures)</span></div></div>
       </div>
-      <figcaption><b>Fig. 11</b><span>Jump to a project by what you did there, and the day before, told back to you.</span></figcaption>
+      <figcaption><b>Fig. 12</b><span>Jump to a project by what you did there, and the day before, told back to you.</span></figcaption>
     </figure>
   </div>
 </section>
 
 <section class="chapter" id="agents">
   <div class="wrap ch-grid">
-    <div class="ch-side"><div class="ch-num">10</div><div class="ch-label">Agents</div></div>
+    <div class="ch-side"><div class="ch-num">11</div><div class="ch-label">Agents</div></div>
     <div>
       <h2>Your agents stop <em>guessing</em> commands.</h2>
       <p>Claude Code, Codex and Cursor usually write commands from scratch. With reman they ask first, and reuse the ones that already work on your machine. reman never generates a command; every result is one that really ran.</p>
       <ul class="notes">
-        <li>Connected automatically at install: eight MCP tools, plus a local HTTP endpoint for SDKs and scripts. <code>reman_runbook</code> tells an agent how the project is run before it guesses.</li>
+        <li>Connected automatically at install: nine MCP tools, plus a local HTTP endpoint for SDKs and scripts. <code>reman_output</code> tells an agent what a command printed last time, instead of running it again. <code>reman_runbook</code> tells an agent how the project is run before it guesses.</li>
         <li>Agents see no history until you approve a folder, not even the project they are working in. An agent cannot approve one for itself.</li>
         <li>No close match means an empty answer, not the least-bad guess.</li>
         <li>What Claude Code and Codex run is recorded too, with how long it took and what a failure printed.</li>
@@ -734,7 +766,7 @@
   <span class="str">"last_run"</span>: <span class="ok">"6d ago"</span>
 }]</pre>
       </div>
-      <figcaption><b>Fig. 12</b><span>What an agent gets back: a real command, with its record.</span></figcaption>
+      <figcaption><b>Fig. 13</b><span>What an agent gets back: a real command, with its record.</span></figcaption>
     </figure>
     <figure>
       <div class="paper chat" id="chat">
@@ -743,15 +775,37 @@
         <div class="msg" id="chat-typing"><div class="who">Claude</div><div class="box"><span class="typing"><i></i><i></i><i></i></span></div></div>
         <div class="msg"><div class="who">Claude</div><div class="box">Building again won't help. Let me find where <code>cfg</code> is defined first.</div></div>
       </div>
-      <figcaption><b>Fig. 13</b><span>The loop is broken from inside: the note arrives in Claude's own context, next to the error.</span></figcaption>
+      <figcaption><b>Fig. 14</b><span>The loop is broken from inside: the note arrives in Claude's own context, next to the error.</span></figcaption>
     </figure>
     </div>
   </div>
 </section>
 
+<section class="chapter" id="sessions">
+  <div class="wrap ch-grid">
+    <div class="ch-side"><div class="ch-num">12</div><div class="ch-label">Sessions</div></div>
+    <div>
+      <h2>Find the session that <em>did it</em>.</h2>
+      <p>Somewhere last week an agent fixed the migrations. Which chat was that? reman keeps each coding agent's session id with every command it ran, so you can find the session by what it did, and pick it up where it stopped.</p>
+      <ul class="notes">
+        <li><b>reman sessions.</b> Your agents' sessions, newest first: where each worked, what it built, tested, installed or migrated, and how it went. The <code>sed</code> and <code>grep</code> an agent reads files with is left out.</li>
+        <li><b>By meaning, text or folder.</b> <code>reman sessions migration last week</code> matches what a session ran, a file it touched, or its folder's name; time words narrow it.</li>
+        <li><b>reman resume.</b> Reopens the best match in its own folder: Claude Code, Codex, Gemini CLI and opencode. A number picks another match.</li>
+      </ul>
+    </div>
+    <figure>
+      <div class="term">
+        <div class="bar"><span>powershell</span><span></span></div>
+<div class="body wraps"><div class="t-row"><span class="acc">PS C:\code&gt; </span><span>reman sessions migration last week</span></div><div class="t-row"><span class="w">1  claude-code</span><span class="mut">   3 days ago (2h) · </span><span>38 commands, </span><span class="bad">3 failed</span></div><div class="t-row"><span>   C:\code\billing-api</span></div><div class="t-row"><span>   alembic upgrade head (2x) → pytest -q (4x)</span></div><div class="t-row"><span class="mut">   ran: </span><span class="info">alembic upgrade head</span></div><div class="t-row"><span class="mut">   resume: </span><span>claude --resume 4f1c2a7e-…</span></div><div class="t-row"> </div><div class="t-row"><span class="acc">PS C:\code&gt; </span><span>reman resume migration last week</span></div><div class="t-row"><span class="mut">reman: claude-code's session from 3 days ago</span></div><div class="t-row"><span class="mut">       in C:\code\billing-api</span></div><div class="t-row"><span class="mut">       claude --resume 4f1c2a7e-9b3d-4c21-a8e0-6d2f1b7c9e10</span></div></div>
+      </div>
+      <figcaption><b>Fig. 15</b><span>Found by what it did, reopened where it worked.</span></figcaption>
+    </figure>
+  </div>
+</section>
+
 <section class="chapter" id="spec">
   <div class="wrap ch-grid wide">
-    <div class="ch-side"><div class="ch-num">11</div><div class="ch-label">Specifications</div></div>
+    <div class="ch-side"><div class="ch-num">13</div><div class="ch-label">Specifications</div></div>
     <div>
       <h2>Fast enough to live on <kbd class="h-kbd">↑</kbd>.</h2>
       <p style="max-width:620px">One Rust binary. The whole history stays in memory and the search model stays warm, so the finder answers before you finish typing.</p>
@@ -771,7 +825,7 @@
       <div class="spec-note">Median timings on a history of about 6,000 commands and 21,000 runs; the newer rows on one of about 7,700 commands.</div>
       <div class="facts">
         <div><h3>Private by default</h3><p>Nothing leaves your machine. Secrets are masked before anything is saved, a command typed with a leading space is never recorded, and <kbd>Del</kbd> <kbd>Del</kbd> forgets one everywhere.</p></div>
-        <div><h3>Every shell, one history</h3><p>PowerShell, bash, zsh, fish and Command Prompt, plus the commands your agents run, tagged with the agent's name.</p></div>
+        <div><h3>Every shell, one history</h3><p>PowerShell, bash, zsh, fish, nushell, xonsh and Command Prompt, plus the commands your agents run, tagged with the agent's name.</p></div>
         <div><h3>One settings page</h3><p><code>reman settings</code>, or <kbd>F10</kbd> in the finder: coding tools, shared folders, privacy, done alerts and shells. Saved as you change them.</p></div>
       </div>
     </div>
@@ -780,12 +834,12 @@
 
 <section class="chapter" id="install">
   <div class="wrap ch-grid wide">
-    <div class="ch-side"><div class="ch-num">12</div><div class="ch-label">Installation</div></div>
+    <div class="ch-side"><div class="ch-num">14</div><div class="ch-label">Installation</div></div>
     <div style="max-width:820px">
       <h2>One command. Nothing to configure.</h2>
       <ol class="steps">
         <li><span>Run the installer below. It downloads the latest release and checks its SHA-256.</span></li>
-        <li><span>Setup wires your shells and connects every coding tool it finds. Each config it touches is backed up first.</span></li>
+        <li><span>Setup wires your shells and connects every coding tool it finds. Each config it touches is backed up first. Coming from Atuin? It imports your history too.</span></li>
         <li><span>Open a new terminal and press <kbd>↑</kbd>. The first start downloads the search model once, about 130 MB.</span></li>
       </ol>
       <div class="install">
@@ -810,7 +864,7 @@
 
 <section class="chapter" id="keys">
   <div class="wrap ch-grid wide">
-    <div class="ch-side"><div class="ch-num">13</div><div class="ch-label">Key reference</div></div>
+    <div class="ch-side"><div class="ch-num">15</div><div class="ch-label">Key reference</div></div>
     <div style="max-width:820px">
       <h2>Everything fits on one card.</h2>
       <table class="keys">
@@ -828,7 +882,8 @@
         <tr><td><kbd>Enter</kbd></td><td>Put the command on your prompt. It never runs by itself. A command with a blank lands with the cursor in the blank.</td></tr>
         <tr><td><code>deploy last week</code></td><td>End a search with when: only what ran then</td></tr>
         <tr><td><kbd>Ctrl</kbd>+<kbd>G</kbd></td><td>Every variant on its own line, or folded</td></tr>
-        <tr><td><kbd>←</kbd> <kbd>→</kbd> &nbsp;<kbd>F2</kbd> &nbsp;<kbd>F3</kbd></td><td>Change folder scope, outcome, and who ran it</td></tr>
+        <tr><td><kbd>Ctrl</kbd>+<kbd>O</kbd></td><td>Every run of the command, and what each printed; <kbd>Del</kbd> <kbd>Del</kbd> there forgets one run</td></tr>
+        <tr><td><kbd>←</kbd> <kbd>→</kbd> &nbsp;<kbd>F2</kbd> &nbsp;<kbd>F3</kbd></td><td>Change folder scope, outcome, and who ran it (yours first; <kbd>F3</kbd> adds agents')</td></tr>
         <tr><td><kbd>F1</kbd> &nbsp;<kbd>F10</kbd></td><td>Every key, and settings</td></tr>
         <tr class="sub"><td colspan="2">From the command line</td></tr>
         <tr><td><code>reman search "…"</code></td><td>Search by meaning</td></tr>
@@ -840,6 +895,10 @@
         <tr><td><code>reman agents</code></td><td>What each agent ran this week, failures and retry loops</td></tr>
         <tr><td><code>reman goto …</code></td><td>The folder <code>rcd</code> would go to, printed</td></tr>
         <tr><td><code>reman runbook</code></td><td>How this project is run, from what worked</td></tr>
+        <tr><td><code>reman sessions</code>, <code>resume</code></td><td>Find an agent's session by what it did, and reopen it</td></tr>
+        <tr><td><code>reman shell</code>, <code>output</code></td><td>Your shell with its output kept; what commands printed</td></tr>
+        <tr><td><code>reman search … --failed --by agents</code></td><td>Filters, <code>--format</code> and <code>--json</code> for scripts</td></tr>
+        <tr><td><code>reman delete</code>, <code>prune</code>, <code>stats week</code></td><td>Remove runs by their text, apply ignore rules to older history, count a period</td></tr>
         <tr><td><code>reman uninstall</code></td><td>Remove it everywhere; your history stays unless <code>--purge</code></td></tr>
       </table>
     </div>
@@ -866,8 +925,10 @@
         <a href="https://github.com/rdarshan10/reman/releases">Releases</a>
         <a href="https://github.com/rdarshan10/reman/blob/master/rust/README.md">Docs</a>
         <a href="https://github.com/rdarshan10/reman/issues">Issues</a>
+        <a href="https://github.com/rdarshan10/reman/blob/master/LICENSE">Apache-2.0</a>
       </nav>
     </div>
+    <p class="credits">Open source under the Apache License 2.0. Command descriptions from <a href="https://github.com/tldr-pages/tldr">tldr-pages</a> (CC BY 4.0). Secret patterns and the design of <code>reman shell</code> from <a href="https://github.com/atuinsh/atuin">Atuin</a> (MIT); coming from Atuin, setup brings your history along. Search by <a href="https://huggingface.co/BAAI/bge-small-en-v1.5">bge-small-en-v1.5</a> (MIT) on ONNX Runtime. <a href="https://github.com/rdarshan10/reman/blob/master/THIRD_PARTY_NOTICES.md">All notices</a>.</p>
   </div>
 </footer>
 
@@ -911,7 +972,7 @@
       caption: "Describe it in words. The command that worked comes first.",
       count: "1 close match",
       query: "tear down containers",
-      filters: "this folder first ←→  ·  by anyone F3  ·  any outcome F2",
+      filters: "this folder first ←→  ·  by you F3  ·  any outcome F2",
       sections: [
         { title: "in this folder", rows: [
           ["ok", "✓", "docker compose down -v", "14×   2d", true],
@@ -923,7 +984,7 @@
       caption: "Right after a failure, what worked last time is waiting.",
       count: "18 of 212",
       query: "",
-      filters: "in this folder ←→  ·  by anyone F3  ·  any outcome F2",
+      filters: "in this folder ←→  ·  by you F3  ·  any outcome F2",
       sections: [
         { title: "last command failed: git push", rows: [
           ["ok", "→", "git push --set-upstream origin feat/search", "worked last time", true],
@@ -953,7 +1014,7 @@
       caption: "Thirty-eight commit messages, one command with a blank.",
       count: "3 results",
       query: "git commit",
-      filters: "this folder first ←→  ·  by anyone F3  ·  variants folded ^G",
+      filters: "this folder first ←→  ·  by you F3  ·  variants folded ^G",
       sections: [
         { title: "in this folder", rows: [
           ["ok", "✓", 'git commit -m "‹message›"', "38×   1h", true],
@@ -1294,7 +1355,7 @@
     pick(3);
   })();
 
-  // ---------- Fig. 9: Alt+N ----------
+  // ---------- Fig. 10: Alt+N ----------
   (function () {
     const term = document.getElementById("altn");
     if (!term) return;
