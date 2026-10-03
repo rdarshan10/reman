@@ -377,7 +377,7 @@
     <div class="meta">
       <button class="acro" id="acro" title="What reman stands for (click for another)"></button>
       <div><b>Shell history, searchable by meaning</b></div>
-      <div>v0.3.0 · Windows, macOS, Linux</div>
+      <div>v0.3.1 · Windows, macOS, Linux</div>
       <div>One Rust binary · free · runs on your machine</div>
     </div>
   </div>
@@ -450,6 +450,7 @@
         <li>One history for PowerShell, bash, zsh, fish, nushell, xonsh and cmd</li>
         <li>Finds the agent session that did it, and reopens it</li>
         <li>Keeps what your commands printed, and finds it by its text</li>
+        <li>Every key it takes can be changed, or given back to your shell</li>
         <li>Everything stays on your machine</li>
       </ul>
     </div></div>
@@ -473,7 +474,7 @@
     <li><a href="#sessions"><span class="n">12</span><span class="t">The session that did it<span class="new">new</span></span><span class="dots"></span><span class="s">resume</span></a></li>
     <li><a href="#spec"><span class="n">13</span><span class="t">Specifications</span><span class="dots"></span><span class="s">ms</span></a></li>
     <li><a href="#install"><span class="n">14</span><span class="t">Installation</span><span class="dots"></span><span class="s">$</span></a></li>
-    <li><a href="#keys"><span class="n">15</span><span class="t">Key reference</span><span class="dots"></span><span class="s">F1</span></a></li>
+    <li><a href="#features"><span class="n">15</span><span class="t">Everything it does<span class="new">new</span></span><span class="dots"></span><span class="s">✓</span></a></li>
   </ol>
 </section>
 
@@ -862,45 +863,42 @@
   </div>
 </section>
 
-<section class="chapter" id="keys">
+<section class="chapter" id="features">
   <div class="wrap ch-grid wide">
-    <div class="ch-side"><div class="ch-num">15</div><div class="ch-label">Key reference</div></div>
+    <div class="ch-side"><div class="ch-num">15</div><div class="ch-label">Every feature</div></div>
     <div style="max-width:820px">
-      <h2>Everything fits on one card.</h2>
+      <h2>Everything it does, on one card.</h2>
       <table class="keys">
-        <tr class="sub"><td colspan="2">In your shell</td></tr>
-        <tr><td><kbd>↑</kbd></td><td>Open the finder for this folder</td></tr>
-        <tr><td><kbd>Ctrl</kbd>+<kbd>R</kbd></td><td>Open the finder for every folder</td></tr>
-        <tr><td><kbd>Alt</kbd>+<kbd>F</kbd></td><td>Insert the fix suggested after a failed command (otherwise, forward a word)</td></tr>
-        <tr><td><kbd>Alt</kbd>+<kbd>N</kbd></td><td>On an empty prompt: what you'd run next here. Again: the next idea</td></tr>
-        <tr><td><kbd>Enter</kbd> <span style="color:var(--ink-3);font-size:13px">on a command that keeps failing</span></td><td>Held once, with why and what worked instead; Enter again runs it</td></tr>
-        <tr><td><kbd>Tab</kbd></td><td>Completes; with nothing to complete, takes the grey suggestion, else opens the finder</td></tr>
-        <tr><td><code>rcd alembic</code></td><td>Go to the folder where you ran it</td></tr>
-        <tr><td><code>r</code>, <code>r docker</code>, <code>rr</code></td><td>The finder, in Command Prompt</td></tr>
-        <tr class="sub"><td colspan="2">In the finder</td></tr>
-        <tr><td><kbd>Tab</kbd> / <kbd>Shift</kbd>+<kbd>Tab</kbd></td><td>Switch between Recall, Fixes and Flows</td></tr>
-        <tr><td><kbd>Enter</kbd></td><td>Put the command on your prompt. It never runs by itself. A command with a blank lands with the cursor in the blank.</td></tr>
-        <tr><td><code>deploy last week</code></td><td>End a search with when: only what ran then</td></tr>
-        <tr><td><kbd>Ctrl</kbd>+<kbd>G</kbd></td><td>Every variant on its own line, or folded</td></tr>
-        <tr><td><kbd>Ctrl</kbd>+<kbd>O</kbd></td><td>Every run of the command, and what each printed; <kbd>Del</kbd> <kbd>Del</kbd> there forgets one run</td></tr>
-        <tr><td><kbd>←</kbd> <kbd>→</kbd> &nbsp;<kbd>F2</kbd> &nbsp;<kbd>F3</kbd></td><td>Change folder scope, outcome, and who ran it (yours first; <kbd>F3</kbd> adds agents')</td></tr>
-        <tr><td><kbd>F1</kbd> &nbsp;<kbd>F10</kbd></td><td>Every key, and settings</td></tr>
-        <tr class="sub"><td colspan="2">From the command line</td></tr>
-        <tr><td><code>reman search "…"</code></td><td>Search by meaning</td></tr>
-        <tr><td><code>reman check "…"</code></td><td>Has this been run here, and did it work?</td></tr>
-        <tr><td><code>reman connect</code></td><td>Which agents are connected, and what they can see</td></tr>
-        <tr><td><code>reman here</code></td><td>What you did in this folder last time</td></tr>
-        <tr><td><code>reman why</code></td><td>It used to work here: what ran since, and what git says changed</td></tr>
-        <tr><td><code>reman yesterday</code>, <code>today</code>, <code>day monday</code></td><td>Your day, by project, with fixes and what agents did</td></tr>
-        <tr><td><code>reman agents</code></td><td>What each agent ran this week, failures and retry loops</td></tr>
-        <tr><td><code>reman goto …</code></td><td>The folder <code>rcd</code> would go to, printed</td></tr>
-        <tr><td><code>reman runbook</code></td><td>How this project is run, from what worked</td></tr>
-        <tr><td><code>reman sessions</code>, <code>resume</code></td><td>Find an agent's session by what it did, and reopen it</td></tr>
-        <tr><td><code>reman shell</code>, <code>output</code></td><td>Your shell with its output kept; what commands printed</td></tr>
-        <tr><td><code>reman search … --failed --by agents</code></td><td>Filters, <code>--format</code> and <code>--json</code> for scripts</td></tr>
-        <tr><td><code>reman delete</code>, <code>prune</code>, <code>stats week</code></td><td>Remove runs by their text, apply ignore rules to older history, count a period</td></tr>
-        <tr><td><code>reman uninstall</code></td><td>Remove it everywhere; your history stays unless <code>--purge</code></td></tr>
+        <tr class="sub"><td colspan="2">Find it</td></tr>
+        <tr><td><b>Search by meaning</b></td><td><code>tear down containers</code> finds <code>docker compose down -v</code>. Typed text and typos work too.</td></tr>
+        <tr><td><b>Time in a search</b></td><td>End with when: <code>deploy last week</code>, <code>docker yesterday</code>.</td></tr>
+        <tr><td><b>Commands with a blank</b></td><td>Thirty-eight commit messages are one line; Enter puts the cursor in the blank.</td></tr>
+        <tr><td><b>Under your prompt</b></td><td>The finder opens below the prompt, your own commands first, agents' one key away.</td></tr>
+        <tr><td><b>Every run</b></td><td>When, how long, who, which branch, and what that run printed.</td></tr>
+        <tr class="sub"><td colspan="2">Before and after it runs</td></tr>
+        <tr><td><b>Track record</b></td><td>Worked every time, failed every time, or how often. A command that only failed never leads.</td></tr>
+        <tr><td><b>How long it takes</b></td><td><em>Usually 3m 12s</em>; a desktop note when a long command finishes.</td></tr>
+        <tr><td><b>Held before it fails</b></td><td>A slow command that keeps failing here waits for a second Enter, with why.</td></tr>
+        <tr><td><b>Fixes, learned from you</b></td><td>After a failure, what worked last time and what it changes, one key away.</td></tr>
+        <tr><td><b>When it breaks</b></td><td>What changed since it last worked: the branch, new commits, an install. Flaky, not broken.</td></tr>
+        <tr class="sub"><td colspan="2">Your work</td></tr>
+        <tr><td><b>The next step</b></td><td>What you usually run next here, from your own habits, on one key.</td></tr>
+        <tr><td><b>Flows</b></td><td>Sequences you repeat, walked through a step at a time.</td></tr>
+        <tr><td><b>Your folders, your day</b></td><td><code>rcd alembic</code> goes where you ran it; <code>reman yesterday</code> tells your day by project.</td></tr>
+        <tr><td><b>Runbook</b></td><td>How a project is run, from the commands that worked there.</td></tr>
+        <tr><td><b>What it printed</b></td><td><code>reman shell</code> keeps your commands' output; <code>reman output</code> finds it.</td></tr>
+        <tr class="sub"><td colspan="2">Your agents</td></tr>
+        <tr><td><b>Real commands only</b></td><td>Claude Code, Codex, Cursor and others ask before guessing; nine tools over MCP and HTTP.</td></tr>
+        <tr><td><b>Only what you share</b></td><td>No history until you approve a folder. An agent can't approve one for itself.</td></tr>
+        <tr><td><b>Loops broken</b></td><td>An agent retrying a command that keeps failing the same way is told to stop.</td></tr>
+        <tr><td><b>Sessions</b></td><td>Find the agent session that did it, and reopen it where it worked.</td></tr>
+        <tr class="sub"><td colspan="2">Yours</td></tr>
+        <tr><td><b>Your own keys</b></td><td>Every key reman takes can be changed or turned off: <code>reman settings</code>, Keys. Presets: standard, gentle, vim.</td></tr>
+        <tr><td><b>Private</b></td><td>On your machine only. Secrets masked before saving; a leading space is never recorded.</td></tr>
+        <tr><td><b>Every shell</b></td><td>PowerShell, bash, zsh, fish, nushell, xonsh and Command Prompt, plus what your agents run.</td></tr>
+        <tr><td><b>Open source</b></td><td>Apache License 2.0. One Rust binary for Windows, macOS and Linux.</td></tr>
       </table>
+      <p style="margin-top:22px;color:var(--ink-3);font-size:14px">Every key is listed in the finder (<kbd>F1</kbd>) and by <code>reman keys</code>, as you have them.</p>
     </div>
   </div>
 </section>
