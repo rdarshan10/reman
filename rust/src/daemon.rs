@@ -18,7 +18,7 @@ use crate::search::{self, Query, Rank};
 use crate::store::{Scope, Store};
 use anyhow::{Context, Result};
 use parking_lot::{Mutex, RwLock};
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::{Value, json};
 use std::io::{BufRead, BufReader, Write};
 use std::net::{TcpListener, TcpStream};
@@ -39,6 +39,11 @@ pub struct Daemon {
     agent_starts: Mutex<std::collections::HashMap<String, i64>>,
     /// what is never recorded, from config.json (re-read when the file changes)
     privacy: Mutex<Privacy>,
+    /// `reman shell`'s output for a run not recorded yet (it comes through the spool): capture id
+    /// -> (what it printed, when it came)
+    outputs_due: Mutex<std::collections::HashMap<String, (String, i64)>>,
+    /// stores of output since the last trim to the newest `output_runs`
+    outputs_stored: std::sync::atomic::AtomicU32,
 }
 
 /// What is never recorded as-is: commands and folders matching the ignore patterns, and
@@ -52,6 +57,8 @@ struct Privacy {
     folders: Vec<regex::Regex>,
     /// a desktop notification for a command of yours that ran this many seconds (None = never)
     done_after: Option<u64>,
+    /// how many runs' output is kept, newest first (0 = none)
+    output_runs: u32,
 }
 
 impl Privacy {
@@ -79,6 +86,7 @@ impl Privacy {
             commands: compile(&s.ignore_commands),
             folders: compile(&s.ignore_folders),
             done_after: s.done_alert_after(),
+            output_runs: s.output_runs(),
         };
     }
 
@@ -88,6 +96,7 @@ impl Privacy {
             return None;
         }
         r.err = r.err.and_then(|e| crate::errors::clean_as(&e, !self.keep_secrets));
+        r.printed = r.printed.filter(|_| self.output_runs > 0).and_then(|o| crate::output::kept(&o, !self.keep_secrets));
         if self.keep_secrets {
             return Some(r);
         }
@@ -152,6 +161,33 @@ fn b(v: &Value, k: &str, d: bool) -> bool {
     v.get(k).and_then(Value::as_bool).unwrap_or(d)
 }
 
+/// A command as what it runs, and whether that does something (builds, tests, installs, migrates,
+/// deploys): `cd api && npm test` is `npm test`, which does.
+fn label_of(cmd: &str) -> (String, bool) {
+    let parts = crate::unwrap::commands(cmd).unwrap_or_default();
+    let does = |m: &str| insight::section_of(m).is_some() || insight::changes_things(&describe::group_key(m));
+    match parts.iter().find(|u| does(&u.main)).or(parts.last()) {
+        Some(u) if !u.main.is_empty() => (u.main.clone(), does(&u.main)),
+        _ => (cmd.to_string(), false),
+    }
+}
+
+/// The command line that reopens an agent's session, run in its folder; None for an agent whose
+/// sessions can't be reopened from a terminal (an editor's chat), or an id that isn't plainly one.
+fn resume_with(agent: &str, id: &str) -> Option<Vec<String>> {
+    if id.is_empty() || id.len() > 128 || !id.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.')) {
+        return None;
+    }
+    let (prog, flag) = match agent {
+        "claude-code" | "claude" => ("claude", "--resume"),
+        "codex" => ("codex", "resume"),
+        "gemini-cli" | "gemini" => ("gemini", "--resume"),
+        "opencode" => ("opencode", "--session"),
+        _ => return None,
+    };
+    Some(vec![prog.to_string(), flag.to_string(), id.to_string()])
+}
+
 /// Parse one ingest-shaped object into a Run.
 pub fn run_from(v: &Value, default_actor: &str) -> Option<Run> {
     let cmd = s(v, "command")?.trim().to_string();
@@ -176,6 +212,9 @@ pub fn run_from(v: &Value, default_actor: &str) -> Option<Run> {
         seen: None,
         branch: None,
         head: None,
+        // kept: the end of what it printed (cleaned and redacted by Privacy::admit)
+        printed: s(v, "printed").map(str::to_string),
+        capture: s(v, "capture").map(str::to_string),
     })
 }
 
@@ -252,6 +291,8 @@ impl Daemon {
             flows_armed: Mutex::new(std::collections::HashMap::new()),
             greeted: Mutex::new(std::collections::HashSet::new()),
             agent_starts: Mutex::new(std::collections::HashMap::new()),
+            outputs_due: Mutex::new(std::collections::HashMap::new()),
+            outputs_stored: std::sync::atomic::AtomicU32::new(0),
             privacy: Mutex::new(Privacy::default()),
         })
     }
@@ -401,8 +442,116 @@ impl Daemon {
                 armed.retain(|_, f| f.pos < f.steps.len());
             }
         }
+        // what `reman shell` saw them print, when it came before them
+        let due: Vec<(String, String)> = {
+            let mut d = self.outputs_due.lock();
+            let now = config::now();
+            d.retain(|_, (_, at)| now - *at < 600);
+            runs.iter().filter_map(|r| r.capture.as_ref()).filter_map(|c| d.remove(c).map(|(t, _)| (c.clone(), t))).collect()
+        };
+        for (id, text) in due {
+            self.attach_output(&id, &text)?;
+        }
+        if runs.iter().any(|r| r.printed.is_some()) {
+            self.outputs_kept(runs.iter().filter(|r| r.printed.is_some()).count() as u32)?;
+        }
         let suggestions = runs.iter().map(|r| if r.failed() { self.suggest_for(&r.cmd, r.cwd.as_deref(), r.err.as_deref()) } else { None }).collect();
         Ok((new_texts.len(), suggestions))
+    }
+
+    /// `reman shell` saw what a command printed (between the marks its shell wrote): kept with
+    /// its run. The run itself may not be in yet (shells record through the spool), so it waits.
+    fn output_op(&self, req: &Value) -> Result<Value> {
+        let (Some(id), Some(text)) = (s(req, "capture"), req.get("text").and_then(Value::as_str)) else {
+            return Ok(json!({"ok": false}));
+        };
+        let attached = self.attach_output(id, text)?;
+        if !attached {
+            self.outputs_due.lock().insert(id.to_string(), (text.to_string(), config::now()));
+        }
+        Ok(json!({"ok": true, "attached": attached}))
+    }
+
+    /// The output kept with the run `reman shell` called `id`: false when that run isn't in yet.
+    fn attach_output(&self, id: &str, text: &str) -> Result<bool> {
+        let (runs, redact) = {
+            let mut p = self.privacy.lock();
+            p.refresh();
+            (p.output_runs, !p.keep_secrets)
+        };
+        let cmd: Option<String> = {
+            let conn = self.db.lock();
+            conn.query_row("SELECT c.cmd_text FROM executions e JOIN commands c ON c.id = e.command_id WHERE e.capture = ?1 ORDER BY e.id DESC LIMIT 1", [id], |r| r.get(0))
+                .optional()?
+        };
+        let Some(cmd) = cmd else { return Ok(false) };
+        if runs == 0 {
+            return Ok(true);
+        }
+        let kept = crate::output::kept(&crate::output::without_echo(&crate::output::plain(text), &cmd), redact);
+        self.db.lock().execute("UPDATE executions SET output = ?1 WHERE capture = ?2", params![kept, id])?;
+        self.outputs_kept(1)?;
+        Ok(true)
+    }
+
+    /// Output is kept for the newest `output_runs` runs only: older ones' is let go (checked
+    /// every 50 stores).
+    fn outputs_kept(&self, n: u32) -> Result<()> {
+        use std::sync::atomic::Ordering;
+        if self.outputs_stored.fetch_add(n, Ordering::Relaxed) + n < 50 {
+            return Ok(());
+        }
+        self.outputs_stored.store(0, Ordering::Relaxed);
+        let keep = self.privacy.lock().output_runs.max(1);
+        self.db.lock().execute(
+            "UPDATE executions SET output = NULL WHERE output IS NOT NULL AND id < (SELECT id FROM executions WHERE output IS NOT NULL ORDER BY id DESC LIMIT 1 OFFSET ?1)",
+            [keep - 1],
+        )?;
+        Ok(())
+    }
+
+    /// `reman output [words]`: runs whose output was kept, newest first; with words, those whose
+    /// command is what the words describe, or whose output has every word.
+    fn outputs_op(&self, req: &Value) -> Result<Value> {
+        let k = n(req, "k", 5).clamp(1, 50) as usize;
+        let words = s(req, "query").unwrap_or("").trim().to_string();
+        let failed = b(req, "failed", false);
+        let mut hits: std::collections::HashSet<String> = std::collections::HashSet::new();
+        if !words.is_empty() {
+            let qv = if words.chars().count() >= 3 { Some(self.embedder.embed_query(&words)?) } else { None };
+            let st = self.store.read();
+            let q = Query { text: &words, k: 100, offset: 0, scope: Scope::All, actor: None, status: None, group: false, rank: Rank::Hybrid, here: None, window: None };
+            for h in search::search(&st, &q, qv.as_deref().map(|v| v.as_slice())).hits.iter().filter(|h| h.close) {
+                hits.insert(st.entries[h.idx as usize].text.clone());
+            }
+        }
+        let terms: Vec<String> = words.split_whitespace().map(str::to_lowercase).collect();
+        #[allow(clippy::type_complexity)]
+        let rows: Vec<(i64, String, Option<i64>, i64, Option<String>, Option<String>, String)> = {
+            let conn = self.db.lock();
+            let mut q = conn.prepare(
+                "SELECT e.id, c.cmd_text, e.exit, e.ts, e.cwd, e.actor, e.output FROM executions e JOIN commands c ON c.id = e.command_id
+                 WHERE e.output IS NOT NULL AND (?1 = 0 OR e.exit > 0) ORDER BY e.id DESC LIMIT 5000",
+            )?;
+            q.query_map([failed as i64], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?)))?.collect::<rusqlite::Result<_>>()?
+        };
+        let (now, offset) = (config::now(), self.local_offset());
+        let results: Vec<Value> = rows
+            .into_iter()
+            .filter_map(|(id, cmd, exit, ts, cwd, actor, out)| {
+                let by_cmd = hits.contains(&cmd) || hits.contains(&label_of(&cmd).0);
+                let low = out.to_lowercase();
+                let in_out = !terms.is_empty() && terms.iter().all(|t| low.contains(t.as_str()));
+                if !terms.is_empty() && !by_cmd && !in_out {
+                    return None;
+                }
+                let who = actor.as_deref().and_then(|a| a.strip_prefix("agent:")).unwrap_or("you").to_string();
+                Some(json!({"id": id, "command": cmd, "exit": exit, "ago": insight::ago(ts, now), "when": crate::timewords::stamp(ts, offset),
+                            "folder": cwd, "by": who, "matched": if by_cmd { "command" } else if in_out { "output" } else { "" }, "output": out}))
+            })
+            .take(k)
+            .collect();
+        Ok(json!({"query": words, "results": results}))
     }
 
     /// The notification for a long command that finished: how it went, how long it took, and
@@ -815,7 +964,7 @@ impl Daemon {
                     offer(c, h.score, Some(h.idx));
                 }
             }
-            // the folder's own name: every word in its last part (`planet api` → planet_naidu_api)
+            // the folder's own name: every word in its last part (`billing api` → billing-api)
             // outranks any command match; every word somewhere in its path ranks with them
             const NAMED: f32 = 1000.0;
             let squash = |t: &str| t.to_lowercase().replace(['_', '-', ' ', '.'], "");
@@ -972,8 +1121,17 @@ impl Daemon {
 
     fn search_op(&self, req: &Value, browse: bool) -> Result<Value> {
         // a time named at the end (`deploy last week`) filters; the rest is what to look for
-        let (words, window) = if browse { (String::new(), None) } else { crate::timewords::split(s(req, "query").unwrap_or(""), config::now(), self.local_offset()) };
+        let (now, offset) = (config::now(), self.local_offset());
+        let (words, window) = if browse { (String::new(), None) } else { crate::timewords::split(s(req, "query").unwrap_or(""), now, offset) };
         let text = words.as_str();
+        // `--after` / `--before` (the CLI): narrow the window the words named, if any
+        let mut span = window.as_ref().map(|w| (w.since, w.until));
+        if let Some((a, _)) = s(req, "after").and_then(|p| crate::timewords::day(p, now, offset)) {
+            span = Some((span.map_or(a, |w| w.0.max(a)), span.map_or(i64::MAX, |w| w.1)));
+        }
+        if let Some((b, _)) = s(req, "before").and_then(|p| crate::timewords::day(p, now, offset)) {
+            span = Some((span.map_or(0, |w| w.0), span.map_or(b, |w| w.1.min(b))));
+        }
         let rank = if s(req, "rank") == Some("semantic") { Rank::Semantic } else { Rank::Hybrid };
         // embed before taking the store lock; tiny queries go fuzzy-only (no model call at all)
         let t0 = Instant::now();
@@ -992,7 +1150,7 @@ impl Daemon {
             group: b(req, "group", !browse),
             rank,
             here,
-            window: window.as_ref().map(|w| (w.since, w.until)),
+            window: span,
         };
         let out = search::search(&st, &q, qv.as_deref().map(|v| v.as_slice()));
         let t_rank = t0.elapsed() - t_embed;
@@ -1198,7 +1356,11 @@ impl Daemon {
             (last, prev) = predict::context(&st, cwd, sess);
         }
         let k = n(req, "k", 5).max(1) as usize;
-        let preds = predict::predict(&st, cwd, last, prev, k);
+        // the finder's "by you": nothing only an agent ever ran
+        let actor = s(req, "actor");
+        let mut preds = predict::predict(&st, cwd, last, prev, if actor.is_some() { k * 3 } else { k });
+        preds.retain(|p| st.passes(&st.agg(&st.entries[p.idx as usize], Scope::All), actor, None));
+        preds.truncate(k);
         let results: Vec<Value> = preds
             .iter()
             .map(|p| {
@@ -1243,6 +1405,348 @@ impl Daemon {
         }
         self.store.write().remove_rows(&ids);
         Ok(ids.len())
+    }
+
+    /// `reman delete`: the (command, folder) rows matching literal text or a regex, narrowed by
+    /// filters; removed with `apply`, else only listed. Never by meaning: a near match is too
+    /// loose to delete with. {"commands": [{command, folder, runs}], "rows": n, "deleted": n}
+    fn delete_op(&self, req: &Value) -> Result<Value> {
+        let (now, offset) = (config::now(), self.local_offset());
+        let contains = s(req, "contains").map(str::to_lowercase);
+        let rx = match s(req, "regex").map(regex::Regex::new).transpose() {
+            Ok(r) => r,
+            Err(e) => return Ok(json!({"error": format!("not a valid regex: {e}")})),
+        };
+        let before = s(req, "before").and_then(|p| crate::timewords::day(p, now, offset)).map(|d| d.0);
+        if s(req, "before").is_some() && before.is_none() {
+            return Ok(json!({"error": "--before: not a time reman knows (yesterday, last week, monday, 2026-09-28)"}));
+        }
+        let (failed, actor) = (b(req, "failed", false), s(req, "actor"));
+        if contains.is_none() && rx.is_none() && !failed && before.is_none() && s(req, "cwd").is_none() {
+            return Ok(json!({"error": "give text to match, --regex, or a filter: reman never deletes everything at once"}));
+        }
+        let (ids, list) = {
+            let st = self.store.read();
+            let folder = s(req, "cwd").map(|c| st.cwd_index(c));
+            if folder == Some(None) {
+                return Ok(json!({"commands": [], "rows": 0, "deleted": 0}));
+            }
+            let mut ids = Vec::new();
+            let mut list = Vec::new();
+            for e in st.entries.iter().filter(|e| e.alive) {
+                if contains.as_ref().is_some_and(|c| !e.lower.contains(c.as_str())) || rx.as_ref().is_some_and(|r| !r.is_match(&e.text)) {
+                    continue;
+                }
+                for r in &e.rows {
+                    let keep = folder.flatten().is_some_and(|f| r.cwd != Some(f))
+                        || (failed && !(r.fail > 0 && r.ok == 0))
+                        || before.is_some_and(|t| r.last_used >= t)
+                        || match actor {
+                            Some("human") => r.human == 0,
+                            Some("agent") => r.agent == 0,
+                            _ => false,
+                        };
+                    if !keep {
+                        ids.push(r.id);
+                        list.push(json!({"command": e.text, "folder": r.cwd.map(|c| st.cwd_name(c).to_string()), "runs": r.runs}));
+                    }
+                }
+            }
+            (ids, list)
+        };
+        let mut deleted = 0;
+        if b(req, "apply", false) && !ids.is_empty() {
+            {
+                let mut conn = self.db.lock();
+                let tx = conn.transaction()?;
+                db::delete_command_rows(&tx, &ids)?;
+                tx.commit()?;
+            }
+            self.store.write().remove_rows(&ids);
+            deleted = ids.len();
+        }
+        Ok(json!({"commands": list, "rows": ids.len(), "deleted": deleted}))
+    }
+
+    /// `reman sessions [words]`: coding agents' sessions, newest first, or those that ran what the
+    /// words describe (a time named at the end narrows them: `migration last week`). Each with
+    /// where it worked, what it ran, how it went, and the command that resumes it.
+    fn sessions_op(&self, req: &Value) -> Result<Value> {
+        const FLOW_MAX: usize = 6;
+        let k = n(req, "k", 10).clamp(1, 50) as usize;
+        let (now, offset) = (config::now(), self.local_offset());
+        let (words, window) = crate::timewords::split(s(req, "query").unwrap_or(""), now, offset);
+        let agent = s(req, "agent").map(str::to_lowercase);
+        // the commands the words describe, with how well each matches
+        let mut hits: std::collections::HashMap<String, f32> = std::collections::HashMap::new();
+        if !words.is_empty() {
+            let qv = if words.chars().count() >= 3 { Some(self.embedder.embed_query(&words)?) } else { None };
+            let st = self.store.read();
+            // anyone's runs: an agent's `cd api && alembic upgrade head` matches through the
+            // `alembic upgrade head` inside it (its own text is mostly the cd)
+            let q = Query { text: &words, k: 200, offset: 0, scope: Scope::All, actor: None, status: None, group: false, rank: Rank::Hybrid, here: None, window: None };
+            for h in search::search(&st, &q, qv.as_deref().map(|v| v.as_slice())).hits.iter().filter(|h| h.close) {
+                hits.insert(st.entries[h.idx as usize].text.clone(), h.score);
+            }
+        }
+        let rows: Vec<(String, String, String, Option<i64>, i64, Option<String>)> = {
+            let conn = self.db.lock();
+            let mut q = conn.prepare(
+                "SELECT e.session, e.actor, c.cmd_text, e.exit, e.ts, e.cwd FROM executions e JOIN commands c ON c.id = e.command_id
+                 WHERE e.actor LIKE 'agent:%' AND COALESCE(e.session, '') NOT IN ('', 'import') ORDER BY e.ts, e.id",
+            )?;
+            q.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)))?.collect::<rusqlite::Result<_>>()?
+        };
+        #[derive(Default)]
+        struct Sess {
+            agent: String,
+            id: String,
+            from: i64,
+            to: i64,
+            runs: u32,
+            failed: u32,
+            folders: Vec<(String, u32)>,
+            /// (what it ran, times, whether it did something: built, tested, installed, ...)
+            flow: Vec<(String, u32, bool)>,
+            score: f32,
+            matched: Vec<String>,
+        }
+        let terms: Vec<String> = words.split_whitespace().map(str::to_lowercase).collect();
+        let st = self.store.read();
+        let mut by: std::collections::HashMap<(String, String), Sess> = std::collections::HashMap::new();
+        for (sid, actor, cmd, exit, ts, cwd) in rows {
+            let name = actor.trim_start_matches("agent:").to_string();
+            if agent.as_deref().is_some_and(|a| !name.to_lowercase().contains(a)) {
+                continue;
+            }
+            let x = by.entry((name.clone(), sid.clone())).or_insert_with(|| Sess { agent: name, id: sid, from: ts, ..Default::default() });
+            x.to = ts;
+            x.runs += 1;
+            x.failed += exit.is_some_and(|e| e > 0) as u32;
+            if let Some(c) = cwd {
+                match x.folders.iter_mut().find(|f| f.0 == c) {
+                    Some(f) => f.1 += 1,
+                    None => x.folders.push((c, 1)),
+                }
+            }
+            // close in meaning, or every word in its text (agents' commands name files and paths)
+            // shown as what it runs: `cargo build --release`, not the `cd ...; . env.ps1;` before it
+            let (label, notable) = label_of(&cmd);
+            let lower = cmd.to_lowercase();
+            let hit = hits.get(&cmd).or_else(|| hits.get(&label)).copied().or_else(|| (!terms.is_empty() && terms.iter().all(|t| lower.contains(t.as_str()))).then_some(0.4));
+            if let Some(sc) = hit {
+                x.score = x.score.max(sc);
+                if !x.matched.contains(&label) {
+                    x.matched.push(label.clone());
+                }
+            }
+            if st.entry(&cmd).is_some_and(|(_, e)| insight::trivial(e)) {
+                continue;
+            }
+            match x.flow.iter_mut().find(|l| l.0 == label) {
+                Some(l) => l.1 += 1,
+                None => x.flow.push((label, 1, notable)),
+            }
+        }
+        // its folder named by the words (`reman sessions billing`)
+        let squash = |t: &str| t.to_lowercase().replace(['_', '-', ' ', '.'], "");
+        for x in by.values_mut().filter(|_| !terms.is_empty()) {
+            if x.folders.iter().any(|f| terms.iter().all(|t| squash(&f.0).contains(&squash(t)))) {
+                x.score = x.score.max(0.5);
+            }
+        }
+        let mut list: Vec<Sess> = by
+            .into_values()
+            .filter(|x| terms.is_empty() || x.score > 0.0)
+            .filter(|x| window.as_ref().is_none_or(|w| x.to >= w.since && x.from < w.until))
+            .collect();
+        // a session that ran more of what was asked for ranks a little higher; then the newest
+        let rank = |x: &Sess| x.score + 0.02 * (x.matched.len().min(5) as f32);
+        list.sort_by(|a, b| rank(b).total_cmp(&rank(a)).then(b.to.cmp(&a.to)));
+        let total = list.len();
+        let results: Vec<Value> = list
+            .iter()
+            .take(k)
+            .map(|x| {
+                let folder = x.folders.iter().max_by_key(|f| f.1).map(|f| f.0.clone());
+                let resume = resume_with(&x.agent, &x.id);
+                // what a session did, not how it looked around: builds, tests, installs,
+                // migrations, deploys first (agents read a lot of files with grep and sed)
+                let mut flow: Vec<&(String, u32, bool)> = x.flow.iter().filter(|f| f.2).collect();
+                if flow.is_empty() {
+                    flow = x.flow.iter().collect();
+                }
+                let (from, to) = (crate::timewords::stamp(x.from, offset), crate::timewords::stamp(x.to, offset));
+                // the same day: its time alone
+                let to = if from.get(..10) == to.get(..10) { to[11..].to_string() } else { to };
+                let span = x.to - x.from;
+                let took = if span >= 2 * 86_400 { format!("{} days", span / 86_400) } else { insight::took((span.max(0) * 1000).min(u32::MAX as i64) as u32, true) };
+                json!({"agent": x.agent, "session": x.id, "folder": folder, "ago": insight::ago(x.to, now),
+                       "from": from, "to": to, "took": took,
+                       "runs": x.runs, "failed": x.failed,
+                       "flow": flow.iter().take(FLOW_MAX).map(|(c, n, _)| json!({"command": c, "times": n})).collect::<Vec<_>>(),
+                       "more": x.flow.len().saturating_sub(FLOW_MAX.min(flow.len())), "matched": x.matched.iter().take(3).collect::<Vec<_>>(),
+                       "resume": resume.as_ref().map(|r| r.join(" ")), "resume_argv": resume})
+            })
+            .collect();
+        Ok(json!({"query": words, "window": window.map(|w| w.label), "total": total, "results": results}))
+    }
+
+    /// The finder's inspector (Ctrl+O): every run of one command, newest first: when, how it went,
+    /// how long it took, where, on which branch, and who ran it.
+    fn runs_op(&self, req: &Value) -> Result<Value> {
+        let cmd = s(req, "command").unwrap_or("");
+        let limit = n(req, "limit", 80).clamp(1, 500);
+        let (now, offset) = (config::now(), self.local_offset());
+        #[allow(clippy::type_complexity)]
+        let rows: Vec<(i64, i64, Option<i64>, Option<String>, Option<String>, Option<i64>, Option<String>, Option<String>, Option<String>)> = {
+            let conn = self.db.lock();
+            let mut q = conn.prepare(
+                "SELECT e.id, e.ts, e.exit, e.cwd, e.actor, e.duration_ms, e.branch, e.head, e.output FROM executions e
+                 JOIN commands c ON c.id = e.command_id WHERE c.cmd_text = ?1 ORDER BY e.ts DESC, e.id DESC LIMIT ?2",
+            )?;
+            q.query_map(params![cmd, limit], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?, r.get(7)?, r.get(8)?)))?
+                .collect::<rusqlite::Result<_>>()?
+        };
+        let runs: Vec<Value> = rows
+            .iter()
+            .map(|(id, ts, exit, cwd, actor, ms, branch, head, output)| {
+                json!({"id": id, "ago": insight::ago(*ts, now), "when": crate::timewords::stamp(*ts, offset), "exit": exit,
+                       "folder": cwd, "by": actor.as_deref().and_then(|a| a.strip_prefix("agent:")).unwrap_or("you"),
+                       "took": ms.filter(|m| *m >= 0).map(|m| insight::took(m.min(u32::MAX as i64) as u32, false)),
+                       "branch": branch, "commit": head.as_deref().map(|h| h.chars().take(7).collect::<String>()), "output": output})
+            })
+            .collect();
+        Ok(json!({"command": cmd, "runs": runs}))
+    }
+
+    /// The inspector's Del: one run removed (the command's counts follow; its last run takes the
+    /// command with it).
+    fn forget_run_op(&self, req: &Value) -> Result<Value> {
+        let id = n(req, "id", -1);
+        let row: Option<(i64, i64, Option<i64>, Option<String>)> = {
+            let conn = self.db.lock();
+            conn.query_row("SELECT command_id, ts, exit, actor FROM executions WHERE id = ?1", [id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
+                .optional()?
+        };
+        let Some((cid, ts, exit, actor)) = row else { return Ok(json!({"ok": false})) };
+        let agent = actor.as_deref().is_some_and(|a| a.starts_with("agent:"));
+        let (ok, bad) = ((exit == Some(0)) as i64, exit.is_some_and(|e| e > 0) as i64);
+        let gone = {
+            let mut conn = self.db.lock();
+            let tx = conn.transaction()?;
+            tx.execute("DELETE FROM executions WHERE id = ?1", [id])?;
+            tx.execute(
+                "UPDATE commands SET run_count = MAX(COALESCE(run_count, 1) - 1, 0), success_count = MAX(COALESCE(success_count, 0) - ?2, 0),
+                   fail_count = MAX(COALESCE(fail_count, 0) - ?3, 0), human_runs = MAX(COALESCE(human_runs, 0) - ?4, 0),
+                   agent_runs = MAX(COALESCE(agent_runs, 0) - ?5, 0) WHERE id = ?1",
+                params![cid, ok, bad, (!agent) as i64, agent as i64],
+            )?;
+            let left: i64 = tx.query_row("SELECT COUNT(*) FROM executions WHERE command_id = ?1", [cid], |r| r.get(0))?;
+            if left == 0 {
+                db::delete_command_rows(&tx, &[cid])?;
+            }
+            tx.commit()?;
+            left == 0
+        };
+        self.store.write().remove_exec(cid, ts, exit, agent, gone);
+        Ok(json!({"ok": true, "command_gone": gone}))
+    }
+
+    /// `reman prune`: history saved before an ignore rule was added, removed now: commands
+    /// matching `ignore_commands`, run in folders matching `ignore_folders` (config.json).
+    fn prune_op(&self, req: &Value) -> Result<Value> {
+        let (ids, list) = {
+            let mut p = self.privacy.lock();
+            p.refresh();
+            let st = self.store.read();
+            let mut ids = Vec::new();
+            let mut list = Vec::new();
+            for e in st.entries.iter().filter(|e| e.alive) {
+                let by_text = p.commands.iter().any(|x| x.is_match(&e.text));
+                for r in &e.rows {
+                    let by_folder = r.cwd.is_some_and(|c| p.folders.iter().any(|x| x.is_match(st.cwd_name(c))));
+                    if by_text || by_folder {
+                        ids.push(r.id);
+                        list.push(json!({"command": e.text, "folder": r.cwd.map(|c| st.cwd_name(c).to_string()), "runs": r.runs,
+                                         "why": if by_text { "ignore_commands" } else { "ignore_folders" }}));
+                    }
+                }
+            }
+            (ids, list)
+        };
+        let mut deleted = 0;
+        if b(req, "apply", false) && !ids.is_empty() {
+            {
+                let mut conn = self.db.lock();
+                let tx = conn.transaction()?;
+                db::delete_command_rows(&tx, &ids)?;
+                tx.commit()?;
+            }
+            self.store.write().remove_rows(&ids);
+            deleted = ids.len();
+        }
+        Ok(json!({"commands": list, "rows": ids.len(), "deleted": deleted}))
+    }
+
+    /// `reman stats <period>`: the runs of a period (today, week, month, year, a day, `last week`),
+    /// from the execution log: how much ran and how it went, time spent, the most run commands and
+    /// tools (program and subcommand: `git status`, `kubectl get`), what failed most, where.
+    fn stats_period(&self, period: &str) -> Result<Value> {
+        let (now, offset) = (config::now(), self.local_offset());
+        let p = period.trim().to_lowercase();
+        let span = match p.as_str() {
+            "week" => Some((now - 7 * 86400, now)),
+            "month" => Some((now - 31 * 86400, now)),
+            "year" => Some((now - 365 * 86400, now)),
+            _ => crate::timewords::day(&p, now, offset),
+        };
+        let Some((since, until)) = span else {
+            return Ok(json!({"error": format!("`{period}` isn't a period reman knows: today, week, month, year, yesterday, last week, monday, 2026-09-28")}));
+        };
+        let rows: Vec<(String, String, Option<i64>, Option<String>, Option<i64>)> = {
+            let conn = self.db.lock();
+            let mut q = conn.prepare(
+                "SELECT COALESCE(e.actor, ''), c.cmd_text, e.exit, e.cwd, e.duration_ms FROM executions e JOIN commands c ON c.id = e.command_id
+                 WHERE e.ts >= ?1 AND e.ts < ?2",
+            )?;
+            q.query_map([since, until], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)))?.collect::<rusqlite::Result<_>>()?
+        };
+        use std::collections::HashMap;
+        let (mut ok, mut fail, mut you, mut agents, mut ms, mut fail_ms) = (0u64, 0u64, 0u64, 0u64, 0i64, 0i64);
+        let (mut cmds, mut tools, mut failing, mut folders): (HashMap<&str, u64>, HashMap<String, u64>, HashMap<&str, u64>, HashMap<&str, u64>) = Default::default();
+        for (actor, cmd, exit, cwd, dur) in &rows {
+            let d = dur.unwrap_or(0).max(0);
+            ms += d;
+            match exit {
+                Some(0) => ok += 1,
+                Some(e) if *e > 0 => {
+                    fail += 1;
+                    fail_ms += d;
+                    *failing.entry(cmd).or_default() += 1;
+                }
+                _ => {}
+            }
+            if actor.starts_with("agent:") { agents += 1 } else { you += 1 }
+            *cmds.entry(cmd).or_default() += 1;
+            *tools.entry(describe::group_key(cmd)).or_default() += 1;
+            if let Some(c) = cwd {
+                *folders.entry(c).or_default() += 1;
+            }
+        }
+        let top = |m: HashMap<&str, u64>, k: usize| {
+            let mut v: Vec<(&str, u64)> = m.into_iter().collect();
+            v.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(b.0)));
+            v.into_iter().take(k).map(|(t, n)| json!({"command": t, "runs": n})).collect::<Vec<_>>()
+        };
+        let mut tv: Vec<(String, u64)> = tools.into_iter().filter(|(t, _)| !t.is_empty()).collect();
+        tv.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+        Ok(json!({
+            "period": period, "runs": rows.len(), "commands": cmds.len(), "ok_runs": ok, "failed_runs": fail,
+            "you": you, "agents": agents, "time_ms": ms, "failed_time_ms": fail_ms,
+            "top": top(cmds, 10), "tools": tv.iter().take(8).map(|(t, n)| json!({"tool": t, "runs": n})).collect::<Vec<_>>(),
+            "failing": top(failing, 5), "folders": top(folders, 5),
+        }))
     }
 
     /// Retention: drop (command, folder) rows that only ever failed and are older than `days`.
@@ -1733,7 +2237,17 @@ impl Daemon {
                 db::meta_set(&conn, "fixpairs_backfilled", &config::now().to_string())?;
                 json!({"ok": true, "pairs": found.len()})
             }
-            "stats" => self.stats(),
+            "stats" => match s(req, "period").filter(|p| *p != "all") {
+                Some(p) => self.stats_period(p)?,
+                None => self.stats(),
+            },
+            "delete" => self.delete_op(req)?,
+            "runs" => self.runs_op(req)?,
+            "sessions" => self.sessions_op(req)?,
+            "output" => self.output_op(req)?,
+            "outputs" => self.outputs_op(req)?,
+            "forget_run" => self.forget_run_op(req)?,
+            "prune" => self.prune_op(req)?,
             "reindex" => json!({"ok": true, "reembedded": self.reindex()?}),
             "mcp" => {
                 let ans = mcp::answer(self, s(req, "tool").unwrap_or(""), req.get("args").unwrap_or(&Value::Null), &mcp::Policy::from_req(req))?;

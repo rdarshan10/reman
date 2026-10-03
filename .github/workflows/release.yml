@@ -60,7 +60,7 @@ jobs:
           $d = "dist/${{ matrix.name }}"
           New-Item -ItemType Directory -Force $d | Out-Null
           Copy-Item "target/${{ matrix.target }}/release/reman.exe", "target/${{ matrix.target }}/release/reman-hook.exe" $d
-          Copy-Item ../README.md $d
+          Copy-Item ../README.md, ../LICENSE, ../THIRD_PARTY_NOTICES.md, THIRD_PARTY_LICENSES.html $d
           Compress-Archive -Path "$d/*" -DestinationPath "dist/${{ matrix.name }}.zip"
 
       - name: Package (macOS / Linux)
@@ -68,7 +68,7 @@ jobs:
         run: |
           d=dist/${{ matrix.name }}
           mkdir -p "$d"
-          cp target/${{ matrix.target }}/release/reman target/${{ matrix.target }}/release/reman-hook ../README.md "$d/"
+          cp target/${{ matrix.target }}/release/reman target/${{ matrix.target }}/release/reman-hook ../README.md ../LICENSE ../THIRD_PARTY_NOTICES.md THIRD_PARTY_LICENSES.html "$d/"
           tar -C dist -czf dist/${{ matrix.name }}.tar.gz ${{ matrix.name }}
 
       - uses: actions/upload-artifact@v4
@@ -97,7 +97,14 @@ jobs:
       - name: Add the install scripts
         run: cp install.ps1 install.sh dist/
 
+      - name: Notes from CHANGELOG.md
+        run: |
+          # this version's section, up to the next version's heading
+          awk -v v="## v${GITHUB_REF_NAME#v}" 'index($0, v) == 1 {f=1; next} /^## v/ {f=0} f' CHANGELOG.md > notes.md
+          cat notes.md
+
       - uses: softprops/action-gh-release@v2
         with:
           files: dist/*
+          body_path: notes.md
           generate_release_notes: true

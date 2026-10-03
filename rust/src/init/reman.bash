@@ -8,6 +8,14 @@
 __reman_exe="__REMAN__"
 __reman_hook="__HOOK__"
 __reman_port=__PORT__
+# `reman settings` can open every shell inside `reman shell`, so what your commands print is kept
+# too: this one hands over to a shell inside it, and closes when that one does (it goes on as
+# usual when that can't start)
+if [ __SHELL_LAYER__ = 1 ] && [ -z "$REMAN_PTY" ] && [[ $- == *i* ]] && [ -t 0 ] && [ "$TERM_PROGRAM" != vscode ]; then
+  "$__reman_exe" shell -- "$BASH" -i
+  __reman_s=$?
+  [ $__reman_s -ne 97 ] && exit $__reman_s
+fi
 reman() { "$__reman_exe" "$@"; }
 # rcd <words>: go to the folder where you ran what the words describe (or whose path has them).
 # `rcd alembic 2` takes the second match; `rcd` lists where you were lately, `rcd 3` goes there.
@@ -37,7 +45,17 @@ __reman_preexec() {
   [ -n "$COMP_LINE" ] && return
   [ -n "$__reman_start" ] && return
   __reman_ms; __reman_start=$REPLY
+  # inside `reman shell`, what the command prints is kept: it starts here (the prompt ends it)
+  if [ -n "$REMAN_PTY" ] && [[ $BASH_COMMAND != __reman_precmd* ]]; then
+    __reman_cap="$REMAN_SESSION-$REPLY"
+    __reman_beat
+    printf '\e]46031711;C;%s\a' "$__reman_cap" >/dev/tty 2>/dev/null
+  fi
 }
+
+# (on Windows the terminal reman shell runs is ConPTY, which draws text on its own beat but
+# passes a mark on at once: a mark waits one beat, so it lands after what came before it)
+__reman_beat() { case $OSTYPE in msys*|cygwin*) sleep 0.03 ;; esac; }
 
 __reman_note() { # print JSON string field $2 of reply $1 as a dim reman line
   [[ $1 =~ \"$2\":\"(([^\"\\]|\\.)*)\" ]] || return
@@ -60,7 +78,9 @@ __reman_welcome() { # "last time here": asked when the folder changes (the daemo
 }
 
 __reman_precmd() {
-  local ec=$? start=$__reman_start line num cmd
+  local ec=$? start=$__reman_start line num cmd cap=$__reman_cap
+  __reman_cap=
+  if [ -n "$cap" ]; then __reman_beat; printf '\e]46031711;D;%s\a' "$cap" >/dev/tty 2>/dev/null; fi
   __reman_welcome
   __reman_start=
   [ -z "$start" ] && return $ec
@@ -76,7 +96,7 @@ __reman_precmd() {
   __reman_q "$cmd"; local qc=$REPLY
   __reman_q "$PWD"; local qd=$REPLY
   __reman_q "$REMAN_SESSION"; local qs=$REPLY
-  local json="{\"op\":\"ingest\",\"command\":$qc,\"exit\":$ec,\"cwd\":$qd,\"session\":$qs,\"actor\":\"human\",\"duration_ms\":$dur,\"ts\":$EPOCHSECONDS}"
+  local json="{\"op\":\"ingest\",\"command\":$qc,\"exit\":$ec,\"cwd\":$qd,\"session\":$qs,\"actor\":\"human\",\"duration_ms\":$dur,\"ts\":$EPOCHSECONDS${cap:+,\"capture\":\"$cap\"}}"
   local fd= reply=
   { exec {fd}<>"/dev/tcp/127.0.0.1/$__reman_port"; } 2>/dev/null
   if [ -n "$fd" ]; then
@@ -84,7 +104,7 @@ __reman_precmd() {
     [ "$ec" -ne 0 ] && IFS= read -r -t 0.6 -u $fd reply
     exec {fd}>&-
   else
-    ("$__reman_hook" record --exit "$ec" --cwd "$PWD" --duration-ms "$dur" -- "$cmd" &) >/dev/null 2>&1
+    (REMAN_CAPTURE=$cap "$__reman_hook" record --exit "$ec" --cwd "$PWD" --duration-ms "$dur" -- "$cmd" &) >/dev/null 2>&1
   fi
   if [[ $reply =~ \"suggest\":\{\"command\":\"(([^\"\\]|\\.)*)\" ]]; then
     local fix=${BASH_REMATCH[1]} lead="did you mean"

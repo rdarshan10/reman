@@ -53,7 +53,7 @@ def cli(*args, cwd=None):
 def main():
     tmp = tempfile.mkdtemp(prefix="reman-insight-")
     env = dict(os.environ, REMAN_DB=os.path.join(tmp, "reman.db"), REMAN_PORT=str(PORT), REMAN_SPOOL=os.path.join(tmp, "spool.jsonl"),
-               REMAN_NOTIFY_LOG=os.path.join(tmp, "notify.log"))
+               REMAN_NOTIFY_LOG=os.path.join(tmp, "notify.log"), REMAN_CONFIG=os.path.join(tmp, "config.json"))
     proc = subprocess.Popen([EXE, "daemon", "--port", str(PORT)], env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     try:
         for _ in range(240):
@@ -216,8 +216,8 @@ def run(tmp):
     # --- reman yesterday ---------------------------------------------------------------------
     print("reman yesterday")
     shop = os.path.join(tmp, "projects", "web-shop")
-    planet = os.path.join(tmp, "projects", "planet_naidu_api")
-    for d in (shop, planet):
+    billing = os.path.join(tmp, "projects", "billing-api")
+    for d in (shop, billing):
         os.makedirs(d)
     y = noon_yday
     ingest("docker compose up", shop, y, exit=1, session="s-day")
@@ -228,7 +228,7 @@ def run(tmp):
     ingest("npm run lint", shop, y + 200, exit=1, session="s-day")
     ingest("npm run build", shop, y + 220, actor="agent:codex", session="s-day-agent")
     ingest("npm run build", shop, y + 240, exit=1, actor="agent:codex", session="s-day-agent")
-    ingest("alembic upgrade head", planet, y + 3600, session="s-day2")
+    ingest("alembic upgrade head", billing, y + 3600, session="s-day2")
     r = call({"op": "day", "day": "yesterday"})
     p = next((x for x in r.get("projects", []) if x["name"] == "web-shop"), {})
     flow = [(f["command"], f["times"]) for f in p.get("flow", [])]
@@ -238,7 +238,7 @@ def run(tmp):
     check("...a failure with what fixed it", (fails.get("docker compose up") or {}).get("fixed_by") == "docker compose up --build", fails)
     check("...and one still failing", "npm run lint" in fails and not fails["npm run lint"].get("fixed_by") and not fails["npm run lint"].get("worked_later"), fails)
     check("...agents in one line", p.get("agents") == [{"agent": "codex", "runs": 2, "failed": 1}], p.get("agents"))
-    check("...each project with its hours", bool(any(x["name"] == "planet_naidu_api" for x in r.get("projects", [])) and p.get("from") and p.get("to")), r.get("projects"))
+    check("...each project with its hours", bool(any(x["name"] == "billing-api" for x in r.get("projects", [])) and p.get("from") and p.get("to")), r.get("projects"))
     out = cli("yesterday")
     print("   " + out.replace("\n", "\n    ")[:900])
     check("`reman yesterday` prints it", "web-shop" in out and "docker compose up" in out and "(fixed)" in out and "still failing" in out and "codex ran 2 commands here (1 failed)" in out, out)
@@ -247,15 +247,15 @@ def run(tmp):
     # --- reman goto --------------------------------------------------------------------------
     print("reman goto")
     g = call({"op": "goto", "query": "alembic"})
-    check("goto: the folder where you ran it", [x["folder"] for x in g.get("results", [])][:1] == [planet] and "alembic" in (g["results"][0].get("because") or ""), g)
-    g = call({"op": "goto", "query": "planet api"})
-    check("goto: by the folder's own name", [x["folder"] for x in g.get("results", [])][:1] == [planet], g)
+    check("goto: the folder where you ran it", [x["folder"] for x in g.get("results", [])][:1] == [billing] and "alembic" in (g["results"][0].get("because") or ""), g)
+    g = call({"op": "goto", "query": "billing api"})
+    check("goto: by the folder's own name", [x["folder"] for x in g.get("results", [])][:1] == [billing], g)
     g = call({"op": "goto", "query": "rebuild the containers"})
     check("goto: by meaning", [x["folder"] for x in g.get("results", [])][:1] == [shop], g)
     check("goto: a folder that doesn't exist is never offered", all(os.path.isdir(x["folder"]) for x in call({"op": "goto", "query": "npm"}).get("results", [])))
     env = dict(os.environ, REMAN_PORT=str(PORT))
     pr = subprocess.run([EXE, "goto", "alembic"], env=env, capture_output=True, text=True, encoding="utf-8")
-    check("`reman goto alembic` prints the folder (for rcd) and why", pr.stdout.strip() == planet and "alembic upgrade head" in pr.stderr, pr.stdout + pr.stderr)
+    check("`reman goto alembic` prints the folder (for rcd) and why", pr.stdout.strip() == billing and "alembic upgrade head" in pr.stderr, pr.stdout + pr.stderr)
 
     # --- done alerts --------------------------------------------------------------------------
     print("done alerts")
@@ -276,6 +276,51 @@ def run(tmp):
     run("cargo test", 90_000, actor="agent:gemini")
     run("cargo bench", 90_000, ts=int(time.time()) - 3600)
     check("not for a quick one, an agent's, or an old one arriving late", len(alerts()) == n, alerts()[n:])
+
+    # --- search filters, delete, prune, stats for a period (ideas from Atuin) -----------------
+    print("search filters, delete, prune, stats")
+    for k in range(3):
+        ingest("kubectl get pods -n web", API, NOW - 200 + k, session="s-atu")
+    for k in range(2):
+        ingest("kubectl apply -f bad.yaml", API, NOW - 150 + k, exit=1, actor="agent:claude-code", session="s-atu-agent")
+    ingest("vault read secret/payments", API, NOW - 100, session="s-atu")
+    names = lambda r: [x["command"] for x in r.get("results", [])]  # noqa: E731
+    r = call({"op": "search", "query": "kubectl", "cwd": API, "k": 10, "status": "fail"})
+    check("search --failed: only what only ever failed", "kubectl apply -f bad.yaml" in names(r) and "kubectl get pods -n web" not in names(r)
+          and all(x["status"] == "fail" for x in r.get("results", [])), names(r))
+    r = call({"op": "search", "query": "kubectl", "cwd": API, "k": 10, "actor": "agent"})
+    check("search --by agents: only what agents ran", "kubectl apply -f bad.yaml" in names(r) and "kubectl get pods -n web" not in names(r)
+          and all(x["actor"].startswith("agent") for x in r.get("results", [])), names(r))
+    r = call({"op": "search", "query": "terraform", "cwd": API, "k": 10, "before": "last week"})
+    check("search --before 'last week': what ran before it", names(r) == ["terraform plan"], names(r))
+    r = call({"op": "search", "query": "terraform", "cwd": API, "k": 10, "after": "monday"})
+    check("search --after monday: what ran since", "terraform plan" not in names(r), names(r))
+    out = cli("search", "kubectl", "--failed", "--cwd", API, "--format", "{status}|{by}|{command}")
+    check("search --format: one line per result, for scripts", out.strip().splitlines()[:1] == ["fail|claude-code|kubectl apply -f bad.yaml"], out)
+    try:
+        js = json.loads(cli("search", "kubectl", "--cwd", API, "--json"))
+    except ValueError:
+        js = None
+    check("search --json", isinstance(js, list) and any(x.get("command") == "kubectl get pods -n web" for x in js), js)
+    d = call({"op": "delete"})
+    check("delete with nothing to match refuses", "error" in d, d)
+    d = call({"op": "delete", "contains": "kubectl apply"})
+    check("delete previews what it would remove, removing nothing", d.get("rows") == 1 and d.get("deleted") == 0 and call({"op": "detail", "command": "kubectl apply -f bad.yaml"}).get("found"), d)
+    out = cli("delete", "kubectl", "apply", "--yes")
+    check("reman delete --yes removes it", "Removed 1" in out and not call({"op": "detail", "command": "kubectl apply -f bad.yaml"}).get("found"), out)
+    check("...and nothing else", call({"op": "detail", "command": "kubectl get pods -n web"}).get("found"))
+    open(os.path.join(tmp, "config.json"), "w").write(json.dumps({"ignore_commands": ["^vault "]}))
+    p = call({"op": "prune"})
+    check("prune lists history an ignore rule now covers", [c["command"] for c in p.get("commands", [])] == ["vault read secret/payments"] and p.get("deleted") == 0, p)
+    p = call({"op": "prune", "apply": True})
+    check("prune removes it", p.get("deleted") == 1 and not call({"op": "detail", "command": "vault read secret/payments"}).get("found"), p)
+    os.remove(os.path.join(tmp, "config.json"))
+    st = call({"op": "stats", "period": "today"})
+    tools = [t["tool"] for t in st.get("tools", [])]
+    check("stats today: runs, and tools by subcommand", st.get("runs", 0) > 0 and "kubectl get" in tools, st)
+    out = cli("stats", "week")
+    check("`reman stats week` prints it", "most used:" in out and "most run:" in out, out)
+    check("stats rejects a non-period", "isn't a period" in cli("stats", "someday"))
 
     # --- flaky ------------------------------------------------------------------------------
     print("flaky")
@@ -483,6 +528,48 @@ def run(tmp):
     check("it says what it didn't see", "`npx jest --silent` · worked 1x (+3 runs, result not seen)" in out, out)
     check("it says a command comes from a project file", "`pytest` in `svc/` · in pytest.ini, not run yet" in out, out)
     check("it says a test run covers some files only", "`pytest tests/test_x.py -q` in `svc/` (some files only)" in out, out)
+
+    # --- agents' sessions: search and resume ----------------------------------------------------
+    print("agent sessions")
+    shop = os.path.join(tmp, "shop-front")
+    os.makedirs(shop, exist_ok=True)
+    s1, s2, s3 = "11111111-aaaa-4bbb-8ccc-000000000001", "22222222-aaaa-4bbb-8ccc-000000000002", "conv-cursor-9"
+    for k, c in enumerate(["grep -rn migrate src | head", "cd api && alembic upgrade head", "cd api && alembic upgrade head", "pytest -q"]):
+        ingest(c, shop, NOW - 2 * DAY + k * 60, exit=1 if k == 1 else 0, actor="agent:claude-code", session=s1)
+    for k, c in enumerate(["npm ci", "npm run build", "sed -n 1,80p src/app.tsx"]):
+        ingest(c, shop, NOW - 3600 + k * 60, actor="agent:codex", session=s2)
+    ingest("npm run lint", shop, NOW - 1800, actor="agent:cursor", session=s3)
+    ingest("echo bad", shop, NOW - 1700, actor="agent:claude-code", session="x; rm -rf ~")
+    mine = {s1, s2, s3, "x; rm -rf ~"}
+    r = call({"op": "sessions", "k": 50})
+    ids = [x["session"] for x in r.get("results", []) if x["session"] in mine]
+    check("sessions: newest first", ids == ["x; rm -rf ~", s3, s2, s1], ids)
+    by = {x["session"]: x for x in r.get("results", [])}
+    a = by.get(s1, {})
+    check("...with its folder, runs and failures", (a.get("folder"), a.get("runs"), a.get("failed")) == (shop, 4, 1), a)
+    check("...what it did, as what it ran (no cd), grep left out", [f["command"] for f in a.get("flow", [])][:2] == ["alembic upgrade head", "pytest -q"], a.get("flow"))
+    check("...and how to resume it", (a.get("resume"), by.get(s2, {}).get("resume")) == (f"claude --resume {s1}", f"codex resume {s2}"), (a.get("resume"), by.get(s2, {}).get("resume")))
+    check("an editor's chat can't be resumed from a terminal", by.get(s3, {}).get("resume") is None, by.get(s3))
+    check("an id that isn't plainly one is never put on a command line", by.get("x; rm -rf ~", {}).get("resume") is None, by.get("x; rm -rf ~"))
+    r = call({"op": "sessions", "query": "database migration"})
+    check("by meaning: the session that migrated the database", [x["session"] for x in r.get("results", [])][:1] == [s1], [x["session"] for x in r.get("results", [])])
+    check("...and what it ran that matched", "alembic upgrade head" in (r.get("results") or [{}])[0].get("matched", []), r.get("results"))
+    r = call({"op": "sessions", "query": "app.tsx"})
+    check("by text in a command (a file it read)", [x["session"] for x in r.get("results", [])] == [s2], r.get("results"))
+    r = call({"op": "sessions", "query": "shop front"})
+    check("by the folder's name", {s1, s2, s3} <= {x["session"] for x in r.get("results", [])}, r.get("results"))
+    r = call({"op": "sessions", "agent": "codex", "k": 50})
+    check("--agent codex", s2 in [x["session"] for x in r.get("results", [])] and all(x["agent"] == "codex" for x in r.get("results", [])), r.get("results"))
+    r = call({"op": "sessions", "query": "today", "k": 50})
+    got = {x["session"] for x in r.get("results", [])}
+    check("time words: today's sessions, not the one two days ago", {s2, s3} <= got and s1 not in got and r.get("window") == "today", r)
+    out = cli("resume", "database", "migration", "--print")
+    check("reman resume --print: the command line", out.strip() == f"claude --resume {s1}", out)
+    out = cli("resume", "zzqq-nothing-like-this")
+    check("reman resume with no match says so", "No agent session ran anything like" in out, out)
+    out = cli("sessions", "migration")
+    check("reman sessions prints it", "claude-code" in out and "alembic upgrade head" in out and f"claude --resume {s1}" in out, out)
+
 
 if __name__ == "__main__":
     sys.exit(main())

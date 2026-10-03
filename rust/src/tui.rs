@@ -11,7 +11,7 @@
 use crate::client::Client;
 use anyhow::Result;
 use ratatui::buffer::Buffer;
-use ratatui::crossterm::event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers};
+use ratatui::crossterm::event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::crossterm::terminal::{self, EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode};
 use ratatui::crossterm::{cursor, execute};
 use ratatui::layout::Rect;
@@ -274,6 +274,9 @@ fn worker(rx: Receiver<Job>, tx: Sender<Reply>) {
                                     let searched = sec.req["op"] == "search" && sec.req["query"].as_str().is_some_and(|q| !q.trim().is_empty());
                                     if searched && !items.is_empty() && !items.iter().any(|it| it.meta["close"].as_bool() == Some(true)) {
                                         title = NOTHING_CLOSE.to_string();
+                                        if sec.req["actor"] == "human" {
+                                            title.push_str(" · F3 adds agents'");
+                                        }
                                     }
                                     if sec.main {
                                         r.total = v["total"].as_u64().unwrap_or(items.len() as u64) as usize;
@@ -339,6 +342,20 @@ struct App {
     queries: [String; 3],
     /// F10: close the finder and open `reman settings`
     open_settings: bool,
+    /// Ctrl+O: every run of the selected command
+    inspect: Option<Inspect>,
+    /// vim keys (a setting), and whether normal mode is on
+    vim: bool,
+    normal: bool,
+}
+
+struct Inspect {
+    command: String,
+    runs: Vec<Value>,
+    loaded: bool,
+    sel: usize,
+    /// the run Del was pressed on once
+    confirm: Option<i64>,
 }
 
 struct FlowView {
@@ -441,8 +458,9 @@ impl App {
         let mut s: Vec<Section> = Vec::new();
         match self.mode {
             Mode::Recall if q.is_empty() => {
-                if self.actor == "all" && self.status == "all" {
-                    s.push(sec("likely next", Kind::Next, json!({"op": "next", "cwd": self.cwd, "session": self.session, "k": 3}), None, false));
+                if self.actor != "agent" && self.status == "all" {
+                    let next = json!({"op": "next", "cwd": self.cwd, "session": self.session, "k": 3});
+                    s.push(sec("likely next", Kind::Next, filters(next, self.actor, self.status), None, false));
                 }
                 let recent = filters(json!({"op": "recent", "k": self.want}), self.actor, self.status);
                 let mut here = sec(&format!("recent {}", self.scope.phrase()), Kind::List, scoped(recent.clone(), self.scope, &self.cwd), None, true);
@@ -532,6 +550,13 @@ impl App {
             return Some(f.to_string());
         }
         Some(self.fix_of(&it).unwrap_or(it.command))
+    }
+
+    /// Ctrl+O on a command: its runs, newest first (fetched by the worker).
+    fn open_inspect(&mut self) {
+        let Some(it) = self.selected().filter(|_| self.mode != Mode::Flows || self.flow.is_some()) else { return };
+        let _ = self.jobs.send(Job::Other("runs", json!({"op": "runs", "command": it.command, "limit": 200})));
+        self.inspect = Some(Inspect { command: it.command, runs: Vec::new(), loaded: false, sel: 0, confirm: None });
     }
 
     fn reset(&mut self) {
@@ -750,16 +775,22 @@ fn draw(buf: &mut Buffer, app: &App) -> ((u16, u16), Hits) {
     // last line: the query, the tabs on the right
     let tabs = [(Mode::Recall, "Recall"), (Mode::Fixes, "Fixes"), (Mode::Flows, "Flows")];
     let tabs_w: usize = tabs.iter().map(|t| t.1.len() + 2).sum::<usize>() + 1;
-    let prompt = if app.flow.is_some() { " ⇢ " } else { " › " };
-    let pw = UnicodeWidthStr::width(prompt);
+    // vim's normal mode shows as a reversed N where the prompt mark was
+    let (prompt, prompt_st) = match (app.normal, app.flow.is_some()) {
+        (true, _) => (" N ", Style::default().fg(ACCENT).add_modifier(Modifier::BOLD | Modifier::REVERSED)),
+        (_, true) => (" ⇢ ", Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)),
+        _ => (" › ", Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)),
+    };
+    let pw = UnicodeWidthStr::width(prompt) + app.normal as usize;
     let qw = w.saturating_sub(pw + tabs_w + 1);
     let shown_q: String = {
         let n = app.query.chars().count();
         if n > qw { app.query.chars().skip(n - qw).collect() } else { app.query.clone() }
     };
-    let mut row = vec![Span::styled(prompt, Style::default().fg(ACCENT).add_modifier(Modifier::BOLD))];
+    let mut row = vec![Span::styled(prompt, prompt_st), Span::raw(if app.normal { " " } else { "" })];
     if app.query.is_empty() {
         let hint = match (app.mode, app.flow.is_some()) {
+            _ if app.normal => "normal mode · j k move · dd forgets · ^O runs · i types · q closes",
             (_, true) => "↵ runs the selected step and queues the rest",
             (Mode::Recall, _) => "describe it in words, or type part of the command",
             (Mode::Fixes, _) => "type the command that failed",
@@ -784,8 +815,12 @@ fn draw(buf: &mut Buffer, app: &App) -> ((u16, u16), Hits) {
     let cursor = ((pw + UnicodeWidthStr::width(shown_q.as_str())).min(w - 1) as u16, input_y);
 
     // the line above: filters as a sentence (or the question / message of the moment)
+    let again = if app.normal { "d again" } else { "Del again" };
     let line = if let Some(c) = &app.confirm_forget {
-        Line::from(vec![Span::styled(format!(" Del again forgets `{}` everywhere", one_line(c)), Style::default().fg(BAD).add_modifier(Modifier::BOLD)), Span::styled("  ·  any other key keeps it", muted())])
+        Line::from(vec![Span::styled(format!(" {again} forgets `{}` everywhere", one_line(c)), Style::default().fg(BAD).add_modifier(Modifier::BOLD)), Span::styled("  ·  any other key keeps it", muted())])
+    } else if let Some(r) = app.inspect.as_ref().and_then(|i| i.confirm.and_then(|id| i.runs.iter().find(|r| r["id"] == json!(id)))) {
+        let when = r["when"].as_str().unwrap_or("");
+        Line::from(vec![Span::styled(format!(" {again} forgets this run ({when})"), Style::default().fg(BAD).add_modifier(Modifier::BOLD)), Span::styled("  ·  the command and its other runs stay", muted())])
     } else if let Some(m) = &app.message {
         Line::from(Span::styled(format!(" {m}"), Style::default().fg(WARN)))
     } else {
@@ -806,9 +841,17 @@ fn draw(buf: &mut Buffer, app: &App) -> ((u16, u16), Hits) {
         let ch = if h >= 20 { 6 } else if h >= 12 { 4 } else { 0 };
         (Rect::new(0, body.y + ch, area.width, body.height.saturating_sub(ch)), Rect::new(0, body.y, area.width, ch))
     };
-    draw_list(buf, app, &items, list, &mut hits);
-    draw_card(buf, app, &items, card, wide);
-    if wide {
+    match &app.inspect {
+        Some(i) => {
+            draw_runs(buf, i, list, &mut hits);
+            draw_printed(buf, i, card, wide);
+        }
+        None => {
+            draw_list(buf, app, &items, list, &mut hits);
+            draw_card(buf, app, &items, card, wide);
+        }
+    }
+    if wide && app.inspect.is_none() {
         draw_logo_corner(buf, card);
     }
     if app.help {
@@ -823,7 +866,10 @@ fn filter_line<'a>(app: &App, items: &[&Item], w: usize) -> Line<'a> {
     let dot = || Span::styled("  ·  ", muted());
     let mut row = vec![Span::raw("   ")];
     let right;
-    if let Some(f) = &app.flow {
+    if let Some(i) = &app.inspect {
+        row.push(Span::styled(format!("every run of `{}`", one_line(&i.command)), Style::default().fg(INFO)));
+        right = if !i.loaded { "… ".into() } else if i.runs.is_empty() { "no runs ".into() } else { format!("run {} of {} ", i.sel + 1, i.runs.len()) };
+    } else if let Some(f) = &app.flow {
         row.push(Span::styled(format!("a flow you ran {}x · {} steps", f.count, f.steps.len()), Style::default().fg(INFO)));
         right = format!("step {} of {} ", app.sel + 1, f.steps.len());
     } else {
@@ -838,14 +884,14 @@ fn filter_line<'a>(app: &App, items: &[&Item], w: usize) -> Line<'a> {
             let actor = match app.actor {
                 "you" => "by you",
                 "agent" => "by agents",
-                _ => "by anyone",
+                _ => "by you and agents",
             };
             let status = match app.status {
                 "ok" => "worked",
                 "fail" => "failed",
                 _ => "any outcome",
             };
-            row.extend([dot(), val(app.actor != "all", actor), key("F3"), dot(), val(app.status != "all", status), key("F2")]);
+            row.extend([dot(), val(app.actor != "you", actor), key("F3"), dot(), val(app.status != "all", status), key("F2")]);
             // the time the query named: only what ran then
             if let Some(w) = app.window.as_deref().filter(|_| !app.query.trim().is_empty()) {
                 row.extend([dot(), val(true, &format!("ran {w}"))]);
@@ -873,13 +919,15 @@ fn filter_line<'a>(app: &App, items: &[&Item], w: usize) -> Line<'a> {
 }
 
 fn hint_line<'a>(app: &App) -> Line<'a> {
-    let k: Vec<(&str, &str)> = if app.flow.is_some() {
+    let k: Vec<(&str, &str)> = if app.inspect.is_some() {
+        vec![("↵", "insert"), ("↑↓", "move"), (if app.normal { "dd" } else { "Del" }, "forget this run"), ("^O", "back"), ("esc", "back")]
+    } else if app.flow.is_some() {
         vec![("↵", "run this step, queue the rest"), ("^A", "insert all steps"), ("↑↓", "move"), ("←", "back to flows")]
     } else if app.mode == Mode::Flows {
         vec![("↵", "open flow"), ("^A", "insert all steps"), ("↑↓", "move"), ("tab", "next tab"), ("F1", "keys"), ("esc", "close")]
     } else {
         let enter = if app.selected().is_some_and(|it| app.fix_of(&it).is_some()) { "insert the fix" } else { "insert" };
-        vec![("↵", enter), ("↑↓", "move"), ("tab", "Recall · Fixes · Flows"), ("Del", "forget"), ("^P", "pin"), ("F1", "keys"), ("esc", "close")]
+        vec![("↵", enter), ("↑↓", "move"), ("tab", "Recall · Fixes · Flows"), ("^O", "every run"), ("Del", "forget"), ("^P", "pin"), ("F1", "keys"), ("esc", "close")]
     };
     let mut sp = vec![Span::raw(" ")];
     for (key, what) in k {
@@ -894,7 +942,7 @@ fn hint_line<'a>(app: &App) -> Line<'a> {
 fn list_rows<'a>(app: &App, items: &[&'a Item], w: usize) -> (Vec<(Line<'a>, Option<usize>)>, usize) {
     let walking = |it: &Item| it.step.is_some() && app.flow.is_none();
     // "nothing close" is news even over a single list
-    let headers = app.flow.is_some() || app.titles.len() > 1 || app.mode != Mode::Recall || app.titles.iter().any(|t| t == NOTHING_CLOSE) || items.first().is_some_and(|i| i.fix || i.predicted || walking(i));
+    let headers = app.flow.is_some() || app.titles.len() > 1 || app.mode != Mode::Recall || app.titles.iter().any(|t| t.starts_with(NOTHING_CLOSE)) || items.first().is_some_and(|i| i.fix || i.predicted || walking(i));
     let mut lines: Vec<(Line, Option<usize>)> = Vec::new();
     let mut sel_row = 0;
     let mut cur: Option<usize> = None;
@@ -1000,6 +1048,127 @@ fn draw_list(buf: &mut Buffer, app: &App, items: &[&Item], r: Rect, hits: &mut H
     }
 }
 
+/// The inspector: one line per run, newest nearest the prompt. Columns give up room right to
+/// left as the list narrows: folder, then branch, then who.
+fn draw_runs(buf: &mut Buffer, i: &Inspect, r: Rect, hits: &mut Hits) {
+    let h = r.height as usize;
+    if h == 0 {
+        return;
+    }
+    let bottom = r.y + r.height - 1;
+    let w = r.width as usize;
+    if i.runs.is_empty() {
+        let t = if i.loaded { "No runs recorded for this command." } else { "loading runs…" };
+        buf.set_string(r.x + 3, bottom, fit(t, w.saturating_sub(4)), muted());
+        return;
+    }
+    let s = |v: &Value| v.as_str().unwrap_or("").to_string();
+    let mut lines: Vec<(Line, Option<usize>)> = Vec::new();
+    let base = 2 + 4 + 17 + 9;
+    let (show_by, show_branch) = (w >= base + 9 + 8, w >= base + 9 + 13 + 10);
+    let fixed = base + if show_by { 9 } else { 0 } + if show_branch { 13 } else { 0 };
+    let show_folder = w > fixed + 4;
+    let mut head = format!("      {}{}", fit("when", 17), fit("took", 9));
+    if show_by {
+        head.push_str(&fit("who", 9));
+    }
+    if show_branch {
+        head.push_str(&fit("branch", 13));
+    }
+    if show_folder {
+        head.push_str("folder");
+    }
+    lines.push((Line::from(vec![Span::styled(fit(&head, w), Style::default().fg(MUTED).add_modifier(Modifier::BOLD))]), None));
+    for (idx, run) in i.runs.iter().enumerate() {
+        let sel = idx == i.sel;
+        let (g, gc) = match run["exit"].as_i64() {
+            Some(0) => ("✓".to_string(), OK),
+            Some(x) if x > 0 => (format!("✗{x}"), BAD),
+            _ => ("·".to_string(), MUTED),
+        };
+        let text_st = if sel { Style::default().add_modifier(Modifier::BOLD) } else { Style::default() };
+        let by = match s(&run["by"]) {
+            b if b == "you" => b,
+            b => who(&format!("agent:{b}")),
+        };
+        let branch = match (run["branch"].as_str(), run["commit"].as_str()) {
+            (Some(b), _) => b.to_string(),
+            (None, Some(c)) => c.to_string(),
+            _ => String::new(),
+        };
+        let mut row = vec![
+            Span::styled(if sel { " ▌" } else { "  " }, Style::default().fg(ACCENT)),
+            Span::styled(fit(&g, 4), Style::default().fg(gc)),
+            Span::styled(fit(&s(&run["when"]), 17), text_st),
+            Span::styled(fit(&s(&run["took"]), 9), muted()),
+        ];
+        if show_by {
+            row.push(Span::styled(fit(&by, 9), Style::default().fg(if by == "you" { MUTED } else { WARN })));
+        }
+        if show_branch {
+            row.push(Span::styled(fit(&branch, 13), Style::default().fg(INFO)));
+        }
+        if show_folder {
+            // a long folder keeps its end: the project's name is there
+            let (f, fw) = (clean(&s(&run["folder"])), w - fixed - 1);
+            let n = f.chars().count();
+            let f = if n > fw && fw > 1 { format!("…{}", f.chars().skip(n + 1 - fw).collect::<String>()) } else { f };
+            row.push(Span::styled(fit(&f, fw), muted()));
+        }
+        lines.push((Line::from(row), Some(idx)));
+    }
+    // the selected run in view, a line of context above it (lines[0] is the header)
+    let sel_row = i.sel + 1;
+    let start = if sel_row + 2 > h { sel_row + 2 - h } else { 0 };
+    let start = start.min(lines.len().saturating_sub(h));
+    for (n, (line, idx)) in lines.into_iter().skip(start).take(h).enumerate() {
+        let y = bottom - n as u16;
+        buf.set_line(r.x, y, &line, r.width);
+        if let Some(ix) = idx {
+            hits.rows.push((y, ix));
+        }
+    }
+}
+
+/// The inspector's card: what the selected run printed, its last lines (when it was kept).
+fn draw_printed(buf: &mut Buffer, i: &Inspect, r: Rect, wide: bool) {
+    if r.height < 2 {
+        return;
+    }
+    let inner = card_frame(buf, r, wide);
+    let Some(run) = i.runs.get(i.sel) else { return };
+    let w = inner.width as usize;
+    let out = run["output"].as_str().unwrap_or("");
+    let mut l: Vec<Line> = Vec::new();
+    if out.is_empty() {
+        l.push(Line::styled("Nothing kept of what this run printed.", muted()));
+        l.push(Line::styled("Agents' output is kept as they run; yours inside `reman shell`.", muted()));
+    } else {
+        let lines: Vec<&str> = out.lines().collect();
+        let room = (inner.height as usize).saturating_sub(1);
+        let from = lines.len().saturating_sub(room);
+        let head = if from > 0 { format!("what it printed · last {} of {} lines", lines.len() - from, lines.len()) } else { "what it printed".to_string() };
+        l.push(Line::styled(head, Style::default().fg(INFO)));
+        for x in &lines[from..] {
+            l.push(Line::raw(fit(&clean(x), w)));
+        }
+    }
+    Paragraph::new(l).render(inner, buf);
+}
+
+/// The card's rule (left of it when wide, under it when narrow) and the room inside.
+fn card_frame(buf: &mut Buffer, r: Rect, wide: bool) -> Rect {
+    if wide {
+        for y in r.y..r.y + r.height {
+            buf.set_string(r.x, y, "│", muted());
+        }
+        Rect::new(r.x + 2, r.y, r.width.saturating_sub(3), r.height)
+    } else {
+        buf.set_string(r.x, r.y + r.height - 1, "─".repeat(r.width as usize), muted());
+        Rect::new(r.x + 1, r.y, r.width.saturating_sub(2), r.height - 1)
+    }
+}
+
 fn empty_state(app: &App) -> (String, String) {
     if !app.loaded {
         return ("searching…".into(), String::new());
@@ -1009,7 +1178,11 @@ fn empty_state(app: &App) -> (String, String) {
         Mode::Recall if q.is_empty() => ("No history yet.".into(), "Commands you run are recorded as you go.".into()),
         Mode::Recall => (
             format!("You haven't run anything like \"{q}\" yet."),
-            if app.actor != "all" || app.status != "all" { "Filters are on: F3 / F2 to widen them.".into() } else { "Try other words, or tab for Fixes and Flows.".into() },
+            match (app.actor, app.status) {
+                ("you", "all") => "Only your own commands are listed: F3 adds agents'.".into(),
+                ("all", "all") => "Try other words, or tab for Fixes and Flows.".into(),
+                _ => "Filters are on: F3 / F2 to widen them.".into(),
+            },
         ),
         Mode::Fixes if q.is_empty() => ("No failed commands recorded here.".into(), "←→ to look in other folders.".into()),
         Mode::Fixes => (format!("Nothing you ran looks like a fix for \"{q}\"."), "Fixes are learned when a failed command is followed by one that works.".into()),
@@ -1022,15 +1195,7 @@ fn draw_card(buf: &mut Buffer, app: &App, items: &[&Item], r: Rect, wide: bool) 
         return;
     }
     // separator: a left rule beside the list, a bottom rule above it
-    let inner = if wide {
-        for y in r.y..r.y + r.height {
-            buf.set_string(r.x, y, "│", muted());
-        }
-        Rect::new(r.x + 2, r.y, r.width.saturating_sub(3), r.height)
-    } else {
-        buf.set_string(r.x, r.y + r.height - 1, "─".repeat(r.width as usize), muted());
-        Rect::new(r.x + 1, r.y, r.width.saturating_sub(2), r.height - 1)
-    };
+    let inner = card_frame(buf, r, wide);
     let Some(it) = items.get(app.sel) else { return };
     let m = &it.meta;
     let mut l: Vec<Line> = Vec::new();
@@ -1199,11 +1364,12 @@ fn draw_help(buf: &mut Buffer, area: Rect) {
         ("tab  shift-tab", "next / previous: Recall → Fixes → Flows"),
         ("alt-1  2  3", "jump straight to Recall / Fixes / Flows"),
         ("← →", "where: this folder → this repo → everywhere"),
-        ("F3", "who: anyone → you → agents"),
+        ("F3", "who: you → you and agents → agents"),
+        ("^O", "every run of a command: when, where, how long, who"),
         ("F2", "outcome: any → worked → failed"),
         ("^G", "fold variants of a command / show each"),
         ("^P", "pin: pinned commands rank first"),
-        ("Del Del", "forget a command everywhere (e.g. it held a secret)"),
+        ("Del Del", "forget a command everywhere (in ^O: one run)"),
         ("Flows ↵", "open a flow; ↵ on a step runs from there, the rest queue"),
         ("Flows ^A", "insert every step as one line"),
         ("^X", "stop the flow in progress"),
@@ -1241,12 +1407,15 @@ fn draw_help(buf: &mut Buffer, area: Rect) {
 pub(crate) struct Screen {
     pub(crate) out: std::io::BufWriter<std::fs::File>,
     pub(crate) prev: Vec<String>,
+    /// the terminal row the frame starts on: 0 on the whole screen; inline, the line under the prompt
+    pub(crate) origin: u16,
 }
 
 impl Screen {
     pub(crate) fn invalidate(&mut self) {
         self.prev.clear();
-        let _ = self.out.write_all(b"\x1b[0m\x1b[2J");
+        // inline, only our lines (everything under the prompt) are ours to clear
+        let _ = if self.origin == 0 { self.out.write_all(b"\x1b[0m\x1b[2J") } else { write!(self.out, "\x1b[0m\x1b[{};1H\x1b[J", self.origin + 1) };
     }
 
     pub(crate) fn frame(&mut self, buf: &Buffer, cursor: (u16, u16)) -> std::io::Result<()> {
@@ -1256,11 +1425,11 @@ impl Screen {
         for y in 0..a.height {
             let line = row_ansi(buf, y);
             if self.prev[y as usize] != line {
-                write!(self.out, "\x1b[{};1H{line}", y + 1)?;
+                write!(self.out, "\x1b[{};1H{line}", self.origin + y + 1)?;
                 self.prev[y as usize] = line;
             }
         }
-        write!(self.out, "\x1b[{};{}H\x1b[?25h", cursor.1 + 1, cursor.0 + 1)?;
+        write!(self.out, "\x1b[{};{}H\x1b[?25h", self.origin + cursor.1 + 1, cursor.0 + 1)?;
         self.out.flush()
     }
 }
@@ -1408,11 +1577,12 @@ pub fn run(o: Opts) -> Result<()> {
         "repo" => ScopeSel::Repo,
         _ => ScopeSel::All,
     };
+    let st = crate::settings::load();
     let mut app = App {
         query: o.query,
         mode: Mode::Recall,
         scope,
-        actor: "all",
+        actor: if st.finder_everyone() { "all" } else { "you" },
         status: "all",
         group: true,
         cwd: o.cwd,
@@ -1437,13 +1607,22 @@ pub fn run(o: Opts) -> Result<()> {
         hits: Hits::default(),
         queries: Default::default(),
         open_settings: false,
+        inspect: None,
+        vim: st.finder_vim(),
+        normal: false,
     };
     app.refresh();
 
     let _cp = Utf8Console::enable();
     let mut out = tty()?;
     enable_raw_mode()?;
-    execute!(out, EnterAlternateScreen, EnableMouseCapture, cursor::Show)?;
+    // inline (the default): the lines under the prompt, scrolled into view; the whole screen when
+    // set so, or when the terminal is too short or can't say where its cursor is
+    let place = st.finder_lines().and_then(|n| inline_place(&mut out, n));
+    match place {
+        Some(_) => execute!(out, EnableMouseCapture, cursor::Show)?,
+        None => execute!(out, EnterAlternateScreen, EnableMouseCapture, cursor::Show)?,
+    }
     let _ = out.write_all(b"\x1b[?7l"); // no autowrap while we own the screen
     let prev_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
@@ -1456,12 +1635,20 @@ pub fn run(o: Opts) -> Result<()> {
         let _ = std::fs::write(crate::config::home().join("tui-panic.log"), format!("{info}\n{}", std::backtrace::Backtrace::force_capture()));
         prev_hook(info);
     }));
-    let mut screen = Screen { out: std::io::BufWriter::with_capacity(1 << 16, tty()?), prev: Vec::new() };
+    let mut screen = Screen { out: std::io::BufWriter::with_capacity(1 << 16, tty()?), prev: Vec::new(), origin: place.map_or(0, |p| p.origin) };
     screen.invalidate();
-    let chosen = event_loop(&mut screen, &mut app, &rrx);
+    let chosen = event_loop(&mut screen, &mut app, &rrx, place.map(|p| p.rows));
     disable_raw_mode()?;
     let _ = out.write_all(b"\x1b[?7h");
-    execute!(out, DisableMouseCapture, LeaveAlternateScreen, cursor::Show)?;
+    match place {
+        // our lines cleared, the cursor back on the prompt (as far up as the scroll moved it)
+        Some(p) => {
+            let origin = screen.origin;
+            write!(out, "\x1b[0m\x1b[{};1H\x1b[J\x1b[{};{}H", origin + 1, origin, p.cursor_x + 1)?;
+            execute!(out, DisableMouseCapture, cursor::Show)?;
+        }
+        None => execute!(out, DisableMouseCapture, LeaveAlternateScreen, cursor::Show)?,
+    }
     let chosen = chosen?;
     if app.open_settings {
         return crate::settings_ui::run();
@@ -1474,6 +1661,66 @@ pub fn run(o: Opts) -> Result<()> {
         }
     }
     Ok(())
+}
+
+#[derive(Clone, Copy)]
+struct Inline {
+    /// the first line the finder draws on: the one under the prompt
+    origin: u16,
+    rows: u16,
+    /// the prompt's cursor column, restored on the way out
+    cursor_x: u16,
+}
+
+/// Room for `rows` lines under the prompt: the terminal scrolls up when the prompt sits too low.
+fn inline_place(out: &mut std::fs::File, rows: u16) -> Option<Inline> {
+    let (_, th) = terminal::size().ok()?;
+    if th < 12 {
+        return None;
+    }
+    let (cx, cy) = cursor_pos()?;
+    let rows = rows.min(th - 1);
+    let mut cy = cy.min(th - 1);
+    let over = (cy + 1 + rows).saturating_sub(th);
+    if over > 0 {
+        // on the last line each line feed scrolls the screen up by one
+        write!(out, "\x1b[{th};1H{}", "\n".repeat(over as usize)).ok()?;
+        out.flush().ok()?;
+        cy -= over;
+    }
+    Some(Inline { origin: cy + 1, rows, cursor_x: cx })
+}
+
+/// Where the cursor is, in screen lines from the top (the console's own answer on Windows).
+#[cfg(windows)]
+fn cursor_pos() -> Option<(u16, u16)> {
+    cursor::position().ok()
+}
+
+/// Where the cursor is: asked of the terminal itself (stdout is often a pipe, `$(reman find)`).
+/// No answer in 400ms (a terminal that doesn't report it) and the finder takes the whole screen.
+#[cfg(not(windows))]
+fn cursor_pos() -> Option<(u16, u16)> {
+    use std::io::Read;
+    let mut t = tty().ok()?;
+    let mut r = t.try_clone().ok()?;
+    let (tx, rx) = channel();
+    std::thread::spawn(move || {
+        let (mut got, mut b) = (Vec::new(), [0u8; 1]);
+        while r.read(&mut b).is_ok_and(|n| n == 1) {
+            got.push(b[0]);
+            if b[0] == b'R' {
+                break;
+            }
+        }
+        let _ = tx.send(got);
+    });
+    t.write_all(b"\x1b[6n").ok()?;
+    t.flush().ok()?;
+    let got = rx.recv_timeout(Duration::from_millis(400)).ok()?;
+    let got = String::from_utf8_lossy(&got);
+    let (row, col) = got.rsplit("\x1b[").next()?.strip_suffix('R')?.split_once(';')?;
+    Some((col.parse::<u16>().ok()?.checked_sub(1)?, row.parse::<u16>().ok()?.checked_sub(1)?))
 }
 
 /// Queue `text` as typed keys in this console's input buffer, so the shell's next prompt starts
@@ -1546,14 +1793,84 @@ fn enter(app: &mut App) -> Act {
     Act::Pick(app.pick())
 }
 
+enum Vim {
+    /// handled here
+    Done,
+    /// handle as this key
+    As(KeyCode),
+    /// as usual
+    Pass,
+}
+
+/// Vim keys. Typing (insert mode) works as usual until Esc; in normal mode j k move, h l change
+/// where, dd forgets (in the inspector: the run), G goes back to the nearest, i a / start typing,
+/// c clears the query to type anew, q and Esc close.
+fn vim_key(app: &mut App, k: KeyEvent, ctrl: bool) -> Vim {
+    if !app.normal {
+        if k.code == KeyCode::Esc {
+            app.normal = true;
+            return Vim::Done;
+        }
+        return Vim::Pass;
+    }
+    if ctrl {
+        return Vim::Pass;
+    }
+    let insert = |app: &mut App| {
+        app.normal = false;
+        Vim::Done
+    };
+    match k.code {
+        KeyCode::Char('j') => Vim::As(KeyCode::Down),
+        KeyCode::Char('k') => Vim::As(KeyCode::Up),
+        KeyCode::Char('h') => Vim::As(KeyCode::Left),
+        KeyCode::Char('l') => Vim::As(KeyCode::Right),
+        KeyCode::Char('d') => Vim::As(KeyCode::Delete),
+        KeyCode::Char('q') => Vim::As(KeyCode::Esc),
+        KeyCode::Char('G') => {
+            match app.inspect.as_mut() {
+                Some(i) => i.sel = 0,
+                None => app.sel = 0,
+            }
+            Vim::Done
+        }
+        KeyCode::Char('i' | 'a' | 'I' | 'A' | '/') => insert(app),
+        KeyCode::Char('c' | 'S') => {
+            app.inspect = None;
+            app.close_flow();
+            app.query.clear();
+            app.reset();
+            insert(app)
+        }
+        KeyCode::Char(_) | KeyCode::Backspace => Vim::Done,
+        _ => Vim::Pass,
+    }
+}
+
+fn move_run(i: &mut Inspect, by: isize) -> Act {
+    i.sel = (i.sel as isize + by).clamp(0, i.runs.len().saturating_sub(1) as isize) as usize;
+    Act::None
+}
+
 fn move_sel(app: &mut App, by: isize) {
     let n = app.visible_items().len();
     app.sel = (app.sel as isize + by).clamp(0, n.saturating_sub(1) as isize) as usize;
 }
 
-fn event_loop(screen: &mut Screen, app: &mut App, replies: &Receiver<Reply>) -> Result<Option<String>> {
+/// `rows`: inline, how many lines the finder takes (from `screen.origin` down); None = all of them.
+fn event_loop(screen: &mut Screen, app: &mut App, replies: &Receiver<Reply>, rows: Option<u16>) -> Result<Option<String>> {
     let mut dirty = true;
-    let mut size = terminal::size().unwrap_or((80, 24));
+    // the frame: the whole terminal, or inline the lines under the prompt (kept on screen when
+    // the terminal shrinks)
+    let fit_to = |screen: &mut Screen, (w, h): (u16, u16)| match rows {
+        None => (w, h),
+        Some(n) => {
+            let n = n.min(h);
+            screen.origin = screen.origin.min(h - n);
+            (w, n)
+        }
+    };
+    let mut size = fit_to(screen, terminal::size().unwrap_or((80, 24)));
     loop {
         while let Ok(r) = replies.try_recv() {
             dirty = true;
@@ -1588,6 +1905,26 @@ fn event_loop(screen: &mut Screen, app: &mut App, replies: &Receiver<Reply>) -> 
                     app.message = Some(format!("forgotten - {} record(s) deleted", v["removed"]));
                     app.refresh();
                 }
+                Reply::Done("runs", v) => {
+                    if let Some(i) = app.inspect.as_mut().filter(|i| v["command"].as_str() == Some(i.command.as_str())) {
+                        i.runs = v["runs"].as_array().cloned().unwrap_or_default();
+                        i.loaded = true;
+                        i.sel = i.sel.min(i.runs.len().saturating_sub(1));
+                    }
+                }
+                Reply::Done("forget_run", v) => {
+                    if v["command_gone"] == json!(true) {
+                        // its last run: the command is gone too
+                        app.inspect = None;
+                        app.message = Some("forgotten - that was its only run, so the command is gone too".into());
+                    } else {
+                        app.message = Some("that run is forgotten".into());
+                        if let Some(i) = &app.inspect {
+                            let _ = app.jobs.send(Job::Other("runs", json!({"op": "runs", "command": i.command, "limit": 200})));
+                        }
+                    }
+                    app.refresh();
+                }
                 Reply::Done(_, _) => app.refresh(),
                 Reply::Error(e) => {
                     app.message = Some(e);
@@ -1620,7 +1957,7 @@ fn event_loop(screen: &mut Screen, app: &mut App, replies: &Receiver<Reply>) -> 
         let k = match ev {
             Event::Key(k) => k,
             Event::Resize(w, h) => {
-                size = (w, h);
+                size = fit_to(screen, (w, h));
                 screen.invalidate();
                 continue;
             }
@@ -1628,6 +1965,20 @@ fn event_loop(screen: &mut Screen, app: &mut App, replies: &Receiver<Reply>) -> 
                 use ratatui::crossterm::event::{MouseButton, MouseEventKind};
                 if app.help {
                     app.help = false;
+                    continue;
+                }
+                let me = ratatui::crossterm::event::MouseEvent { row: me.row.saturating_sub(screen.origin), ..me };
+                if let Some(i) = app.inspect.as_mut() {
+                    match me.kind {
+                        MouseEventKind::ScrollUp => drop(move_run(i, 1)),
+                        MouseEventKind::ScrollDown => drop(move_run(i, -1)),
+                        MouseEventKind::Down(MouseButton::Left) => {
+                            if let Some(&(_, idx)) = app.hits.rows.iter().find(|(y, _)| *y == me.row) {
+                                i.sel = idx;
+                            }
+                        }
+                        _ => {}
+                    }
                     continue;
                 }
                 match me.kind {
@@ -1666,11 +2017,66 @@ fn event_loop(screen: &mut Screen, app: &mut App, replies: &Receiver<Reply>) -> 
             continue;
         }
         let ctrl = k.modifiers.contains(KeyModifiers::CONTROL);
-        let alt = k.modifiers.contains(KeyModifiers::ALT);
+        // vim keys: Esc leaves typing for normal mode, where letters are commands
+        let mut k = k;
+        if app.vim {
+            match vim_key(app, k, ctrl) {
+                Vim::Done => continue,
+                Vim::As(code) => k = KeyEvent::new(code, KeyModifiers::NONE),
+                Vim::Pass => {}
+            }
+        }
+        let (ctrl, alt) = (k.modifiers.contains(KeyModifiers::CONTROL), k.modifiers.contains(KeyModifiers::ALT));
         if k.code != KeyCode::Delete {
             app.confirm_forget = None;
         }
+        if let Some(i) = app.inspect.as_mut() {
+            if k.code != KeyCode::Delete {
+                i.confirm = None;
+            }
+            let handled = match k.code {
+                KeyCode::Esc | KeyCode::Left => Some(Act::Quit),
+                KeyCode::Char('o') if ctrl => Some(Act::Quit),
+                KeyCode::Up => Some(move_run(i, 1)),
+                KeyCode::Down => Some(move_run(i, -1)),
+                KeyCode::PageUp => Some(move_run(i, 10)),
+                KeyCode::PageDown => Some(move_run(i, -10)),
+                KeyCode::Enter => Some(Act::Pick(Some(i.command.clone()))),
+                KeyCode::Delete => {
+                    if let Some(id) = i.runs.get(i.sel).and_then(|r| r["id"].as_i64()) {
+                        if i.confirm == Some(id) {
+                            let _ = app.jobs.send(Job::Other("forget_run", json!({"op": "forget_run", "id": id})));
+                            i.confirm = None;
+                        } else {
+                            i.confirm = Some(id);
+                        }
+                    }
+                    Some(Act::None)
+                }
+                // typing goes back to the list, as a search
+                KeyCode::Char(_) | KeyCode::Backspace if !ctrl => {
+                    app.inspect = None;
+                    None
+                }
+                _ => None,
+            };
+            let took = handled.is_some();
+            match handled {
+                // Esc, ←, ^O: back to the list (not out of the finder)
+                Some(Act::Quit) => app.inspect = None,
+                Some(Act::Pick(p)) => return Ok(p),
+                Some(Act::None) | None => {}
+            }
+            // the function keys (help, filters, settings) still work; other keys wait
+            if took || app.inspect.is_some() && !matches!(k.code, KeyCode::F(_)) {
+                continue;
+            }
+        }
         let act = match k.code {
+            KeyCode::Char('o') if ctrl => {
+                app.open_inspect();
+                Act::None
+            }
             KeyCode::Esc => {
                 if app.close_flow() { Act::None } else { Act::Quit }
             }
@@ -1733,9 +2139,9 @@ fn event_loop(screen: &mut Screen, app: &mut App, replies: &Receiver<Reply>) -> 
             }
             KeyCode::F(3) => {
                 app.actor = match app.actor {
-                    "all" => "you",
-                    "you" => "agent",
-                    _ => "all",
+                    "you" => "all",
+                    "all" => "agent",
+                    _ => "you",
                 };
                 app.reset();
                 Act::None

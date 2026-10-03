@@ -36,6 +36,15 @@ enum Row {
     Ai(bool),
     /// a notification when a long command of yours finishes: after this many seconds, or never
     DoneAlert(Option<u64>),
+    /// the finder: lines under the prompt, or None for the whole screen
+    FinderHeight(Option<u16>),
+    FinderVim(bool),
+    /// the finder lists agents' commands from the start
+    FinderEveryone(bool),
+    /// how many runs' output is kept (0 = none)
+    OutputRuns(u32),
+    /// shells open inside `reman shell`
+    ShellLayer(bool),
     Shell { name: &'static str, wired: bool, detail: String },
     Info { label: &'static str, value: String },
 }
@@ -62,6 +71,11 @@ impl Row {
             Row::OldHistory(_) => "Old, imported history has no folder. When on, agents also get its generic commands (no paths, quotes or hosts).".into(),
             Row::Secrets(_) => "↵ cycles: mask the value (`export API_TOKEN=***`) · drop the command · keep as typed, so your finder shows it whole. Agents always get secrets masked. `reman scrub` cleans older history.".into(),
             Row::DoneAlert(_) => "↵ cycles: after 1 minute · after 5 minutes · never. A desktop notification when a command of yours that ran that long finishes, with how long it took.".into(),
+            Row::FinderHeight(_) => "↵ cycles: 20 lines under the prompt · 30 lines · the whole screen. Where the finder (↑, Tab, Ctrl+R) opens.".into(),
+            Row::FinderVim(_) => "↵ switches the finder's keys: as in a text box, or vim (Esc for normal mode: j k move, dd forgets, i types, q closes).".into(),
+            Row::OutputRuns(_) => "↵ cycles: the newest 3000 runs · 300 · none. What commands printed, kept for `reman output` and the finder's ^O (agents' as they run, yours inside reman shell).".into(),
+            Row::ShellLayer(_) => "↵ switches it: new shells open inside reman shell (a terminal layer of reman's own), so what your commands print is kept too.".into(),
+            Row::FinderEveryone(_) => "↵ switches what the finder lists at first: your own commands, or agents' too. F3 in the finder changes it for the moment.".into(),
             Row::Ai(_) => "A model only arranges and explains commands that really worked (runbooks), never invents one. Remote endpoints: set \"ai\" in config.json.".into(),
             Row::Shell { wired: true, name, .. } => format!("{name} is wired. To remove it, delete the reman block from the file shown."),
             Row::Shell { name, .. } => format!("↵ wires {name} so its commands are recorded and the finder keys work."),
@@ -118,6 +132,15 @@ fn build() -> Vec<Row> {
 
     r.push(Row::Header("Alerts"));
     r.push(Row::DoneAlert(st.done_alert_after()));
+
+    r.push(Row::Header("Finder"));
+    r.push(Row::FinderHeight(st.finder_lines()));
+    r.push(Row::FinderEveryone(st.finder_everyone()));
+    r.push(Row::FinderVim(st.finder_vim()));
+
+    r.push(Row::Header("What commands print"));
+    r.push(Row::OutputRuns(st.output_runs()));
+    r.push(Row::ShellLayer(st.shell_layer));
 
     r.push(Row::Header("Language model (optional)"));
     r.push(Row::Ai(st.ai.as_ref().is_none_or(|a| a.enabled)));
@@ -254,6 +277,46 @@ fn act(row: &Row) -> Result<(String, Color)> {
             settings::save(&st)?;
             (msg.to_string(), OK)
         }
+        Row::FinderHeight(lines) => {
+            let mut st = settings::load();
+            let (next, msg) = match lines {
+                Some(20) => (Some(30), "the finder takes 30 lines under the prompt"),
+                Some(_) => (Some(0), "the finder takes the whole screen"),
+                None => (None, "the finder takes 20 lines under the prompt"),
+            };
+            st.finder_height = next;
+            settings::save(&st)?;
+            (msg.to_string(), OK)
+        }
+        Row::FinderVim(on) => {
+            let mut st = settings::load();
+            st.finder_keys = (!on).then(|| "vim".to_string());
+            settings::save(&st)?;
+            (if *on { "the finder's keys work as in a text box" } else { "vim keys in the finder: Esc for normal mode" }.to_string(), OK)
+        }
+        Row::OutputRuns(n) => {
+            let mut st = settings::load();
+            let (next, msg) = match n {
+                3000 => (300, "output kept for the newest 300 runs"),
+                0 => (3000, "output kept for the newest 3000 runs"),
+                _ => (0, "no output kept"),
+            };
+            st.output_runs = (next != 3000).then_some(next);
+            settings::save(&st)?;
+            (msg.to_string(), OK)
+        }
+        Row::ShellLayer(on) => {
+            let mut st = settings::load();
+            st.shell_layer = !on;
+            settings::save(&st)?;
+            (if *on { "new shells open as before" } else { "new shells open inside reman shell - open a new terminal" }.to_string(), OK)
+        }
+        Row::FinderEveryone(on) => {
+            let mut st = settings::load();
+            st.finder_who = (!on).then(|| "all".to_string());
+            settings::save(&st)?;
+            (if *on { "the finder lists your own commands (F3 shows agents')" } else { "the finder lists agents' commands too" }.to_string(), OK)
+        }
         Row::Ai(on) => {
             let mut st = settings::load();
             let mut ai = st.ai.clone().unwrap_or(settings::Ai { enabled: true, endpoint: None, model: None, api_key_env: None });
@@ -366,6 +429,22 @@ fn row_line(row: &Row, sel: bool, w: usize) -> Line<'static> {
                 None => state("never".into(), MUTED),
             },
         ]),
+        Row::FinderHeight(lines) => Line::from(vec![
+            bar,
+            Span::styled("Opens in: ", name_st),
+            match lines {
+                Some(n) => state(format!("{n} lines under the prompt"), OK),
+                None => state("the whole screen".into(), OK),
+            },
+        ]),
+        Row::FinderEveryone(on) => Line::from(vec![bar, check(*on), Span::styled("List agents' commands too", name_st)]),
+        Row::OutputRuns(n) => Line::from(vec![
+            bar,
+            Span::styled("Kept for: ", name_st),
+            if *n == 0 { state("nothing kept".into(), MUTED) } else { state(format!("the newest {n} runs"), OK) },
+        ]),
+        Row::ShellLayer(on) => Line::from(vec![bar, check(*on), Span::styled("Open shells inside reman shell (keeps what yours print)", name_st)]),
+        Row::FinderVim(on) => Line::from(vec![bar, check(*on), Span::styled("Vim keys", name_st)]),
         Row::Shell { name, wired, detail } => Line::from(vec![
             bar,
             check(*wired),
@@ -412,10 +491,14 @@ fn draw(buf: &mut Buffer, p: &mut Page) -> (u16, u16) {
         shown.push((l, i));
     }
     let sel_at = shown.iter().position(|(_, i)| *i == p.sel).unwrap_or(0);
+    // the lines that say more about the selected row (where the model comes from) come into view
+    // with it, as far as the page allows
+    let about = shown[sel_at + 1..].iter().take_while(|(_, i)| p.rows.get(*i).is_some_and(|r| matches!(r, Row::Info { .. } | Row::Note(_)))).count().min(2);
+    let last = (sel_at + about).min(sel_at + list_h.saturating_sub(1));
     if sel_at < p.scroll {
         p.scroll = sel_at.saturating_sub(1);
-    } else if sel_at >= p.scroll + list_h {
-        p.scroll = sel_at + 1 - list_h;
+    } else if last >= p.scroll + list_h {
+        p.scroll = last + 1 - list_h;
     }
     for (y, (line, _)) in shown.into_iter().skip(p.scroll).take(list_h).enumerate() {
         buf.set_line(0, (top + y) as u16, &line, area.width);
@@ -474,7 +557,7 @@ pub fn run() -> Result<()> {
     enable_raw_mode()?;
     execute!(out, EnterAlternateScreen, cursor::Show)?;
     let _ = out.write_all(b"\x1b[?7l");
-    let mut screen = Screen { out: std::io::BufWriter::with_capacity(1 << 16, tui::tty()?), prev: Vec::new() };
+    let mut screen = Screen { out: std::io::BufWriter::with_capacity(1 << 16, tui::tty()?), prev: Vec::new(), origin: 0 };
     screen.invalidate();
     let r = page_loop(&mut screen);
     disable_raw_mode()?;

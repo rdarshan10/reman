@@ -68,12 +68,16 @@ pub fn migrate(db: &Connection) -> Result<()> {
     // the git branch and commit checked out in its folder when it ran (git.rs)
     add_column(db, "executions", "branch", "TEXT")?;
     add_column(db, "executions", "head", "TEXT")?;
+    // what it printed (the end of it, redacted), and `reman shell`'s id for it (output_op)
+    add_column(db, "executions", "output", "TEXT")?;
+    add_column(db, "executions", "capture", "TEXT")?;
     db.execute_batch(
         "CREATE INDEX IF NOT EXISTS idx_cmd_text ON commands(cmd_text);
          CREATE INDEX IF NOT EXISTS idx_last_used ON commands(last_used);
          CREATE INDEX IF NOT EXISTS idx_cwd ON commands(cwd);
          CREATE INDEX IF NOT EXISTS idx_exec_cmd ON executions(command_id);
-         CREATE INDEX IF NOT EXISTS idx_exec_ts ON executions(ts);",
+         CREATE INDEX IF NOT EXISTS idx_exec_ts ON executions(ts);
+         CREATE INDEX IF NOT EXISTS idx_exec_capture ON executions(capture) WHERE capture IS NOT NULL;",
     )?;
     db.pragma_update(None, "user_version", SCHEMA_VERSION)?;
     Ok(())
@@ -126,6 +130,10 @@ pub struct Run {
     /// the git branch and commit (12 characters) its folder had checked out when it ran
     pub branch: Option<String>,
     pub head: Option<String>,
+    /// what it printed, as kept (the end of it, redacted): an agent's, or one `reman shell` saw
+    pub printed: Option<String>,
+    /// `reman shell`'s id for the run, which its output arrives under (daemon: output_op)
+    pub capture: Option<String>,
 }
 
 impl Run {
@@ -175,8 +183,8 @@ pub fn record_run(db: &Connection, r: &Run) -> Result<Recorded> {
         }
     };
     db.execute(
-        "INSERT INTO executions (command_id, actor, exit, cwd, session, ts, duration_ms, err, seen, branch, head) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-        params![cid, r.actor, r.exit, r.cwd, r.session, r.ts, r.duration_ms, r.err, r.seen, r.branch, r.head],
+        "INSERT INTO executions (command_id, actor, exit, cwd, session, ts, duration_ms, err, seen, branch, head, output, capture) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        params![cid, r.actor, r.exit, r.cwd, r.session, r.ts, r.duration_ms, r.err, r.seen, r.branch, r.head, r.printed, r.capture],
     )?;
     Ok(Recorded { command_id: cid, new_row })
 }

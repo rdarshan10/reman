@@ -11,7 +11,7 @@ generates anything, and can never break the agent.
 
 Register in Claude Code settings.json:
   "hooks": { "PostToolUse": [ { "matcher": "Bash", "hooks": [ { "type": "command",
-    "command": "C:/Users/rdars/reman/.venv/Scripts/python.exe C:/Users/rdars/reman/reman_hook_claude.py" } ] } ] }
+    "command": "C:/Users/dev/reman/.venv/Scripts/python.exe C:/Users/dev/reman/reman_hook_claude.py" } ] } ] }
 """
 import sys, json, os, socket
 

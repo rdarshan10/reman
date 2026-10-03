@@ -837,7 +837,7 @@ mod tests {
     #[test]
     fn looking_around() {
         let t = |s: &str| unwrap::commands(s).is_none_or(|cs| cs.iter().all(|c| trivial_cmd(&c.main)));
-        assert!(t(r"cd d:\PlanetNaidu\planet_naidu_api"), "a cd is not a program named after the folder");
+        assert!(t(r"cd c:\code\billing\billing-api"), "a cd is not a program named after the folder");
         assert!(t("cd api; git status"));
         assert!(t(r#"try { . "c:\x\resources\app\out\vs\workbench\contrib\terminal\common\scripts\shellIntegration.ps1" } catch {}"#));
         assert!(!t("cd api && npm test"));

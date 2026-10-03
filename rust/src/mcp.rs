@@ -256,6 +256,7 @@ fn call_one(d: &Daemon, name: &str, args: &Value, pol: &Policy, cwd: Option<&str
         "reman_flows" => Ok(tool_flows(d, args, pol)),
         "reman_next" => Ok(tool_next(d, args, pol, cwd)),
         "reman_runbook" => Ok(tool_runbook(d, pol, cwd)),
+        "reman_output" => tool_output(d, arg_s(args, "command").unwrap_or(""), args.get("failed_only").and_then(Value::as_bool).unwrap_or(false), pol, cwd),
         // the stdio server answers it itself (Consent); reaching the daemon means no app to approve it
         SHARE_TOOL => Ok(json!({"shared": false, "reason": "Sharing a folder needs the user's approval in an app's MCP session. Over HTTP, the user shares folders in `reman settings` or with `reman connect --add-root`.", "generated": false})),
         other => Err(anyhow!("unknown tool {other}")),
@@ -453,6 +454,39 @@ fn tool_fixes(d: &Daemon, failed: &str, pol: &Policy, cwd: Option<&str>, k: usiz
         out.push(v);
     }
     Ok(Value::Array(out))
+}
+
+/// What a command printed the last times it ran (kept for recent runs: agents', and the user's
+/// inside `reman shell`), in the folders this agent may see, newest first; masked again for it.
+fn tool_output(d: &Daemon, command: &str, failed_only: bool, pol: &Policy, cwd: Option<&str>) -> Result<Value> {
+    let cmd = command.trim();
+    #[allow(clippy::type_complexity)]
+    let rows: Vec<(Option<i64>, i64, Option<String>, Option<String>, String)> = {
+        let conn = d.db.lock();
+        let mut q = conn.prepare(
+            "SELECT e.exit, e.ts, e.cwd, e.actor, e.output FROM executions e JOIN commands c ON c.id = e.command_id
+             WHERE c.cmd_text = ?1 AND e.output IS NOT NULL AND (?2 = 0 OR e.exit > 0) ORDER BY e.ts DESC, e.id DESC LIMIT 50",
+        )?;
+        q.query_map(rusqlite::params![cmd, failed_only as i64], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)))?.collect::<rusqlite::Result<_>>()?
+    };
+    let runs: Vec<Value> = rows
+        .into_iter()
+        .filter(|(_, _, c, _, _)| pol.within(c.as_deref()) && cwd.is_none_or(|w| folder_eq(c.as_deref(), w)))
+        .take(3)
+        .map(|(exit, ts, c, actor, out)| {
+            // masked for agents whatever the user keeps for themselves; in strict mode a line that
+            // still looks secret is withheld
+            let out: Vec<String> = redact::redact(&out)
+                .lines()
+                .map(|l| if pol.strict && redact::residual_secret(l) { "[withheld: looked secret]".to_string() } else { l.to_string() })
+                .collect();
+            json!({"exit": exit, "when": config::age(ts), "folder": c, "by": actor.as_deref().map(|a| if a.starts_with("agent") { a.trim_start_matches("agent:") } else { "user" }), "output": out.join("\n")})
+        })
+        .collect();
+    let note = runs.is_empty().then(|| {
+        format!("No output kept for `{}`{}: it is kept for recent runs only (agents' runs, and the user's inside `reman shell`), for this exact command.", pol.safe(cmd).unwrap_or_default(), if cwd.is_some() { " in this folder" } else { "" })
+    });
+    Ok(json!({"command": pol.safe(cmd).unwrap_or_default(), "runs": runs, "note": note, "generated": false}))
 }
 
 fn tool_check(d: &Daemon, command: &str, pol: &Policy, cwd: Option<&str>) -> Result<Value> {
@@ -683,6 +717,8 @@ pub fn tools() -> Value {
          "inputSchema": {"type": "object", "properties": {"cwd": cwd, "last_command": {"type": "string"}, "n": {"type": "integer", "default": 5}}}},
         {"name": "reman_runbook", "description": "How this project is run, from what actually worked here: per task (set up, run, test, lint and format, build, database, deploy and release) the user's real commands with their success record (runs = worked + failed + unseen, where a pipe hid the result) and the folder each runs in (`dir`, from the project root); where the history has no whole command for a task, the one the project's files declare (`declared`: package.json, Makefile, pytest config), not run yet, plus the usual command sequences. Call it first in an unfamiliar project instead of guessing how to install, run or test it.",
          "inputSchema": {"type": "object", "properties": {"cwd": {"type": "string", "description": "The project folder (default: the folder the agent runs in). Must be inside the allowed root."}}}},
+        {"name": "reman_output", "description": "What a command PRINTED the last times it ran (its output's end, secrets masked): kept for recent runs, agents' and the user's inside `reman shell`. Use it to see the error a command gave before, or what the user's last test run said, instead of running it again. Give the exact command line; failed_only for its failures only.",
+         "inputSchema": {"type": "object", "properties": {"command": {"type": "string"}, "cwd": cwd, "failed_only": {"type": "boolean", "default": false}}, "required": ["command"]}},
         {"name": SHARE_TOOL, "description": "Ask the user to let you see this project's command history, for this session only. Your app asks the user to approve this call: their Allow shares it, nothing is saved, and the next session asks again. Call it when a reman answer's note says your project is not shared and the history would help. If the user declines, accept it: do not call it again this session.",
          "inputSchema": {"type": "object", "properties": {"cwd": {"type": "string", "description": "A folder of the project to share (default: the project you work in)."}}}}
     ])
@@ -727,7 +763,7 @@ pub fn rpc(msg: &Value, call: &mut dyn FnMut(&str, &Value) -> Result<Value>) -> 
             "protocolVersion": params.get("protocolVersion").and_then(Value::as_str).unwrap_or("2025-06-18"),
             "capabilities": {"tools": {"listChanged": false}},
             "serverInfo": {"name": "reman", "version": config::VERSION},
-            "instructions": "Ground-truth memory of the commands this user really ran (with exit codes, folders, who ran them). Use it before guessing a command: reman_search the task in a few plain words, naming the tool or framework when you know it (\"astro dev server\", not \"dev server\"), reman_check a command before running it, and after a failure call reman_fixes with the failed command and its error. An empty answer means nothing is known; read the note that comes with it rather than substituting a loosely similar command. Agents see only folders the user approved; if yours is not, call reman_share_project and the app asks the user to approve it for this session - never run `reman connect` yourself."
+            "instructions": "Ground-truth memory of the commands this user really ran (with exit codes, folders, who ran them). Use it before guessing a command: reman_search the task in a few plain words, naming the tool or framework when you know it (\"astro dev server\", not \"dev server\"), reman_check a command before running it, and after a failure call reman_fixes with the failed command and its error. To see what a command printed when it last ran (the user's test run, an earlier error), call reman_output instead of running it again. An empty answer means nothing is known; read the note that comes with it rather than substituting a loosely similar command. Agents see only folders the user approved; if yours is not, call reman_share_project and the app asks the user to approve it for this session - never run `reman connect` yourself."
         })),
         "ping" => Ok(json!({})),
         "tools/list" => Ok(json!({"tools": tools()})),
@@ -1390,7 +1426,7 @@ mod tests {
     fn boundary() {
         // Windows paths compare case-insensitively; Unix paths don't
         let (root, sub, evil, other) = if cfg!(windows) {
-            (r"D:\Work", r"d:\work\api", r"D:\WorkEvil", r"C:\Users")
+            (r"C:\Code", r"c:\code\api", r"C:\CodeEvil", r"C:\Users")
         } else {
             ("/home/u/Work", "/home/u/Work/api", "/home/u/WorkEvil", "/home/u")
         };
@@ -1433,7 +1469,7 @@ mod rpc_tests {
         assert_eq!(init["result"]["protocolVersion"], "2025-03-26");
         assert!(rpc(&json!({"jsonrpc": "2.0", "method": "notifications/initialized"}), &mut call).is_none());
         let list = rpc(&json!({"jsonrpc": "2.0", "id": 2, "method": "tools/list"}), &mut call).unwrap();
-        assert_eq!(list["result"]["tools"].as_array().unwrap().len(), 9);
+        assert_eq!(list["result"]["tools"].as_array().unwrap().len(), 10);
         let res = rpc(&json!({"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {"name": "reman_next", "arguments": {}}}), &mut call).unwrap();
         assert_eq!(res["result"]["structuredContent"]["result"][0]["command"], "reman_next");
         assert_eq!(rpc(&json!({"jsonrpc": "2.0", "id": 4, "method": "nope"}), &mut call).unwrap()["error"]["code"], -32601);

@@ -8,14 +8,14 @@ n0 = D.client({"op": "ping"})["indexed"]
 
 # ingest a NEW command not in the seed
 D.client({"op": "ingest", "command": "kubectl get pods --namespace prod", "exit": 0,
-          "cwd": "D:/Work", "session": "s1", "actor": "agent:claude-code"})
+          "cwd": "C:/code", "session": "s1", "actor": "agent:claude-code"})
 
 post, r = ms({"op": "search", "query": "list kubernetes pods in production namespace", "k": 5})
 n1 = D.client({"op": "ping"})["indexed"]
 
 # ingest the SAME command again -> should update in place, not grow the index
 D.client({"op": "ingest", "command": "kubectl get pods --namespace prod", "exit": 0,
-          "cwd": "D:/Work", "session": "s2", "actor": "agent:claude-code"})
+          "cwd": "C:/code", "session": "s2", "actor": "agent:claude-code"})
 n2 = D.client({"op": "ping"})["indexed"]
 
 found = any("kubectl get pods" in x["command"] for x in r.get("results", []))

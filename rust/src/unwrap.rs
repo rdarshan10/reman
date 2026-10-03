@@ -456,18 +456,18 @@ mod tests {
     #[test]
     fn what_an_agent_wrapped() {
         // reman's own build, as Claude Code ran it
-        let c = commands(r#"Set-Location C:\Users\rdars\reman\rust; . .\msvc-env.ps1; cargo build --release 2>&1 | Select-String -Pattern "^(warning|error)|-->|Finished" | Select-Object -First 20"#).unwrap();
+        let c = commands(r#"Set-Location C:\Users\dev\reman\rust; . .\msvc-env.ps1; cargo build --release 2>&1 | Select-String -Pattern "^(warning|error)|-->|Finished" | Select-Object -First 20"#).unwrap();
         assert_eq!(c.len(), 1);
         assert_eq!(c[0].text, r". .\msvc-env.ps1; cargo build --release");
         assert_eq!(c[0].main, "cargo build --release");
-        assert_eq!(c[0].cds, [r"C:\Users\rdars\reman\rust"]);
+        assert_eq!(c[0].cds, [r"C:\Users\dev\reman\rust"]);
         // two commands, each in the environment set up before them
         assert_eq!(
             texts(r#". .\msvc-env.ps1; cargo build --release 2>&1 | Select-Object -Last 5; cargo test --release 2>&1 | Select-String -Pattern "test result""#),
             [r". .\msvc-env.ps1; cargo build --release", r". .\msvc-env.ps1; cargo test --release"]
         );
-        let c = commands(r#"cd D:/PlanetNaidu/frontend && npx jest --silent 2>&1 | grep -E "^(PASS|FAIL)|Tests:" | sort"#).unwrap();
-        assert_eq!((c[0].text.as_str(), c[0].cds.as_slice()), ("npx jest --silent", &["D:/PlanetNaidu/frontend".to_string()][..]));
+        let c = commands(r#"cd C:/code/shop/frontend && npx jest --silent 2>&1 | grep -E "^(PASS|FAIL)|Tests:" | sort"#).unwrap();
+        assert_eq!((c[0].text.as_str(), c[0].cds.as_slice()), ("npx jest --silent", &["C:/code/shop/frontend".to_string()][..]));
         // a group, a fallback that only talks, the same command twice
         assert_eq!(
             texts(r#"npx tsc --noEmit 2>&1 | wc -l && (npx tsc --noEmit 2>&1 | grep -vE "node_modules|x" || echo "CLEAN") && npx jest 2>&1 | grep -E "^Tests:""#),
@@ -535,7 +535,7 @@ mod tests {
     #[test]
     fn two_lines_pasted_into_one_are_left_out() {
         assert!(commands(r"cd .\frontend\(Set-ExecutionPolicy -Scope Process -ExecutionPolicy RemoteSigned) ; (& d:\x\Activate.ps1)").is_none());
-        assert!(commands(r"cd d:\PlanetNaidu\frontend npx eas build --profile production").is_none());
+        assert!(commands(r"cd c:\code\shop\frontend npx eas build --profile production").is_none());
     }
 
     #[test]

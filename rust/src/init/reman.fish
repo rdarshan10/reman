@@ -9,6 +9,14 @@
 set -g __reman_exe "__REMAN__"
 set -g __reman_hook "__HOOK__"
 set -g __reman_spool "__SPOOL__"
+# `reman settings` can open every shell inside `reman shell`, so what your commands print is kept
+# too: this one hands over to a shell inside it, and closes when that one does (it goes on as
+# usual when that can't start)
+if test __SHELL_LAYER__ = 1; and not set -q REMAN_PTY; and status is-interactive; and isatty stdin; and test "$TERM_PROGRAM" != vscode
+    $__reman_exe shell -- (status fish-path) -i
+    set -l s $status
+    test $s -ne 97; and exit $s
+end
 # MSYS2/Cygwin fish can run C:/ paths but can't redirect into them: use the POSIX form
 if string match -qr '^[A-Za-z]:' -- $__reman_spool; and command -q cygpath
     set __reman_spool (cygpath -u -- $__reman_spool)
@@ -39,19 +47,46 @@ function __reman_q
     set -g __reman_qv '"'(string join '\n' -- $s)'"'
 end
 
+# (on Windows the terminal reman shell runs is ConPTY, which draws text on its own beat but
+# passes a mark on at once: a mark waits one beat, so it lands after what came before it)
+if set -q REMAN_PTY; and string match -qr '^(MSYS|CYGWIN|MINGW)' -- (uname -s)
+    set -g __reman_conpty 1
+end
+function __reman_beat
+    set -q __reman_conpty; and sleep 0.03
+end
+
+# inside `reman shell`, what the command prints is kept: it starts here (the prompt ends it)
+function __reman_preexec --on-event fish_preexec
+    set -q REMAN_PTY; or return
+    test -n (string trim -- "$argv[1]"); or return
+    set -g __reman_cap "$REMAN_SESSION-"(date +%s)(random)
+    __reman_beat
+    printf '\e]46031711;C;%s\a' $__reman_cap >/dev/tty 2>/dev/null
+end
+
 function __reman_postexec --on-event fish_postexec
     set -l ec $status
     set -l cmd $argv[1]
+    set -l cap $__reman_cap
+    set -g __reman_cap
+    if test -n "$cap"
+        __reman_beat
+        printf '\e]46031711;D;%s\a' $cap >/dev/tty 2>/dev/null
+    end
     test -z "$cmd"; and return
     string match -q -- ' *' $cmd; and return   # leading space: never recorded
     set -g __reman_fix   # a fix is offered for the command just run, until the next one
     if test $ec -ne 0
-        set -g __reman_fix ($__reman_hook record --exit $ec --cwd $PWD --duration-ms $CMD_DURATION --suggest --print-fix -- $cmd)
+        set -g __reman_fix (env REMAN_CAPTURE="$cap" $__reman_hook record --exit $ec --cwd $PWD --duration-ms $CMD_DURATION --suggest --print-fix -- $cmd)
     else
         __reman_q $cmd; set -l qc $__reman_qv
         __reman_q $PWD; set -l qd $__reman_qv
         __reman_q $REMAN_SESSION; set -l qs $__reman_qv
-        echo '{"op":"ingest","command":'$qc',"exit":'$ec',"cwd":'$qd',"session":'$qs',"actor":"human","duration_ms":'$CMD_DURATION'}' >>$__reman_spool
+        # (an empty string, not an empty list: joined to an empty list, fish drops the whole line)
+        set -l qcap ''
+        test -n "$cap"; and set qcap ',"capture":"'$cap'"'
+        echo '{"op":"ingest","command":'$qc',"exit":'$ec',"cwd":'$qd',"session":'$qs',"actor":"human","duration_ms":'$CMD_DURATION$qcap'}' >>$__reman_spool
     end
 end
 

@@ -92,6 +92,14 @@ fn window(p: &str, now: i64, offset: i64) -> Option<(i64, i64)> {
     })
 }
 
+/// A moment as local date and time: `2026-09-30 14:05`.
+pub fn stamp(ts: i64, offset: i64) -> String {
+    let local = ts + offset;
+    let (y, m, d) = civil(local.div_euclid(DAY));
+    let mins = local.rem_euclid(DAY) / 60;
+    format!("{y:04}-{m:02}-{d:02} {:02}:{:02}", mins / 60, mins % 60)
+}
+
 /// One whole local day, named `today`, `yesterday`, a weekday or `YYYY-MM-DD`: (since, until).
 pub fn day(name: &str, now: i64, offset: i64) -> Option<(i64, i64)> {
     let name = name.trim().to_lowercase();
@@ -181,5 +189,7 @@ mod tests {
             assert_eq!(days_from_civil(y, m, dd), d);
         }
         assert_eq!(civil(20_727), (2026, 10, 1));
+        assert_eq!(stamp(at(2026, 10, 1, 14) + 5 * 60, OFF), "2026-10-01 14:05");
+        assert_eq!(stamp(at(2026, 10, 1, 0) - 60, OFF), "2026-09-30 23:59");
     }
 }

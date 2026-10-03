@@ -119,7 +119,7 @@ fn option_values(sub: &Command, name: &str, opt: &str, cur: &str) -> Vec<Cand> {
 fn positional_values(name: &str, pos: usize, cur: &str) -> Vec<Cand> {
     match (name, pos) {
         ("connect", _) | ("disconnect", _) => agents(name == "disconnect"),
-        ("init", 0) => [("powershell", "PowerShell"), ("bash", "bash"), ("zsh", "zsh"), ("fish", "fish"), ("cmd", "Command Prompt (through Clink)")]
+        ("init", 0) => [("powershell", "PowerShell"), ("bash", "bash"), ("zsh", "zsh"), ("fish", "fish"), ("nu", "nushell"), ("xonsh", "xonsh"), ("cmd", "Command Prompt (through Clink)")]
             .iter()
             .map(|(s, h)| cand(*s, format!("print the {h} integration")))
             .collect(),
@@ -131,6 +131,10 @@ fn positional_values(name: &str, pos: usize, cur: &str) -> Vec<Cand> {
             .as_array()
             .map(|a| a.iter().map(|t| cand(t["name"].as_str().unwrap_or(""), first_sentence(t["description"].as_str().unwrap_or("")))).collect())
             .unwrap_or_default(),
+        ("stats", 0) => [("today", "what ran today"), ("yesterday", "what ran yesterday"), ("week", "this week"), ("month", "this month"), ("year", "this year")]
+            .iter()
+            .map(|(s, h)| cand(*s, *h))
+            .collect(),
         ("forget" | "pin" | "check", 0) => history(cur, None),
         ("fixes", 0) => history(cur, Some("fail")),
         _ => vec![],

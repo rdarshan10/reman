@@ -16,7 +16,7 @@ One fast Rust binary that remembers every command you and your AI agents run: wh
    everywhere ─────────────────────────────────────────────── │ in ~/work/api
   · docker compose logs -f api                      11×   3d  │ matched: close in meaning · shares your words
   · docker images                                    4×   1w  │
-   this folder first ←→  ·  by anyone F3  ·  any outcome F2                        24 results
+   this folder first ←→  ·  by you F3  ·  any outcome F2                           24 results
  › tear down containers                                                 Recall  Fixes  Flows
 ```
 
@@ -38,21 +38,25 @@ reman closes that loop: every run is captured with its folder, exit code, durati
 - **Fixes.** After a failure, reman prints what worked last time (`gti status` → `git status`), learned from what you actually ran next, with what it changes when it's a variant of what failed (`adds --build`, `ci → install --legacy-peer-deps`). `Alt+F` inserts it.
 - **The same error, a different command.** reman keeps what a failed command printed. When a *different* command fails with the same error (`npm ci` hitting the ERESOLVE that `npm install` hit last week), it offers what fixed the first one. Agents get it too by passing the error to `reman_fixes`.
 - **A warning before it fails.** Press Enter on a command that failed every time it ran here, or the last 3 times in a row, and reman holds it once when failing costs something: its failures took 10s or more (`failed the last 3 times here, after about 2m each time`), or it installs, builds, migrates or deploys. It says why, shows its last error and what worked instead (`Alt+F` inserts it), and Enter again runs it anyway. A command that fails in a blink just runs. It's an exact lookup on Enter, never while you type (PowerShell, zsh and fish).
+- **The finder, where you are.** It opens in the 20 lines under your prompt, so what you were looking at stays in view (the whole screen, or 30 lines, in `reman settings`). It lists your own commands; `F3` adds what agents ran. `Ctrl+O` on a command shows every run of it: when, how long it took, whether it worked, the branch, the folder and who ran it, with what that run printed beside it, and `Del Del` forgets one run. Vim keys are a setting: `Esc` for normal mode, `j` `k` to move, `dd` to forget, `i` to type, `q` to close.
+- **What a command printed.** What your agents' commands print is kept as they run. For your own, `reman shell` runs your shell inside a terminal layer of reman's own (ConPTY on Windows, a pseudo-terminal elsewhere), passed through untouched, and keeps what each command printed, read the way your terminal drew it: colours gone, a progress bar as it ended, long output whole. `reman output npm test`, `reman output --failed`, or `reman output ECONNREFUSED` finds it by the command or by what it printed; agents read it through `reman_output` instead of running a command again. Secrets are masked, only the end of a long output is kept, and only for your newest 3000 runs. `reman settings` can open every new shell inside it.
+- **Find an agent's session again.** `reman sessions` lists your coding agents' sessions: where each worked, what it built, tested or installed, and how it went. `reman sessions migration last week` finds the one that did that, by meaning, by a file it touched or by its folder's name. `reman resume migration` reopens it in its folder (Claude Code, Codex, Gemini CLI and opencode).
+- **Search, delete and count like a tool.** `reman search docker --failed --by agents --after monday --cwd .` filters; `--format "{status} {command}"` and `--json` feed scripts. `reman delete <text>` (or `--regex`, `--failed`, `--before`) removes runs by their text, never by meaning, after showing what it will remove. `reman prune` applies the ignore rules you added later to the history saved before them. `reman stats week` (or `month`, `year`, `yesterday`, a date) counts what ran then: your tools by subcommand, what failed most, your busiest folders.
 - **Flows.** Repeated sequences (`pull → install → test`) are detected. Open one, run its first step, and the next step waits on `↑`.
 - **Prediction.** An empty search shows what you usually run next in this folder, and `Alt+N` on an empty prompt puts it there directly (again for the next idea): the next step of a flow you started, the fix for what just failed, then what you usually run after your last command. Only commands you ran yourself, ready to edit, never run.
 - **Commands with blanks.** Variants that differ in one place show in the finder as one command with a blank, `git commit -m "‹message›"` or `kubectl logs ‹name› -n prod`, with what went in it lately. Enter puts it on the prompt with the cursor in the blank. Searching for one value (`fix login`) shows that command itself.
 - **Time in search.** End a search with when: `deploy last week`, `docker yesterday`, `migrate since monday`, `npm test 3 days ago`. Only what ran then is shown; `yesterday` alone browses that day. Agents' `reman_search` understands it too.
 - **How long it takes.** The finder's card says `usually 3m 12s`, and `reman_check` tells agents how long to wait before calling a command hung. A command of yours that ran a minute or more sends a desktop notification when it finishes (`✓ cargo build --release · 3m 04s, faster than usual`); set it to 5 minutes or off in `reman settings`.
 - **Your day.** `reman yesterday` (and `reman today`, `reman day monday`) tells what you ran, by project: the commands with repeats folded, failures with what fixed them or that they still fail, and what each agent ran there.
-- **Go to a folder by what you did there.** `rcd alembic` goes to the folder where you ran it; `rcd planet api` matches the folder's own name; `rcd` alone lists where you were lately (`rcd 3` goes there).
+- **Go to a folder by what you did there.** `rcd alembic` goes to the folder where you ran it; `rcd billing api` matches the folder's own name; `rcd` alone lists where you were lately (`rcd 3` goes there).
 - **Last time here.** Open a terminal in a folder you left days ago and one line says what you did there: `docker compose up -d → alembic upgrade head → npm run dev`.
 - **What broke it?** When a command that kept working here starts failing, reman says how often it worked and what ran in this folder since (`git pull → npm install left-pad`). Every run keeps the git branch and commit it ran on, so it also says when it worked on `main` and fails on `feat/x`, when new commits came in, or when the commit is the same and the change must be elsewhere. `reman why` tells the whole story.
 - **Flaky, not broken.** A command whose result here keeps flipping, both ways, with no new commit and no install or pull in between, is called flaky when it fails (`worked 5 of its last 9 runs`), so nobody changes code over it. Agents are told the same.
 - **Runbook.** `reman runbook` writes how the project is run, by task (set up, run, test, lint, build, database, deploy), from the commands that actually worked there. It reads through how agents wrap a command (`cd web && npx jest 2>&1 | grep Tests` counts as `npx jest`, run in `web/`), keeps the setup it needs (`. .\msvc-env.ps1; cargo build --release`), says which folder each command runs in when a repo holds several apps, and folds variants (`expo start --clear` / `-c`, `tsc -p tsconfig.json`) into one line. A pipe hides a command's exit status (`npx jest | tail -5` exits with `tail`'s), so the agent hook reads the result the agent saw instead (`Tests: 2 failed`, `test result: ok`, `error TS2345`) and sends only that verdict, never the output; with no verdict, a run counts as run, never as worked. The same reading tells which step of `a && b` failed. Where the history has no whole command for a task (only one test file, say), the one the project declares is shown, marked not run yet: `npm test` from package.json, a Makefile target, `pytest` from its config. With a language model available (a local one is found automatically), it adds a summary, a getting-started order and a note per command; the model only arranges your real commands, never invents one. Agents get the same through `reman_runbook`.
-- **Own capture, no Atuin.** Native hooks for PowerShell, bash, zsh and fish (0 to 5 ms per command), plus `r` / `rr` in Command Prompt. What coding agents run is captured too, each tagged with its agent: Claude Code, Codex, Cursor, VS Code (Copilot), Windsurf and Gemini CLI through their own hooks, opencode and pi through a small plugin. Agents that type into your terminal (Copilot, Cursor, Windsurf) are recorded once, with your shell's exact exit code.
+- **Own capture, no Atuin.** Native hooks for PowerShell, bash, zsh, fish, nushell and xonsh (0 to 5 ms per command), plus `r` / `rr` in Command Prompt. What coding agents run is captured too, each tagged with its agent: Claude Code, Codex, Cursor, VS Code (Copilot), Windsurf and Gemini CLI through their own hooks, opencode and pi through a small plugin. Agents that type into your terminal (Copilot, Cursor, Windsurf) are recorded once, with your shell's exact exit code.
 - **For AI agents.** A built-in MCP server and a local HTTP endpoint with a folder boundary and secret redaction. `reman connect all` wires Claude Code, Codex, Cursor, VS Code, Windsurf, Gemini CLI and opencode in one step.
 - **Agents stuck in a loop.** When Claude Code runs a command that fails the same way for the third time in a session, its hook tells Claude right there: running it again unchanged will fail again, and what fixed that error before, if anything did. `reman_check` says the same about agents' last half hour in a folder. `reman agents` reports what each agent ran this week: runs, failures, and the commands it retried 4+ times while they failed the same way each time.
-- **Private by default.** Everything stays in `~/.reman` on your machine. Secrets are masked before anything is saved (`export API_TOKEN=***`), and a command whose secret can't be located isn't saved at all. Commands typed with a leading space are never recorded, nor anything matching your `ignore_commands` / `ignore_folders` patterns; `Del Del` in the finder forgets one everywhere. `reman scrub` masks secrets in history saved before. If you'd rather see your own commands whole, set secrets to *keep as typed* in `reman settings`: they are saved as you typed them, and agents still get them masked.
+- **Private by default.** Everything stays in `~/.reman` on your machine. Secrets are masked before anything is saved (`export API_TOKEN=***`), along with the token shapes of AWS, GitHub, GitLab, Slack, Stripe, npm, Netlify and Pulumi wherever they appear, and a command whose secret can't be located isn't saved at all. Commands typed with a leading space are never recorded, nor anything matching your `ignore_commands` / `ignore_folders` patterns; `Del Del` in the finder forgets one everywhere. `reman scrub` masks secrets in history saved before. If you'd rather see your own commands whole, set secrets to *keep as typed* in `reman settings`: they are saved as you typed them, and agents still get them masked.
 
 ## Install
 
@@ -72,7 +76,7 @@ curl -fsSL https://raw.githubusercontent.com/rdarshan10/reman/master/install.sh 
 
 Both scripts download the latest release, verify its SHA-256 checksum, and run `reman setup`. Setup is the whole onboarding, with nothing to configure by hand:
 1. copies reman into `~/.reman/bin` and starts its background daemon;
-2. wires your shells: the PowerShell profile and Command Prompt on Windows, your zsh / bash / fish config on macOS and Linux;
+2. wires your shells: the PowerShell profile and Command Prompt on Windows, your zsh / bash / fish config on macOS and Linux, and nushell and xonsh wherever they're installed;
 3. connects every coding tool it finds: Claude Code, Claude Desktop, Codex CLI, Cursor, VS Code, Windsurf, Gemini CLI, opencode and pi. Each gets the MCP server (pi has no MCP) and, when it runs shell commands, capture through its own hooks (or a small reman plugin for opencode and pi), so what the agent runs is remembered too. Each config gets a `.reman-bak` backup first.
 
 Everything it set up can be changed later on one page: `reman settings`. To skip connecting coding tools, set `REMAN_NO_CONNECT=1` (or run `reman setup --no-connect`). The first start downloads the embedding model, about 130 MB, once.
@@ -121,6 +125,8 @@ Open a new terminal after installing.
 | `Ctrl+R` | the finder, for all folders |
 | `Tab` / `Shift+Tab` inside the finder | switch between **Recall**, **Fixes** and **Flows** |
 | `Enter` | put the command on your prompt (it never runs by itself) |
+| `Ctrl+O` inside the finder | every run of the selected command, and what each printed |
+| `F3` inside the finder | your commands, yours and agents', or agents' only |
 | `Alt+F` | insert the fix suggested after a failed command |
 | `F1` inside the finder | every key |
 | `F10` inside the finder | settings |
@@ -139,7 +145,13 @@ reman here                            # what you did in this folder last time
 reman why                             # it used to work: what ran here since (or: reman why npm test)
 reman runbook > RUNBOOK.md            # how this project is run, from what worked
 reman scrub                           # mask secrets in older history (dry run; --apply)
-reman stats
+reman sessions migration last week    # the agent session that did it
+reman resume migration                # reopen it, in its folder
+reman shell                           # your shell inside reman's terminal layer: output kept
+reman output --failed                 # what the last failed commands printed
+reman delete "vault read" --yes       # remove runs by their text
+reman prune                           # apply ignore rules to older history
+reman stats week
 ```
 
 ## Settings
@@ -153,6 +165,8 @@ One page for everything setup configured. Every change is saved as you make it:
 - **Coding tools:** connect or disconnect each one with Enter, and turn the local HTTP endpoint (for SDKs and scripts) on or off.
 - **What agents can see:** share or unshare folders. Your busiest folders are suggested, with their run counts, and `a` types in any other folder.
 - **Privacy:** secrets in commands (mask the value, drop the command, or keep as typed for you while agents still get them masked), strict secret redaction for agents, and whether generic commands from old, folder-less history are shared.
+- **Finder:** where it opens (20 or 30 lines under the prompt, or the whole screen), whether it lists agents' commands from the start, and vim keys.
+- **What commands print:** how many runs keep their output (the newest 3000, 300, or none), and whether new shells open inside `reman shell`.
 - **Shells:** whether PowerShell, Command Prompt, or your zsh / bash / fish is wired; Enter wires one that isn't.
 - **reman:** daemon status, data folder, version.
 
@@ -181,7 +195,7 @@ reman connect --add-root ~/projects/api
 reman connect http                    # local HTTP endpoint for the OpenAI Agents SDK, LangChain, curl
 ```
 
-Agents get eight tools: `reman_search`, `reman_check`, `reman_fixes`, `reman_recent`, `reman_failures`, `reman_flows`, `reman_next` and `reman_runbook` (how the project is run, from what worked there). Every command they get back is one that really ran; reman never generates commands. When nothing close is known, `reman_search` returns nothing rather than the least-bad guess, and says so; the same goes for a result a filter emptied or a folder the agent can't see. A query that names a tool you use (`astro`, `vercel`) is only ever answered with that tool. Commands from the agent's own project come first when matches are close.
+Agents get nine tools: `reman_search`, `reman_check`, `reman_fixes`, `reman_recent`, `reman_failures`, `reman_flows`, `reman_next`, `reman_runbook` (how the project is run, from what worked there) and `reman_output` (what a command printed the last times it ran). Every command they get back is one that really ran; reman never generates commands. When nothing close is known, `reman_search` returns nothing rather than the least-bad guess, and says so; the same goes for a result a filter emptied or a folder the agent can't see. A query that names a tool you use (`astro`, `vercel`) is only ever answered with that tool. Commands from the agent's own project come first when matches are close.
 
 What agents can see:
 - **Only folders you approve.** Nothing is visible to an agent until you share a folder, not even the project it's working in (a repo, a git worktree of it included; never your whole home folder or a drive).
@@ -226,7 +240,9 @@ rust/src/
 ├── http.rs        local HTTP endpoint (MCP Streamable HTTP + REST)
 ├── connect.rs     `reman connect`: wires each agent's config
 ├── capture.rs     recording, used by the shell hooks and reman-hook
-└── init/          shell integrations: PowerShell, bash, zsh, fish, Command Prompt
+├── pty.rs         `reman shell`: the terminal layer that keeps what commands print
+├── output.rs      what a command printed, as kept: plain text, its end, redacted
+└── init/          shell integrations: PowerShell, bash, zsh, fish, nushell, xonsh, Command Prompt
 ```
 
 Detailed documentation, every key and the storage layout: [rust/README.md](rust/README.md). The real-terminal and agent test suites: [rust/e2e](rust/e2e).
@@ -240,6 +256,18 @@ Detailed documentation, every key and the storage layout: [rust/README.md](rust/
 - 🚧 Signed binaries for Windows and macOS
 - 🚧 Homebrew tap and winget package
 - 🚧 Sync between machines
+
+## Credits
+
+- [Atuin](https://github.com/atuinsh/atuin) (MIT License): its secret patterns are adapted in `redact.rs`, and `reman shell` follows the design of its terminal layer, on Windows too. Coming from Atuin? `reman setup` imports its history.
+- [tldr-pages](https://github.com/tldr-pages/tldr) (CC BY 4.0): the command descriptions reman shows and searches.
+- [bge-small-en-v1.5](https://huggingface.co/BAAI/bge-small-en-v1.5) by BAAI (MIT License), the search model, run by [ONNX Runtime](https://github.com/microsoft/onnxruntime).
+
+The full notices are in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md); every Rust library reman is built from, with its license, is in `THIRD_PARTY_LICENSES.html` in each release.
+
+## License
+
+reman is licensed under the [Apache License 2.0](LICENSE). Contributions are accepted under the same license.
 
 ## Contributing
 

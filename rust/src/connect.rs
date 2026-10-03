@@ -96,7 +96,7 @@ fn claude_settings() -> PathBuf {
     home().join(".claude").join("settings.json")
 }
 
-fn on_path(name: &str) -> bool {
+pub fn on_path(name: &str) -> bool {
     let exts: &[&str] = if cfg!(windows) { &[".exe", ".cmd", ".bat", ""] } else { &[""] };
     std::env::var_os("PATH").is_some_and(|p| std::env::split_paths(&p).any(|d| exts.iter().any(|e| d.join(format!("{name}{e}")).is_file())))
 }

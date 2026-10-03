@@ -10,7 +10,7 @@ ROWS, COLS = 30, 120
 TMP = os.environ["TEMP"]
 DB = os.path.join(TMP, "reman-cmd.db")
 PORT = "8766"
-EXE = os.path.join(os.path.expanduser("~"), ".reman", "bin", "reman.exe")
+EXE = os.environ.get("REMAN_EXE_UNDER_TEST") or os.path.join(os.path.expanduser("~"), ".reman", "bin", "reman.exe")
 ENV = dict(os.environ, REMAN_PORT=PORT, REMAN_DB=DB, REMAN_SPOOL=os.path.join(TMP, "reman-cmd-spool.jsonl"))
 for k in ("CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "AGENT", "REMAN_SESSION"):
     ENV.pop(k, None)

@@ -7,7 +7,7 @@ import winpty, pyte
 sys.stdout.reconfigure(encoding="utf-8")
 TMP = os.environ["TEMP"]
 DB = os.path.join(TMP, "reman-wrap.db")
-EXE = os.path.join(os.path.expanduser("~"), ".reman", "bin", "reman.exe")
+EXE = os.environ.get("REMAN_EXE_UNDER_TEST") or os.path.join(os.path.expanduser("~"), ".reman", "bin", "reman.exe")
 import glob
 # VS Code's PowerShell shell integration (whichever VS Code build is installed) and a Python venv
 _si = glob.glob(os.path.join(os.environ.get("LOCALAPPDATA", ""), "Programs", "Microsoft VS Code", "*", "resources", "app", "out",

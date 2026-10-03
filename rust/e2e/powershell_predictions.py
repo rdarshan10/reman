@@ -8,7 +8,7 @@ import winpty, pyte
 
 sys.stdout.reconfigure(encoding="utf-8")
 ROWS, COLS = 30, 120
-EXE = os.path.join(os.path.expanduser("~"), ".reman", "bin", "reman.exe")
+EXE = os.environ.get("REMAN_EXE_UNDER_TEST") or os.path.join(os.path.expanduser("~"), ".reman", "bin", "reman.exe")
 TMP = os.environ["TEMP"]
 DB = os.path.join(TMP, "reman-pskeys.db")
 subprocess.run([EXE, "stop"], env=dict(os.environ, REMAN_PORT="8768"), capture_output=True, timeout=30)

@@ -54,8 +54,9 @@ These keys work in PowerShell, bash, zsh and fish (and in Command Prompt with Cl
 ### The finder
 
 The finder works like a command palette, bottom-up like the prompt it replaces:
+- It opens in the 20 lines under your prompt, scrolling the screen up when the prompt sits low, and leaves the rest of the screen as it was. `reman settings` makes it 30 lines or the whole screen.
 - The query is the last line, and the tabs **Recall · Fixes · Flows** sit at its right.
-- The filters sit just above the query and read as a sentence: *this folder first · by anyone · any outcome*. Each filter shows the key that changes it.
+- The filters sit just above the query and read as a sentence: *this folder first · by you · any outcome*. Each filter shows the key that changes it.
 - The best result is nearest the prompt, and `↑` moves further back.
 - Results come in labelled sections; a section's label sits at the base of its stack.
 - A card beside the list (or above it, on narrow terminals) explains the selected command: what it does, whether it worked, where it ran, and why it matched.
@@ -86,15 +87,18 @@ Each tab keeps its own query, so switching tabs never carries "run migrations" i
 | `Tab` / `Shift+Tab`, `Ctrl+T` | next / previous tab: **Recall → Fixes → Flows** |
 | `Alt+1` `Alt+2` `Alt+3`, or a click on a tab | jump straight to a tab |
 | `←` / `→` | where: this folder → this repo → everywhere (in an open flow, `←` goes back) |
-| `F3` | who: anyone → you → agents |
+| `F3` | who: you → you and agents → agents (yours only at first; `reman settings` can list agents' too) |
 | `F2` | outcome: any → worked → failed |
 | `Ctrl+G` | fold variants that differ only in data (messages, paths, ids) / show each |
 | `Ctrl+P` | pin |
 | `Del` `Del` | forget the command everywhere |
+| `Ctrl+O` | every run of the selected command: when, how long, the exit code, who, the branch and folder, with what that run printed in the card. `Del` `Del` there forgets one run; `Esc`, `←` or `Ctrl+O` goes back |
 | `Ctrl+A` | Flows: insert every step as one line |
 | `Ctrl+X` | stop the flow in progress |
 | `F1` | all keys |
 | `Esc` | back (out of an open flow) / close |
+
+**Vim keys** (`reman settings`, Finder): typing works as usual until `Esc`, which turns on normal mode (an `N` where the prompt mark was). There `j` / `k` move, `h` / `l` change the folder scope, `G` goes back to the nearest result, `dd` forgets (in `Ctrl+O`, one run), `i`, `a` or `/` type again, `c` clears the query to type anew, and `q` or `Esc` closes.
 
 What never gets offered back:
 - reman's own invocations (`reman search …`), unless your query mentions reman;
@@ -136,6 +140,7 @@ This is the cost per command, measured in real terminals by `e2e/posix_shells_te
 | bash | `/dev/tcp`, fork-free (builtins only) | ~5 ms |
 | zsh | `zsh/net/tcp` | ~2 ms |
 | fish | append to the spool file with builtins; the daemon drains it every 1 s | ~4 ms |
+| nushell, xonsh | append to the spool file (a failure goes through `reman-hook`, for the fix suggestion) | no process spawn on success |
 | Command Prompt (Clink) | Lua appends successes to the spool; failures go through `reman-hook` for the fix suggestion | no process spawn on success |
 | Claude Code hook / fish failures | `reman-hook` (1.9 MB, no ONNX Runtime) | ~Windows process-spawn floor |
 
@@ -199,10 +204,26 @@ reman uninstall [--purge]    remove reman everywhere (lists first; --dry-run, --
 reman runbook [--json]       how this project is run, by task, from commands that worked
    [--static] [--refresh]    (arranged by a language model if one is available; --static: never)
 reman check <cmd>            verified / failed / mixed / never_run
-reman stats | doctor | bench
+reman search <words> [--failed|--worked] [--by you|agents] [--after D] [--before D] [--cwd DIR]
+             [-k N] [--format "{status} {command} {folder} {runs} {last} {by}"] [--json]
+reman delete <text> [--regex R] [--failed] [--by ...] [--before D] [--cwd DIR] [--yes]
+                             remove runs by their text (never by meaning), after showing them
+reman prune [--yes]          apply ignore_commands / ignore_folders to history saved before them
+reman stats [week|month|year|yesterday|<day>]
+reman sessions [words] [--agent A] [-k N] [--json]
+                             coding agents' sessions: where, what they did, how to resume each
+reman resume [words] [N] [--print]
+                             reopen the agent session that did it, in its folder
+reman shell [-- program args]
+                             your shell inside reman's terminal layer: what commands print is kept
+reman output [words] [--failed] [--full] [-k N] [--json]
+                             what commands printed, by command or by what they printed
+reman yesterday | today | day <day>, reman goto <words>, reman agents [--days N]
+reman doctor | bench
+reman init powershell|bash|zsh|fish|nu|xonsh|cmd
 reman import atuin|psreadline|bash|zsh|fish
 reman forget <cmd> | pin <cmd> [--off] | export [--here --actor --status --query]
-reman mcp                    MCP stdio server (8 tools incl. reman_next, reman_runbook)
+reman mcp                    MCP stdio server (9 tools incl. reman_runbook, reman_output)
 ```
 
 ## Storage
@@ -211,8 +232,8 @@ Everything lives in `~/.reman/`:
 
 | path | what |
 |---|---|
-| `reman.db` | SQLite, same schema as the Python version |
-| `config.json` | agent roots, strict-secrets flag, HTTP port/token |
+| `reman.db` | SQLite, same schema as the Python version; each run also keeps the end of what it printed (agents' runs, and yours inside `reman shell`), for the newest `output_runs` runs (3000 unless set) |
+| `config.json` | agent roots, strict-secrets flag, HTTP port/token, and the settings (`finder_height`, `finder_keys`, `finder_who`, `output_runs`, `shell_layer`, ...) |
 | `spool.jsonl` | fish captures and runs captured while the daemon was down, drained every second |
 | `models/` | bge-small-en-v1.5 (ONNX) |
 | `daemon.log`, `tui-panic.log` | logs |
@@ -222,4 +243,4 @@ To keep a command out of history, start it with a leading space, or match it wit
 ## Tests
 
 - `cargo test`: unit tests.
-- `e2e/`: real-terminal suites for PowerShell, bash, zsh and fish, plus the HTTP and stdio agent suites. See `e2e/README.md`.
+- `e2e/`: real-terminal suites for PowerShell, bash, zsh, fish, nushell and xonsh, the finder and `reman shell`, plus the HTTP and stdio agent suites. See `e2e/README.md`.

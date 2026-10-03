@@ -7,11 +7,18 @@ import os, sys, time, shutil, threading, json, socket, subprocess
 import winpty, pyte
 
 sys.stdout.reconfigure(encoding="utf-8")
+# Clink loads into Command Prompt through its AutoRun (`clink inject`); without it there's no Clink
+# to test (the plain Command Prompt is cmd_terminal.py's)
+_autorun = subprocess.run(["reg", "query", r"HKCU\Software\Microsoft\Command Processor", "/v", "AutoRun"], capture_output=True, text=True).stdout
+if "clink" not in _autorun.lower():
+    print("Clink isn't hooked into Command Prompt here (no `clink inject` in its AutoRun): nothing to test. See cmd_terminal.py.")
+    print("CMD RESULT: SKIPPED")
+    sys.exit(0)
 ROWS, COLS = 30, 120
 TMP = os.environ["TEMP"]
 DB = os.path.join(TMP, "reman-cmd.db")
 PORT = "8766"
-EXE = os.path.join(os.path.expanduser("~"), ".reman", "bin", "reman.exe")
+EXE = os.environ.get("REMAN_EXE_UNDER_TEST") or os.path.join(os.path.expanduser("~"), ".reman", "bin", "reman.exe")
 ENV = dict(os.environ, REMAN_PORT=PORT, REMAN_DB=DB, REMAN_SPOOL=os.path.join(TMP, "reman-cmd-spool.jsonl"))
 for k in ("CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "AGENT", "REMAN_SESSION"):
     ENV.pop(k, None)

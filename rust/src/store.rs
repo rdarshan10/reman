@@ -706,6 +706,30 @@ impl Store {
         self.execs.retain(|x| !set.contains(&x.row_id));
     }
 
+    /// One run forgotten (the inspector's Del): its row's counts follow; `gone` when it was the
+    /// row's last run, which takes the row with it.
+    pub fn remove_exec(&mut self, row_id: i64, ts: i64, exit: Option<i64>, agent: bool, gone: bool) {
+        if gone {
+            return self.remove_rows(&[row_id]);
+        }
+        if let Some(p) = self.execs.iter().rposition(|x| x.row_id == row_id && x.ts == ts) {
+            self.execs.remove(p);
+        }
+        let Some(&ei) = self.by_id.get(&row_id) else { return };
+        let latest = self.execs.iter().rev().find(|x| x.row_id == row_id).map(|x| (x.ts, x.exit));
+        let Some(r) = self.entries[ei as usize].rows.iter_mut().find(|r| r.id == row_id) else { return };
+        let sub = |v: &mut u32, by: bool| *v = v.saturating_sub(by as u32);
+        sub(&mut r.runs, true);
+        sub(&mut r.ok, exit == Some(0));
+        sub(&mut r.fail, exit.is_some_and(|e| e > 0));
+        sub(&mut r.human, !agent);
+        sub(&mut r.agent, agent);
+        if let Some((t, x)) = latest.filter(|_| r.last_used <= ts) {
+            r.last_used = t;
+            r.last_exit = x;
+        }
+    }
+
     /// Row ids of a text (for `forget`).
     pub fn row_ids(&self, text: &str) -> Vec<i64> {
         self.by_text.get(text).map(|&i| self.entries[i as usize].rows.iter().map(|r| r.id).collect()).unwrap_or_default()

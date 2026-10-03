@@ -20,6 +20,8 @@ mod import;
 mod insight;
 mod mcp;
 mod notify;
+mod output;
+mod pty;
 mod predict;
 mod redact;
 mod search;
@@ -54,16 +56,70 @@ enum Cmd {
     /// Search your real commands by meaning / fuzzy text
     Search {
         query: Vec<String>,
-        #[arg(short, default_value_t = 10)]
+        /// how many results
+        #[arg(short, long = "limit", default_value_t = 10)]
         k: i64,
         /// only commands run in the current folder
         #[arg(long)]
         here: bool,
+        /// only commands run in this folder
+        #[arg(long)]
+        cwd: Option<String>,
+        /// only commands that only ever failed
+        #[arg(long, conflicts_with = "worked")]
+        failed: bool,
+        /// only commands that worked
+        #[arg(long)]
+        worked: bool,
+        /// only what you ran (`you`), or what agents ran (`agents`)
+        #[arg(long, value_parser = by_values())]
+        by: Option<String>,
+        /// only commands run after this: yesterday, "last week", monday, 2026-09-28
+        #[arg(long)]
+        after: Option<String>,
+        /// only commands run before this
+        #[arg(long)]
+        before: Option<String>,
+        /// print each result with this template: {command} {folder} {runs} {status} {last} {by}
+        #[arg(long)]
+        format: Option<String>,
+        /// print the results as JSON
+        #[arg(long)]
+        json: bool,
         #[arg(long)]
         all_variants: bool,
         /// python-parity ranking (semantic only)
         #[arg(long)]
         semantic: bool,
+    },
+    /// Delete commands from your history: those containing the text (or matching --regex),
+    /// narrowed by filters. Shows what it would delete and asks first
+    Delete {
+        contains: Vec<String>,
+        /// match a regex instead of plain text
+        #[arg(long)]
+        regex: Option<String>,
+        /// only commands that only ever failed
+        #[arg(long)]
+        failed: bool,
+        /// only what you ran (`you`), or what agents ran (`agents`)
+        #[arg(long, value_parser = by_values())]
+        by: Option<String>,
+        /// only commands last run before this: "last month", 2026-09-01
+        #[arg(long)]
+        before: Option<String>,
+        /// only in this folder
+        #[arg(long)]
+        cwd: Option<String>,
+        /// don't ask
+        #[arg(long)]
+        yes: bool,
+    },
+    /// Apply your ignore_commands / ignore_folders rules (config.json) to history saved before
+    /// you added them. Shows what it would remove and asks first
+    Prune {
+        #[arg(long)]
+        yes: bool,
     },
     /// Interactive finder (used by the shell key bindings)
     Find {
@@ -140,6 +196,55 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
+    /// Your coding agents' sessions, newest first, or the ones that ran what the words describe
+    /// (`reman sessions alembic migration last week`): where, what they ran, how it went, and how
+    /// to pick each one up again
+    Sessions {
+        words: Vec<String>,
+        /// only this agent's (claude, codex, gemini, cursor, ...)
+        #[arg(long)]
+        agent: Option<String>,
+        /// how many (default 10)
+        #[arg(long, short = 'k', default_value_t = 10)]
+        limit: i64,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Reopen the agent session that ran what the words describe, in its folder (`reman resume
+    /// alembic`); a number last picks another match, as numbered by `reman sessions`
+    Resume {
+        words: Vec<String>,
+        /// only this agent's sessions
+        #[arg(long)]
+        agent: Option<String>,
+        /// only print the command that resumes it
+        #[arg(long)]
+        print: bool,
+    },
+    /// Your shell inside reman's own terminal layer, so what your commands print is kept too
+    /// (`reman output`, the finder's ^O). `reman shell pwsh`, `reman shell -- bash -l`; with no
+    /// program, the shell you're in. Turn it on for every new shell in `reman settings`
+    Shell {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        program: Vec<String>,
+    },
+    /// What commands printed: the newest runs whose output was kept, or the ones whose command is
+    /// what the words describe, or whose output has the words (`reman output npm test`,
+    /// `reman output --failed`, `reman output ECONNREFUSED`)
+    Output {
+        words: Vec<String>,
+        /// only runs that failed
+        #[arg(long)]
+        failed: bool,
+        /// how many (default 3)
+        #[arg(long, short = 'k', default_value_t = 3)]
+        limit: i64,
+        /// every kept line, not just the last 40
+        #[arg(long)]
+        full: bool,
+        #[arg(long)]
+        json: bool,
+    },
     /// How this project is run: the commands that worked here, by task, and the usual sequences
     Runbook {
         /// print JSON (what agents get from the reman_runbook tool)
@@ -181,7 +286,7 @@ enum Cmd {
         #[arg(long)]
         path: Option<String>,
     },
-    /// Print shell integration: powershell | bash | zsh | fish | cmd (via Clink)
+    /// Print shell integration: powershell | bash | zsh | fish | nu | xonsh | cmd (via Clink)
     Init { shell: String },
     /// One-step onboarding: install, start the daemon, wire your shells, connect your coding tools
     Setup {
@@ -207,8 +312,9 @@ enum Cmd {
         #[arg(long, default_value = "")]
         query: String,
     },
-    /// Usage statistics
-    Stats,
+    /// Usage statistics; with a period (today, week, month, year, yesterday, "last week", monday,
+    /// 2026-09-28), what ran then: how it went, time spent, top commands and tools
+    Stats { period: Vec<String> },
     /// Health report; --fix-dupes removes Atuin/hook double captures
     Doctor {
         #[arg(long)]
@@ -344,21 +450,73 @@ fn real_main() -> Result<()> {
     let cli = Cli::parse();
     match cli.cmd {
         Cmd::Daemon { port } => daemon::serve(port.unwrap_or_else(config::port)),
-        Cmd::Search { query, k, here, all_variants, semantic } => {
+        Cmd::Search { query, k, here, cwd: dir, failed, worked, by, after, before, format, json: as_json, all_variants, semantic } => {
             let mut req = json!({"op": "search", "query": query.join(" "), "k": k, "group": !all_variants});
-            if here {
-                req["cwd"] = json!(cwd());
+            if let Some(d) = dir.map(|d| full_path(&d)).or_else(|| here.then(cwd)) {
+                req["cwd"] = json!(d);
             }
             if semantic {
                 req["rank"] = json!("semantic");
             }
+            if failed || worked {
+                req["status"] = json!(if failed { "fail" } else { "ok" });
+            }
+            if let Some(a) = actor_arg(by.as_deref())? {
+                req["actor"] = json!(a);
+            }
+            if let Some(a) = after {
+                req["after"] = json!(a);
+            }
+            if let Some(b) = before {
+                req["before"] = json!(b);
+            }
             let t = Instant::now();
             let r = client::call(&req)?;
             let rows = results(&r);
+            if as_json {
+                println!("{}", serde_json::to_string_pretty(&rows)?);
+                return Ok(());
+            }
+            if let Some(f) = format {
+                // one line per result, for scripts
+                for r in &rows {
+                    let by = r["actor"].as_str().and_then(|a| a.strip_prefix("agent:")).unwrap_or("you");
+                    let line = f
+                        .replace("{command}", r["command"].as_str().unwrap_or(""))
+                        .replace("{folder}", r["cwd"].as_str().unwrap_or(""))
+                        .replace("{runs}", &r["runs"].to_string())
+                        .replace("{status}", r["status"].as_str().unwrap_or(""))
+                        .replace("{last}", r["last_run"].as_str().unwrap_or(""))
+                        .replace("{by}", by)
+                        .replace("\\t", "\t");
+                    println!("{line}");
+                }
+                return Ok(());
+            }
             print_rows(&rows);
             eprintln!("\n\x1b[90m{} result(s), mode={}, {:.1} ms\x1b[0m", rows.len(), r["mode"].as_str().unwrap_or(""), t.elapsed().as_secs_f64() * 1000.0);
             Ok(())
         }
+        Cmd::Delete { contains, regex, failed, by, before, cwd: dir, yes } => {
+            let mut req = json!({"op": "delete", "failed": failed});
+            if !contains.is_empty() {
+                req["contains"] = json!(contains.join(" "));
+            }
+            if let Some(r) = regex {
+                req["regex"] = json!(r);
+            }
+            if let Some(b) = before {
+                req["before"] = json!(b);
+            }
+            if let Some(d) = dir {
+                req["cwd"] = json!(full_path(&d));
+            }
+            if let Some(a) = actor_arg(by.as_deref())? {
+                req["actor"] = json!(a);
+            }
+            remove_after_asking(req, yes)
+        }
+        Cmd::Prune { yes } => remove_after_asking(json!({"op": "prune"}), yes),
         Cmd::Find { query, scope, cwd: c, result_file, to_prompt, words } => {
             let query = if !query.is_empty() {
                 query
@@ -511,6 +669,108 @@ fn real_main() -> Result<()> {
                 }
             }
             Ok(())
+        }
+        Cmd::Shell { program } => std::process::exit(pty::run(program)?),
+        Cmd::Output { words, failed, limit, full, json: as_json } => {
+            let r = client::call(&json!({"op": "outputs", "query": words.join(" "), "failed": failed, "k": limit}))?;
+            if as_json {
+                println!("{}", serde_json::to_string_pretty(&r)?);
+                return Ok(());
+            }
+            let list = r["results"].as_array().cloned().unwrap_or_default();
+            if list.is_empty() {
+                println!(
+                    "{}",
+                    match (words.is_empty(), failed) {
+                        (true, false) => "No output kept yet. Agents' is kept as they run; yours inside `reman shell` (reman settings turns it on for every shell).",
+                        (true, true) => "No failed run's output kept yet.",
+                        (false, _) => "No kept output for anything like that.",
+                    }
+                );
+                return Ok(());
+            }
+            for x in &list {
+                let (g, c) = match x["exit"].as_i64() {
+                    Some(0) => ("✓", "32"),
+                    Some(_) => ("✗", "31"),
+                    None => ("·", "90"),
+                };
+                let exit = x["exit"].as_i64().filter(|e| *e != 0).map(|e| format!(" · exit {e}")).unwrap_or_default();
+                let at = x["folder"].as_str().map(|f| format!(" · in {f}")).unwrap_or_default();
+                println!("\x1b[{c}m{g}\x1b[0m \x1b[1m{}\x1b[0m   \x1b[90m{} ({}){exit} · {}{at}\x1b[0m", x["command"].as_str().unwrap_or("").lines().next().unwrap_or(""), x["ago"].as_str().unwrap_or(""), x["when"].as_str().unwrap_or(""), x["by"].as_str().unwrap_or(""));
+                let lines: Vec<&str> = x["output"].as_str().unwrap_or("").lines().collect();
+                let from = if full { 0 } else { lines.len().saturating_sub(40) };
+                if from > 0 {
+                    println!("  \x1b[90m│ … {from} lines before (--full shows them)\x1b[0m");
+                }
+                for l in &lines[from..] {
+                    println!("  \x1b[90m│\x1b[0m {l}");
+                }
+                println!();
+            }
+            Ok(())
+        }
+        Cmd::Sessions { words, agent, limit, json: as_json } => {
+            let r = client::call(&json!({"op": "sessions", "query": words.join(" "), "agent": agent, "k": limit}))?;
+            if as_json {
+                println!("{}", serde_json::to_string_pretty(&r)?);
+                return Ok(());
+            }
+            print_sessions(&r);
+            Ok(())
+        }
+        Cmd::Resume { mut words, agent, print } => {
+            // a number last picks the nth match
+            let pick = words.last().and_then(|w| w.parse::<usize>().ok()).filter(|n| (1..=50).contains(n));
+            if pick.is_some() {
+                words.pop();
+            }
+            let pick = pick.unwrap_or(1);
+            let r = client::call(&json!({"op": "sessions", "query": words.join(" "), "agent": agent, "k": pick.max(10)}))?;
+            let list = r["results"].as_array().cloned().unwrap_or_default();
+            let Some(x) = list.get(pick - 1) else {
+                match (words.is_empty(), list.len()) {
+                    (true, 0) => println!("No agent sessions recorded yet."),
+                    (false, 0) => println!("No agent session ran anything like \"{}\".", words.join(" ")),
+                    (_, n) => println!("There {} only {n} match{}.", if n == 1 { "is" } else { "are" }, if n == 1 { "" } else { "es" }),
+                }
+                std::process::exit(1);
+            };
+            let agent = x["agent"].as_str().unwrap_or("?");
+            let folder = x["folder"].as_str().map(config::native_path);
+            let argv: Vec<String> = x["resume_argv"].as_array().into_iter().flatten().filter_map(|a| a.as_str().map(String::from)).collect();
+            if argv.is_empty() {
+                println!("{agent}'s sessions can't be reopened from a terminal; it was session {} ({}, in {}).", x["session"].as_str().unwrap_or("?"), x["ago"].as_str().unwrap_or("?"), folder.as_deref().unwrap_or("?"));
+                std::process::exit(1);
+            }
+            if print {
+                println!("{}", argv.join(" "));
+                return Ok(());
+            }
+            let dir = folder.filter(|f| std::path::Path::new(f).is_dir());
+            eprintln!(
+                "\x1b[90mreman: {agent}'s session from {} ({} commands{}), in {}\x1b[0m",
+                x["ago"].as_str().unwrap_or("?"),
+                x["runs"],
+                if x["failed"].as_u64().unwrap_or(0) > 0 { format!(", {} failed", x["failed"]) } else { String::new() },
+                dir.as_deref().unwrap_or("this folder (its own is gone)")
+            );
+            eprintln!("\x1b[90m       {}\x1b[0m", argv.join(" "));
+            // npm installs these as .cmd scripts on Windows, which only cmd starts
+            let mut cmd = if cfg!(windows) {
+                let mut c = std::process::Command::new("cmd");
+                c.arg("/C").args(&argv);
+                c
+            } else {
+                let mut c = std::process::Command::new(&argv[0]);
+                c.args(&argv[1..]);
+                c
+            };
+            if let Some(d) = &dir {
+                cmd.current_dir(d);
+            }
+            let st = cmd.status().with_context(|| format!("could not start {}", argv[0]))?;
+            std::process::exit(st.code().unwrap_or(1));
         }
         Cmd::Why { command } => {
             let mut req = json!({"op": "why", "cwd": cwd()});
@@ -717,7 +977,46 @@ fn real_main() -> Result<()> {
             }
             Ok(())
         }
-        Cmd::Stats => {
+        Cmd::Stats { period } if !period.is_empty() && period.join(" ") != "all" => {
+            let p = period.join(" ");
+            let s = client::call(&json!({"op": "stats", "period": p}))?;
+            if let Some(e) = s["error"].as_str() {
+                bail!("{e}");
+            }
+            let runs = s["runs"].as_u64().unwrap_or(0);
+            if runs == 0 {
+                println!("{p}: nothing ran.");
+                return Ok(());
+            }
+            let (ok, fail) = (s["ok_runs"].as_u64().unwrap_or(0), s["failed_runs"].as_u64().unwrap_or(0));
+            let worked = if ok + fail > 0 { format!("{}% worked", (ok * 100 + (ok + fail) / 2) / (ok + fail)) } else { "outcomes not recorded".into() };
+            let took = |ms: i64| crate::insight::took(ms.clamp(0, u32::MAX as i64) as u32, false);
+            println!("\x1b[1m{p}\x1b[0m: {runs} runs of {} commands · {worked} · you {}, agents {}", s["commands"], s["you"], s["agents"]);
+            let ms = s["time_ms"].as_i64().unwrap_or(0);
+            if ms >= 1000 {
+                println!("  time spent running commands: {} (on runs that failed: {})", took(ms), took(s["failed_time_ms"].as_i64().unwrap_or(0)));
+            }
+            let short = |c: &str| {
+                let c = c.lines().next().unwrap_or("");
+                if c.chars().count() > 60 { format!("{}…", c.chars().take(59).collect::<String>()) } else { c.to_string() }
+            };
+            let tools: Vec<String> = s["tools"].as_array().into_iter().flatten().map(|t| format!("{} ({})", t["tool"].as_str().unwrap_or(""), t["runs"])).collect();
+            if !tools.is_empty() {
+                println!("\n  most used: {}", tools.join(" · "));
+            }
+            for (title, key) in [("most run", "top"), ("failed most", "failing"), ("busiest folders", "folders")] {
+                let rows = s[key].as_array().cloned().unwrap_or_default();
+                if rows.is_empty() {
+                    continue;
+                }
+                println!("\n  {title}:");
+                for t in rows {
+                    println!("    {:>5}  {}", t["runs"], short(t["command"].as_str().unwrap_or("")));
+                }
+            }
+            Ok(())
+        }
+        Cmd::Stats { .. } => {
             let s = client::call(&json!({"op": "stats"}))?;
             println!("reman stats");
             println!("  commands {}   runs {}   executions logged {}", s["commands"], s["runs"], s["executions"]);
@@ -808,13 +1107,22 @@ fn init_script(shell: &str, exe: &Path) -> Result<String> {
         "zsh" => include_str!("init/reman.zsh"),
         "fish" => include_str!("init/reman.fish"),
         "cmd" | "clink" => include_str!("init/reman.lua"),
-        other => bail!("unknown shell {other:?} (powershell|bash|zsh|fish|cmd)"),
+        "nu" | "nushell" => include_str!("init/reman.nu"),
+        "xonsh" => include_str!("init/reman.xsh"),
+        other => bail!("unknown shell {other:?} (powershell|bash|zsh|fish|nu|xonsh|cmd)"),
     };
     let fix = |p: &Path| {
         let s = p.to_string_lossy().into_owned();
         if matches!(shell, "powershell" | "pwsh" | "cmd" | "clink") { s } else { s.replace('\\', "/") }
     };
+    // shells open inside `reman shell` (reman settings): a PowerShell boolean, a number elsewhere
+    let layer = settings::load().shell_layer;
+    let layer = match shell {
+        "powershell" | "pwsh" => if layer { "$true" } else { "$false" },
+        _ => if layer { "1" } else { "0" },
+    };
     Ok(tpl
+        .replace("__SHELL_LAYER__", layer)
         .replace("__REMAN__", &fix(exe))
         .replace("__HOOK__", &fix(&hook_exe(exe)))
         .replace("__PORT__", &config::port().to_string())
@@ -842,7 +1150,137 @@ fn unshared_folders(roots: &[String]) -> Vec<(String, u64)> {
     complete::unshared_folders(roots)
 }
 
+/// `--by`'s values, for checking and for Tab completion (`me`, `human` and `agent` are accepted too).
+fn by_values() -> clap::builder::PossibleValuesParser {
+    use clap::builder::PossibleValue;
+    clap::builder::PossibleValuesParser::new([
+        PossibleValue::new("you").help("what you ran").aliases(["me", "human"]),
+        PossibleValue::new("agents").help("what your coding agents ran").alias("agent"),
+    ])
+}
+
+/// `--by you|agents` as the daemon's actor filter.
+fn actor_arg(by: Option<&str>) -> Result<Option<&'static str>> {
+    Ok(match by {
+        None => None,
+        Some("you" | "me" | "human") => Some("human"),
+        Some("agents" | "agent") => Some("agent"),
+        Some(o) => bail!("--by {o}: use `you` or `agents`"),
+    })
+}
+
+/// A folder given on the command line, as an absolute path (the daemon knows folders that way).
+fn full_path(d: &str) -> String {
+    std::fs::canonicalize(d)
+        .map(|p| {
+            let s = p.to_string_lossy().into_owned();
+            s.strip_prefix(r"\\?\").map(str::to_string).unwrap_or(s)
+        })
+        .unwrap_or_else(|_| d.to_string())
+}
+
+/// `reman delete` / `reman prune`: list what matches, ask, then remove it.
+fn remove_after_asking(mut req: Value, yes: bool) -> Result<()> {
+    let r = client::call(&req)?;
+    if let Some(e) = r["error"].as_str() {
+        bail!("{e}");
+    }
+    let list = r["commands"].as_array().cloned().unwrap_or_default();
+    if list.is_empty() {
+        println!("Nothing matches: nothing to remove.");
+        return Ok(());
+    }
+    for c in list.iter().take(30) {
+        let line = c["command"].as_str().unwrap_or("").lines().next().unwrap_or("");
+        let at = c["folder"].as_str().map(|f| format!("   \x1b[90min {f}\x1b[0m")).unwrap_or_default();
+        let why = c["why"].as_str().map(|w| format!("   \x1b[90m({w})\x1b[0m")).unwrap_or_default();
+        println!("  {line}   \x1b[90m{}x\x1b[0m{at}{why}", c["runs"]);
+    }
+    if list.len() > 30 {
+        println!("  \x1b[90m... and {} more\x1b[0m", list.len() - 30);
+    }
+    if !yes {
+        use std::io::Write;
+        print!("\nRemove these {} from your history? This can't be undone. [y/N] ", list.len());
+        std::io::stdout().flush()?;
+        let mut answer = String::new();
+        std::io::stdin().read_line(&mut answer)?;
+        if !matches!(answer.trim().to_lowercase().as_str(), "y" | "yes") {
+            println!("Nothing removed.");
+            return Ok(());
+        }
+    }
+    req["apply"] = json!(true);
+    let r = client::call(&req)?;
+    println!("Removed {} from your history.", r["deleted"]);
+    Ok(())
+}
+
 /// `reman yesterday` / `today` / `day <date>`: the day's story, by project.
+fn print_sessions(r: &Value) {
+    let list = r["results"].as_array().cloned().unwrap_or_default();
+    let words = r["query"].as_str().unwrap_or("");
+    if list.is_empty() {
+        match (words.is_empty(), r["window"].as_str()) {
+            (true, None) => println!("No agent sessions recorded yet. Connect an agent with `reman connect`."),
+            (true, Some(w)) => println!("No agent session ran anything {w}."),
+            (false, _) => println!("No agent session ran anything like \"{words}\"."),
+        }
+        return;
+    }
+    // what was asked, time words included, for `reman resume` to ask the same
+    let asked: String = [Some(words), r["window"].as_str()].into_iter().flatten().filter(|w| !w.is_empty()).map(|w| format!(" {w}")).collect();
+    let short = |c: &str| {
+        let c = c.lines().next().unwrap_or("");
+        if c.chars().count() > 46 { format!("{}…", c.chars().take(45).collect::<String>()) } else { c.to_string() }
+    };
+    for (i, x) in list.iter().enumerate() {
+        let (runs, failed) = (x["runs"].as_u64().unwrap_or(0), x["failed"].as_u64().unwrap_or(0));
+        let fail = if failed > 0 { format!(", \x1b[31m{failed} failed\x1b[0m") } else { String::new() };
+        println!(
+            "\x1b[1m{}\x1b[0m  {}   \x1b[90m{} · {} to {} ({})\x1b[0m · {runs} command{}{fail}",
+            i + 1,
+            x["agent"].as_str().unwrap_or("?"),
+            x["ago"].as_str().unwrap_or(""),
+            x["from"].as_str().unwrap_or(""),
+            x["to"].as_str().unwrap_or(""),
+            x["took"].as_str().unwrap_or(""),
+            if runs == 1 { "" } else { "s" },
+        );
+        if let Some(f) = x["folder"].as_str() {
+            println!("   {f}");
+        }
+        let flow: Vec<String> = x["flow"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(|f| {
+                let n = f["times"].as_u64().unwrap_or(1);
+                format!("{}{}", short(f["command"].as_str().unwrap_or("")), if n > 1 { format!(" ({n}x)") } else { String::new() })
+            })
+            .collect();
+        if !flow.is_empty() {
+            let more = x["more"].as_u64().unwrap_or(0);
+            println!("   {}{}", flow.join(" → "), if more > 0 { format!("  \x1b[90m(+{more} more)\x1b[0m") } else { String::new() });
+        }
+        if !words.is_empty() {
+            let m: Vec<String> = x["matched"].as_array().into_iter().flatten().filter_map(Value::as_str).map(|c| short(c)).collect();
+            if !m.is_empty() {
+                println!("   \x1b[90mran:\x1b[0m \x1b[36m{}\x1b[0m", m.join("  ·  "));
+            }
+        }
+        match x["resume"].as_str() {
+            Some(c) => println!("   \x1b[90mresume:\x1b[0m {c}   \x1b[90m(or reman resume{asked}{})\x1b[0m", if i == 0 { String::new() } else { format!(" {}", i + 1) }),
+            None => println!("   \x1b[90msession {} (opened from {}, not a terminal)\x1b[0m", x["session"].as_str().unwrap_or("?"), x["agent"].as_str().unwrap_or("its app")),
+        }
+        println!();
+    }
+    let (total, shown) = (r["total"].as_u64().unwrap_or(0), list.len() as u64);
+    if total > shown {
+        println!("\x1b[90m{} more; -k {} shows them\x1b[0m", total - shown, total.min(50));
+    }
+}
+
 fn print_day(day: &str) -> Result<()> {
     let r = client::call(&json!({"op": "day", "day": day}))?;
     if let Some(reason) = r["reason"].as_str() {
@@ -1429,11 +1867,15 @@ fn uninstall(purge: Option<bool>, yes: bool, dry: bool) -> Result<()> {
     }
     let profiles: Vec<PathBuf> = profile_paths().into_iter().filter(|p| std::fs::read_to_string(p).is_ok_and(|t| t.contains(">>> reman >>>"))).collect();
     plan.extend(profiles.iter().map(|p| format!("PowerShell      reman's block in {}", p.display())));
-    let rcs: Vec<PathBuf> = [user_home.join(".bashrc"), user_home.join(".zshrc"), user_home.join(".config").join("fish").join("config.fish")]
+    let rcs: Vec<PathBuf> = [user_home.join(".bashrc"), user_home.join(".zshrc"), user_home.join(".config").join("fish").join("config.fish"), user_home.join(".xonshrc")]
         .into_iter()
         .filter(|p| std::fs::read_to_string(p).is_ok_and(|t| t.contains("# reman shell integration")))
         .collect();
     plan.extend(rcs.iter().map(|p| format!("shell           reman's line in {}", p.display())));
+    let nu_file = Some(nu_autoload_file(&user_home)).filter(|f| f.exists());
+    if let Some(f) = &nu_file {
+        plan.push(format!("nushell         {}", f.display()));
+    }
     let autorun = if cfg!(windows) && real { autorun_without_macros(&cmd_autorun()) } else { None };
     if autorun.is_some() {
         plan.push("Command Prompt  the r / rr macros (its AutoRun entry)".into());
@@ -1506,6 +1948,10 @@ fn uninstall(purge: Option<bool>, yes: bool, dry: bool) -> Result<()> {
         let _ = std::fs::remove_file(home.join("cmd-macros.txt"));
     }
     if let Some(f) = &clink {
+        std::fs::remove_file(f)?;
+        println!("  removed  {}", f.display());
+    }
+    if let Some(f) = &nu_file {
         std::fs::remove_file(f)?;
         println!("  removed  {}", f.display());
     }
@@ -1637,6 +2083,25 @@ fn setup(no_profile: bool, no_connect: bool) -> Result<()> {
             Ok((kind, rc, true)) => println!("  shell ({kind})    : WIRED {} -> open a new terminal", rc.display()),
             Ok((kind, rc, false)) => println!("  shell ({kind})    : already wired ({})", rc.display()),
             Err(e) => println!("  shell           : {e:#}"),
+        }
+    }
+    // 5c. nushell and xonsh, wherever they're installed
+    if !no_profile {
+        let home = dirs::home_dir().context("no home folder")?;
+        if connect::on_path("nu") {
+            let f = nu_autoload_file(&home);
+            if let Some(d) = f.parent() {
+                std::fs::create_dir_all(d)?;
+            }
+            std::fs::write(&f, init_script("nu", &installed)?)?;
+            println!("  shell (nushell) : WIRED {} -> open a new nushell", f.display());
+        }
+        if connect::on_path("xonsh") {
+            match wire_xonsh(&installed, &home) {
+                Ok((rc, true)) => println!("  shell (xonsh)   : WIRED {} -> open a new xonsh", rc.display()),
+                Ok((rc, false)) => println!("  shell (xonsh)   : already wired ({})", rc.display()),
+                Err(e) => println!("  shell (xonsh)   : {e:#}"),
+            }
         }
     }
     // 6. coding tools: plug into every one that's installed (backups kept; `reman disconnect all` undoes)
@@ -1814,6 +2279,37 @@ fn wire_unix_rc(exe: &Path) -> Result<(&'static str, PathBuf, bool)> {
     Ok((kind, rc, true))
 }
 
+/// The file nushell loads on start: `$nu.data-dir/vendor/autoload/reman.nu`, its data folder
+/// being the OS's (%APPDATA%\nushell, ~/.local/share/nushell, ~/Library/Application Support/nushell).
+/// Written whole by `reman setup` (nushell sources files by a fixed path, not a command's output).
+fn nu_autoload_file(home: &Path) -> PathBuf {
+    let data = dirs::data_dir().filter(|_| dirs::home_dir().as_deref() == Some(home)).unwrap_or_else(|| {
+        if cfg!(windows) {
+            home.join("AppData").join("Roaming")
+        } else if cfg!(target_os = "macos") {
+            home.join("Library").join("Application Support")
+        } else {
+            home.join(".local").join("share")
+        }
+    });
+    data.join("nushell").join("vendor").join("autoload").join("reman.nu")
+}
+
+/// xonsh: add `execx($(reman init xonsh))` to ~/.xonshrc, once. Returns (rc file, added now).
+fn wire_xonsh(exe: &Path, home: &Path) -> Result<(PathBuf, bool)> {
+    const MARK: &str = "# reman shell integration";
+    let rc = home.join(".xonshrc");
+    let text = std::fs::read_to_string(&rc).unwrap_or_default();
+    if text.contains(MARK) {
+        return Ok((rc, false));
+    }
+    let exe = exe.to_string_lossy().replace('\\', "/");
+    let mut f = std::fs::OpenOptions::new().create(true).append(true).open(&rc)?;
+    use std::io::Write as _;
+    writeln!(f, "\nexecx($(@({exe:?}) init xonsh))  {MARK}")?;
+    Ok((rc, true))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1851,10 +2347,24 @@ mod tests {
     }
 
     #[test]
+    fn xonsh_wired_once_and_unwired() {
+        let home = std::env::temp_dir().join(format!("reman-xonsh-{}", std::process::id()));
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::write(home.join(".xonshrc"), "$PROMPT = '> '\n").unwrap();
+        let exe = Path::new(r"C:\Users\u\.reman\bin\reman.exe");
+        assert!(wire_xonsh(exe, &home).unwrap().1);
+        assert!(!wire_xonsh(exe, &home).unwrap().1, "once");
+        let rc = std::fs::read_to_string(home.join(".xonshrc")).unwrap();
+        assert!(rc.contains(r#"execx($(@("C:/Users/u/.reman/bin/reman.exe") init xonsh))"#), "{rc}");
+        assert_eq!(unwire_rc(&rc).unwrap(), "$PROMPT = '> '\n");
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
     fn init_templates_substitute() {
-        for sh in ["powershell", "bash", "zsh", "fish"] {
+        for sh in ["powershell", "bash", "zsh", "fish", "nu", "xonsh", "cmd"] {
             let s = init_script(sh, Path::new("/x/reman")).unwrap();
-            assert!(!s.contains("__REMAN__") && !s.contains("__PORT__") && !s.contains("__SPOOL__"), "{sh}");
+            assert!(!s.contains("__REMAN__") && !s.contains("__PORT__") && !s.contains("__SPOOL__") && !s.contains("__HOOK__") && !s.contains("__SHELL_LAYER__"), "{sh}");
         }
     }
 }

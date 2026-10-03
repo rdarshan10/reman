@@ -93,11 +93,15 @@ pub fn record(a: RecordArgs) -> Result<()> {
         return Ok(());
     }
     let cwd = a.cwd.or_else(|| std::env::current_dir().ok().map(|p| p.to_string_lossy().into_owned()));
-    let req = json!({
+    let mut req = json!({
         "op": "ingest", "command": a.command.trim(), "exit": a.exit, "cwd": cwd,
         "session": a.session.or_else(|| std::env::var("REMAN_SESSION").ok()).unwrap_or_default(),
         "actor": a.actor.unwrap_or_else(detect_actor), "duration_ms": a.duration_ms,
     });
+    // inside `reman shell`: the id its output arrives under
+    if let Some(c) = std::env::var("REMAN_CAPTURE").ok().filter(|c| !c.is_empty()) {
+        req["capture"] = json!(c);
+    }
     let failed = a.exit.is_some_and(|e| e > 0);
     if let Some(reply) = push(req, a.suggest && failed) {
         if let Some(sg) = reply.get("suggest") {
@@ -263,7 +267,20 @@ fn send_run_with(agent: &str, r: AgentRun, talk_back: bool) -> Option<Value> {
     if failed && !r.output.trim().is_empty() {
         req["error"] = json!(r.output);
     }
+    // and the end of it, kept with the run (`reman output`, the finder's ^O)
+    if !r.output.trim().is_empty() {
+        req["printed"] = json!(tail(&r.output, 32 * 1024));
+    }
     push(req, talk_back && failed)
+}
+
+/// The end of a long text: at most `n` bytes, cut at a character boundary.
+fn tail(s: &str, n: usize) -> &str {
+    let mut i = s.len().saturating_sub(n);
+    while !s.is_char_boundary(i) {
+        i += 1;
+    }
+    &s[i..]
 }
 
 /// What reman tells an agent after a failure, through its hook: that it is retrying a command

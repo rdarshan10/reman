@@ -75,6 +75,7 @@ pub fn parse_cmd(cmd: &str) -> (Option<String>, Option<String>) {
 /// wrapper runs inside it (`npx astro dev` runs astro). `cd x` steps run nothing.
 pub fn programs(cmd: &str) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
+    let cmd = without_heredoc_bodies(cmd);
     for seg in cmd.split([';', '|', '&', '\n', '(', ')']) {
         let seg = seg.trim();
         let first = seg.split_whitespace().next().unwrap_or("").to_lowercase();
@@ -91,6 +92,34 @@ pub fn programs(cmd: &str) -> Vec<String> {
         }
     }
     out
+}
+
+/// The command without what a heredoc (`<<'EOF'` ... `EOF`) or a PowerShell here-string (`@'` ...
+/// `'@`) feeds it: that is data (a script, a file's text), not commands. A pasted Python script's
+/// `("tear down containers", ...)` would otherwise make `tear` a program, and a search naming it a
+/// search for that tool.
+fn without_heredoc_bodies(cmd: &str) -> String {
+    let mut out: Vec<&str> = Vec::new();
+    let mut until: Option<String> = None;
+    for line in cmd.lines() {
+        if let Some(end) = &until {
+            if line.trim() == end {
+                until = None;
+            }
+            continue;
+        }
+        out.push(line);
+        let t = line.trim_end();
+        if let Some(i) = t.find("<<").filter(|&i| !t[i + 2..].starts_with('<')) {
+            let tag: String = t[i + 2..].trim_start_matches('-').trim_start().trim_start_matches(['\'', '"']).chars().take_while(|c| c.is_ascii_alphanumeric() || *c == '_').collect();
+            if !tag.is_empty() {
+                until = Some(tag);
+            }
+        } else if t.ends_with("@'") || t.ends_with("@\"") {
+            until = Some(if t.ends_with("@'") { "'@" } else { "\"@" }.to_string());
+        }
+    }
+    out.join("\n")
 }
 
 /// A command that says nothing about the project it ran in: one line, a well-known tool as the
@@ -429,6 +458,16 @@ mod tests {
     use super::*;
 
     #[test]
+    fn heredoc_bodies_are_not_programs() {
+        let py = "python - <<'EOF'\nrows = [\n    (\"tear down containers\", \"docker compose down\"),\n]\nEOF\nnpm test";
+        assert_eq!(programs(py), vec!["python", "npm"]);
+        let ps = "$s = @'\nshred everything\n'@\ngit status";
+        assert_eq!(programs(ps), vec!["git"]);
+        // a here-string (<<<) has no body
+        assert_eq!(programs("grep x <<< \"$v\"\nls"), vec!["grep", "ls"]);
+    }
+
+    #[test]
     fn groups() {
         assert_eq!(group_key(r#"git commit -m "x""#), "git commit");
         assert_eq!(group_key("alembic upgrade head"), "alembic upgrade");
@@ -445,7 +484,7 @@ mod tests {
         assert_eq!(t.values, vec!["fix login", "wip"]);
         let t = template(&["kubectl logs api-7f9c4 -n prod", "kubectl logs web-x2k1m -n prod"]).unwrap();
         assert_eq!((t.display.as_str(), t.kind), ("kubectl logs ‹name› -n prod", "name"));
-        assert_eq!(template(&[r"cd D:\work\api", r"cd D:\work\web"]).map(|t| t.fill), Some("cd \u{1}".into()));
+        assert_eq!(template(&[r"cd C:\code\api", r"cd C:\code\web"]).map(|t| t.fill), Some("cd \u{1}".into()));
         assert_eq!(template(&["docker compose up", "docker compose down"]), None, "the subcommand differs");
         assert_eq!(template(&["git commit -m a -q", "git commit -m b -v"]), None, "two places differ");
         assert_eq!(template(&["ls -la", "ls -l"]), None, "a flag isn't a blank");
@@ -525,11 +564,11 @@ mod program_tests {
     #[test]
     fn every_step_and_what_wrappers_run() {
         assert_eq!(programs("npx astro dev --port 4321"), ["npx", "astro"]);
-        assert_eq!(programs("cd D:/portfolio && npx vercel --prod 2>&1 | tail -3"), ["npx", "vercel", "tail"]);
+        assert_eq!(programs("cd C:/code/site && npx vercel --prod 2>&1 | tail -3"), ["npx", "vercel", "tail"]);
         assert_eq!(programs("git add -A; git commit -m wip"), ["git"]);
         assert_eq!(programs("sudo docker ps"), ["sudo", "docker"]);
         // a cd step runs nothing; variables and numbers are not programs
-        assert!(programs("cd portfolio").is_empty());
+        assert!(programs("cd site").is_empty());
         assert!(programs("$x = 1").is_empty());
     }
 }

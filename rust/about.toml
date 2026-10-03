@@ -1,0 +1,13 @@
+# cargo about generate about.hbs -o THIRD_PARTY_LICENSES.html
+# Every license here is permissive and fine to ship with an Apache-2.0 program. MPL-2.0 (nucleo-matcher,
+# option-ext) only asks that changes to those files stay open; reman uses them unmodified.
+accepted = [
+    "Apache-2.0",
+    "MIT",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "MPL-2.0",
+    "Unicode-3.0",
+    "CDLA-Permissive-2.0",
+]

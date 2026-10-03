@@ -42,6 +42,22 @@ pub struct Settings {
     /// absent = 60, 0 = never
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub done_alert_after_s: Option<u64>,
+    /// the finder: how many lines it takes under the prompt; absent = 20, 0 = the whole screen
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finder_height: Option<u16>,
+    /// the finder's keys: absent = as in a text box, "vim" = vim's normal and insert modes
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finder_keys: Option<String>,
+    /// whose commands the finder lists at first: absent = yours, "all" = agents' too
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finder_who: Option<String>,
+    /// what commands print is kept for this many runs, the newest (absent = 3000, 0 = none):
+    /// agents' (their hooks see it) and yours inside `reman shell`
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_runs: Option<u32>,
+    /// shells open inside `reman shell` (so what your commands print is kept too)
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub shell_layer: bool,
 }
 
 impl Settings {
@@ -52,6 +68,29 @@ impl Settings {
             Some(0) => None,
             Some(n) => Some(n),
         }
+    }
+
+    /// Lines the finder takes under the prompt; None = the whole screen.
+    pub fn finder_lines(&self) -> Option<u16> {
+        match self.finder_height {
+            None => Some(20),
+            Some(0) => None,
+            Some(n) => Some(n.max(8)),
+        }
+    }
+
+    /// How many runs' output is kept, newest first; 0 = none.
+    pub fn output_runs(&self) -> u32 {
+        self.output_runs.unwrap_or(3000)
+    }
+
+    pub fn finder_vim(&self) -> bool {
+        self.finder_keys.as_deref() == Some("vim")
+    }
+
+    /// The finder lists agents' commands too, from the start.
+    pub fn finder_everyone(&self) -> bool {
+        self.finder_who.as_deref() == Some("all")
     }
 
     /// Drop commands holding a secret instead of masking them.

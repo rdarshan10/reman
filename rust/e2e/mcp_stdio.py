@@ -4,7 +4,7 @@ import asyncio, os, sys
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
-EXE = os.path.join(os.path.expanduser("~"), ".reman", "bin", "reman.exe")
+EXE = os.environ.get("REMAN_EXE_UNDER_TEST") or os.path.join(os.path.expanduser("~"), ".reman", "bin", "reman.exe")
 ENV = dict(os.environ)  # roots come from ~/.reman/config.json (reman connect --root)
 
 

@@ -163,6 +163,9 @@ def main():
     os.makedirs(os.path.join(tmp, "home", ".claude"))
     ENV.update(os.environ, REMAN_PORT=str(PORT), REMAN_CONNECT_HOME=os.path.join(tmp, "home"), REMAN_CONFIG=os.path.join(tmp, "config.json"))
     env = dict(ENV, REMAN_DB=os.path.join(tmp, "reman.db"), REMAN_SPOOL=os.path.join(tmp, "spool.jsonl"))
+    # the whole-screen finder (inline, under a prompt, is finder_terminal.py's)
+    with open(ENV["REMAN_CONFIG"], "w") as f:
+        json.dump({"finder_height": 0}, f)
     proc = subprocess.Popen([EXE, "daemon", "--port", str(PORT)], env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     try:
         for _ in range(240):

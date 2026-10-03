@@ -5,6 +5,17 @@
 #   Alt+N on an empty line = what you usually run next here (again: the next idea)
 #   Tab = normal completion; when there's nothing to complete, the grey prediction, else the finder
 $global:__RemanExe = "__REMAN__"
+# `reman settings` can open every shell inside `reman shell`, so what your commands print is kept
+# too: this one hands over to a shell inside it, and closes when that one does (it goes on as
+# usual when that can't start). Only an interactive console shell, never one already inside.
+if (__SHELL_LAYER__ -and $null -eq $global:__RemanLevels -and -not $env:REMAN_PTY -and $Host.Name -eq 'ConsoleHost' -and $env:TERM_PROGRAM -ne 'vscode' -and
+    -not [Console]::IsInputRedirected -and -not ([Environment]::GetCommandLineArgs() | Where-Object { $_ -match '^-(c|command|f|file|e|ec|encodedcommand)$' })) {
+  # the same PowerShell, started the same way
+  $__remanArgs = @([Environment]::GetCommandLineArgs() | Select-Object -Skip 1)
+  if (-not ($__remanArgs -match '^-nologo$')) { $__remanArgs += '-NoLogo' }
+  & $global:__RemanExe shell -- (Get-Process -Id $PID).Path @__remanArgs
+  if ($LASTEXITCODE -ne 97) { [Environment]::Exit($LASTEXITCODE) }
+}
 # `reman` is the exe on PATH, not a wrapper function: PowerShell only gives native commands
 # their argument completer (below)
 $__remanDir = Split-Path -Parent $global:__RemanExe
@@ -125,6 +136,8 @@ function global:__RemanCapture {
         $dur = [int64]($h.EndExecutionTime - $h.StartExecutionTime).TotalMilliseconds
         $req = @{ op = 'ingest'; command = $cmd; exit = $exit; cwd = (Get-Location).Path;
                   session = $env:REMAN_SESSION; actor = 'human'; duration_ms = $dur }
+        # `reman shell` sends what it printed under this id
+        if ($global:__RemanCapId) { $req.capture = $global:__RemanCapId }
         if ($exit -ne 0) {
           # what it printed, when PowerShell kept it (cmdlets; a native program's stderr isn't)
           if ($newErr) { try { $req.error = [string]$e0.Exception.Message } catch { } }
@@ -187,7 +200,11 @@ $global:__RemanPrompt = {
     $global:__RemanChain = @(@($global:__RemanChain) | Select-Object -Skip ($levels.Count - 1 - $k))
     $global:__RemanLevels = @($levels | Select-Object -First ($k + 1))
   }
+  # (ConPTY draws text on its own beat but passes a mark on at once: a mark waits one beat, so
+  # it lands after what came before it)
+  if ($global:__RemanCapId) { Start-Sleep -Milliseconds 30; [Console]::Write("$([char]27)]46031711;D;$($global:__RemanCapId)$([char]7)") }
   __RemanCapture $ok $code $trusted
+  $global:__RemanCapId = $null
   __RemanWelcome
   if ($trusted) { __RemanAutoReload }
   $global:__RemanDepth = 0
@@ -242,6 +259,12 @@ if ($global:__RemanReadLine) {
     $global:__RemanHeld = $null   # a held command is held once per line read
     $line = & $global:__RemanReadLine
     if ($global:__RemanOsc) { [Console]::Write("$([char]27)]133;C$([char]7)") }
+    if ($env:REMAN_PTY -and $line -and $line.Trim()) {
+      # inside `reman shell`, what the command prints is kept: it starts here (the prompt ends it)
+      $global:__RemanCapId = "$env:REMAN_SESSION-$([DateTime]::UtcNow.Ticks)"
+      Start-Sleep -Milliseconds 30
+      [Console]::Write("$([char]27)]46031711;C;$($global:__RemanCapId)$([char]7)")
+    }
     $line
   }
 }
@@ -269,11 +292,21 @@ function global:__RemanFind {
   param([string]$line, [string]$scope)
   $tmp = [IO.Path]::GetTempFileName()
   $env:REMAN_FIND_QUERY = $line
+  # the finder opens under the prompt and scrolls the screen up when the prompt sits low; it puts
+  # the cursor back where the line starts, and PSReadLine is told where its prompt went
+  $b = $null; $at = 0
+  [Microsoft.PowerShell.PSConsoleReadLine]::GetBufferState([ref]$b, [ref]$at)
+  [Microsoft.PowerShell.PSConsoleReadLine]::SetCursorPosition(0)
+  $top = [Console]::CursorTop
   try {
     & $global:__RemanExe find --scope $scope --cwd ((Get-Location).Path) --result-file $tmp
     $chosen = [IO.File]::ReadAllText($tmp, [Text.Encoding]::UTF8)
   } catch { $chosen = $null }
   finally { Remove-Item Env:\REMAN_FIND_QUERY -ErrorAction SilentlyContinue; Remove-Item $tmp -ErrorAction SilentlyContinue }
+  if ([Console]::CursorTop -ne $top) {
+    [Microsoft.PowerShell.PSConsoleReadLine]::InvokePrompt($null, [Math]::Max(0, [Console]::CursorTop - (Get-PSReadLineOption).ExtraPromptLineCount))
+  }
+  [Microsoft.PowerShell.PSConsoleReadLine]::SetCursorPosition($at)
   if ($chosen) { return $chosen.TrimEnd("`r", "`n") }
   return $null
 }

@@ -10,17 +10,30 @@ fn patterns() -> &'static [(Regex, &'static str)] {
         [
             (
                 // the secret word anywhere in a variable name: API_TOKEN, GITHUB_TOKEN, DB_PASSWORD,
-                // AWS_SECRET_ACCESS_KEY (a bare \b before it missed every one after an underscore)
-                r"(?i)\b([a-z0-9_]*?(?:password|passwd|pwd|secret|token|api[_-]?key|apikey|access[_-]?key|private[_-]?key|credentials?)[a-z0-9_]*)(\s*[=:]\s*)(\S+)",
+                // AWS_SECRET_ACCESS_KEY (a bare \b before it missed every one after an underscore);
+                // and any name ending in _KEY: AZURE_STORAGE_ACCOUNT_KEY, GOOGLE_SERVICE_ACCOUNT_KEY
+                // (but not SSH_KEY_FILE, whose value is a path)
+                r"(?i)\b([a-z0-9_]*?(?:password|passwd|pwd|secret|token|api[_-]?key|apikey|access[_-]?key|private[_-]?key|credentials?|_key\b)[a-z0-9_]*)(\s*[=:]\s*)(\S+)",
                 "${1}${2}***",
             ),
             (r"(?i)(--password[=\s]+|--token[=\s]+)(\S+)", "${1}***"),
             (r"(?i)(authorization:\s*(?:bearer|basic)\s+)(\S+)", "${1}***"),
             (r"(://[^:@/\s]+:)([^@/\s]+)(@)", "${1}***${3}"),
-            (r"\bAKIA[0-9A-Z]{16}\b", "***"),
             (r"(?i)\b(?:ghp|gho|ghs|ghu|github_pat)_[A-Za-z0-9_]{20,}\b", "***"),
             (r"\bxox[baprs]-[A-Za-z0-9-]{10,}\b", "***"),
             (r"\bsk-[A-Za-z0-9]{20,}\b", "***"),
+            // Provider token shapes adapted from Atuin's secrets.rs (MIT License, Copyright (c) 2021
+            // Ellie Huxtable; see THIRD_PARTY_NOTICES.md): each masked in place, the command kept.
+            (r"\bA[KS]IA[0-9A-Z]{16}\b", "***"),                              // AWS access key id (ASIA: temporary)
+            (r"\bghr_[A-Za-z0-9]{76}\b", "***"),                              // GitHub refresh token
+            (r"\bgh1_[A-Za-z0-9]{21}_[A-Za-z0-9]{59}\b", "***"),              // GitHub PAT (new)
+            (r"\bv1\.[0-9A-Fa-f]{40}\b", "***"),                              // GitHub App installation token v1
+            (r"\bglpat-[A-Za-z0-9_-]{20,}\b", "***"),                         // GitLab PAT
+            (r"\bT[A-Za-z0-9_]{8}/B[A-Za-z0-9_]{8}/[A-Za-z0-9_]{24}\b", "***"), // Slack webhook path
+            (r"\b[rs]k_(?:test|live)_[0-9A-Za-z]{24,}\b", "***"),             // Stripe secret / restricted key
+            (r"\bnf[pcoub]_[0-9A-Za-z]{36}\b", "***"),                        // Netlify
+            (r"\bnpm_[A-Za-z0-9]{36}\b", "***"),                              // npm
+            (r"\bpul-[0-9a-f]{40}\b", "***"),                                 // Pulumi
         ]
         .into_iter()
         .map(|(p, r)| (Regex::new(p).expect("redact pattern"), r))
@@ -118,6 +131,28 @@ mod tests {
         assert_eq!(redact("$env:OPENAI_API_KEY=\"abc\""), "$env:OPENAI_API_KEY=***");
         assert_eq!(redact("docker login --password-stdin"), "docker login --password-stdin");
         assert_eq!(redact("cat token-file.txt"), "cat token-file.txt");
+    }
+
+    #[test]
+    fn provider_tokens() {
+        // shapes from Atuin's secret patterns
+        assert_eq!(redact("aws ASIAIOSFODNN7EXAMPLE s3 ls"), "aws *** s3 ls");
+        assert_eq!(redact("export AZURE_STORAGE_ACCOUNT_KEY=KEYDATA"), "export AZURE_STORAGE_ACCOUNT_KEY=***");
+        assert_eq!(redact("export GOOGLE_SERVICE_ACCOUNT_KEY=KEYDATA"), "export GOOGLE_SERVICE_ACCOUNT_KEY=***");
+        assert_eq!(redact("export SSH_KEY_FILE=~/.ssh/id_ed25519"), "export SSH_KEY_FILE=~/.ssh/id_ed25519", "a path, not a key");
+        assert_eq!(redact(&format!("git clone https://oauth2:{}@gitlab.com/x", "glpat-abcdefghij0123456789")), "git clone https://oauth2:***@gitlab.com/x");
+        assert_eq!(redact("glab auth login --token glpat-abcdefghij0123456789"), "glab auth login --token ***");
+        // fake tokens, put together here so that no token-shaped text sits in the source (a code
+        // host's secret scanning would take it for a real one)
+        let fake = |parts: &[&str]| parts.concat();
+        let slack = fake(&["https://hooks.slack.com/services/", "T12345678", "/", "B12345678", "/", "abcdefghijklmnopqrstuvwx"]);
+        assert_eq!(redact(&format!("curl -X POST {slack} -d x")), "curl -X POST https://hooks.slack.com/services/*** -d x");
+        assert_eq!(redact(&format!("stripe login --api-key {}", fake(&["sk_", "live_", "abcdefghijklmnopqrstuvwx1234"]))), "stripe login --api-key ***");
+        assert_eq!(redact(&format!("curl -u {}: https://api.stripe.com", fake(&["rk_", "test_", "abcdefghijklmnopqrstuvwx1234"]))), "curl -u ***: https://api.stripe.com");
+        assert_eq!(redact(&format!("npm config set //registry.npmjs.org/:_authToken {}", fake(&["npm_", "abcdefghijklmnopqrstuvwxyz0123456789"]))), "npm config set //registry.npmjs.org/:_authToken ***");
+        assert_eq!(redact(&format!("netlify deploy --auth {}", fake(&["nfp_", "abcdefghijklmnopqrstuvwxyz0123456789"]))), "netlify deploy --auth ***");
+        assert_eq!(redact(&format!("pulumi login {}", fake(&["pul-", "0123456789abcdef", "0123456789abcdef01234567"]))), "pulumi login ***");
+        assert_eq!(redact("git checkout v1.2.3"), "git checkout v1.2.3", "a version, not a token");
     }
 
     #[test]

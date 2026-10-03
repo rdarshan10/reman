@@ -5,8 +5,8 @@ import asyncio, sys
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
-PY = r"C:\Users\rdars\reman\.venv\Scripts\python.exe"
-SERVER = r"C:\Users\rdars\reman\reman_mcp.py"
+PY = r"C:\Users\dev\reman\.venv\Scripts\python.exe"
+SERVER = r"C:\Users\dev\reman\reman_mcp.py"
 
 
 async def main():
