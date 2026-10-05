@@ -367,6 +367,7 @@
       <a href="#agents" class="opt">Agents</a>
       <a href="#install">Install</a>
       <a href="https://github.com/rdarshan10/reman">GitHub ↗</a>
+      <a href="https://www.revanthdarshan.me/" class="opt">Author ↗</a>
     </nav>
   </div>
 </header>
@@ -377,7 +378,7 @@
     <div class="meta">
       <button class="acro" id="acro" title="What reman stands for (click for another)"></button>
       <div><b>Shell history, searchable by meaning</b></div>
-      <div>v0.3.1 · Windows, macOS, Linux</div>
+      <div>v0.3.2 · Windows, macOS, Linux</div>
       <div>One Rust binary · free · runs on your machine</div>
     </div>
   </div>
@@ -450,7 +451,7 @@
         <li>One history for PowerShell, bash, zsh, fish, nushell, xonsh and cmd</li>
         <li>Finds the agent session that did it, and reopens it</li>
         <li>Keeps what your commands printed, and finds it by its text</li>
-        <li>Every key it takes can be changed, or given back to your shell</li>
+        <li>Every key it takes can be changed, or given back to your shell, with no restart</li>
         <li>Everything stays on your machine</li>
       </ul>
     </div></div>
@@ -827,7 +828,7 @@
       <div class="facts">
         <div><h3>Private by default</h3><p>Nothing leaves your machine. Secrets are masked before anything is saved, a command typed with a leading space is never recorded, and <kbd>Del</kbd> <kbd>Del</kbd> forgets one everywhere.</p></div>
         <div><h3>Every shell, one history</h3><p>PowerShell, bash, zsh, fish, nushell, xonsh and Command Prompt, plus the commands your agents run, tagged with the agent's name.</p></div>
-        <div><h3>One settings page</h3><p><code>reman settings</code>, or <kbd>F10</kbd> in the finder: coding tools, shared folders, privacy, done alerts and shells. Saved as you change them.</p></div>
+        <div><h3>One settings page</h3><p><code>reman settings</code>, or <kbd>F10</kbd> in the finder: coding tools, shared folders, privacy, done alerts, keys and shells. Saved as you change them; key changes when you press <kbd>s</kbd>.</p></div>
       </div>
     </div>
   </div>
@@ -893,7 +894,7 @@
         <tr><td><b>Loops broken</b></td><td>An agent retrying a command that keeps failing the same way is told to stop.</td></tr>
         <tr><td><b>Sessions</b></td><td>Find the agent session that did it, and reopen it where it worked.</td></tr>
         <tr class="sub"><td colspan="2">Yours</td></tr>
-        <tr><td><b>Your own keys</b></td><td>Every key reman takes can be changed or turned off: <code>reman settings</code>, Keys. Presets: standard, gentle, vim.</td></tr>
+        <tr><td><b>Your own keys</b></td><td>Every key reman takes can be changed or turned off: <code>reman settings</code>, Keys (<kbd>F10</kbd> in the finder). Open shells take a change at their next prompt. Presets: standard, gentle, vim.</td></tr>
         <tr><td><b>Private</b></td><td>On your machine only. Secrets masked before saving; a leading space is never recorded.</td></tr>
         <tr><td><b>Every shell</b></td><td>PowerShell, bash, zsh, fish, nushell, xonsh and Command Prompt, plus what your agents run.</td></tr>
         <tr><td><b>Open source</b></td><td>Apache License 2.0. One Rust binary for Windows, macOS and Linux.</td></tr>
@@ -926,7 +927,7 @@
         <a href="https://github.com/rdarshan10/reman/blob/master/LICENSE">Apache-2.0</a>
       </nav>
     </div>
-    <p class="credits">Open source under the Apache License 2.0. Command descriptions from <a href="https://github.com/tldr-pages/tldr">tldr-pages</a> (CC BY 4.0). Secret patterns and the design of <code>reman shell</code> from <a href="https://github.com/atuinsh/atuin">Atuin</a> (MIT); coming from Atuin, setup brings your history along. Search by <a href="https://huggingface.co/BAAI/bge-small-en-v1.5">bge-small-en-v1.5</a> (MIT) on ONNX Runtime. <a href="https://github.com/rdarshan10/reman/blob/master/THIRD_PARTY_NOTICES.md">All notices</a>.</p>
+    <p class="credits">Made by <a href="https://www.revanthdarshan.me/">Revanth Darshan</a>. Open source under the Apache License 2.0. Command descriptions from <a href="https://github.com/tldr-pages/tldr">tldr-pages</a> (CC BY 4.0). Secret patterns and the design of <code>reman shell</code> from <a href="https://github.com/atuinsh/atuin">Atuin</a> (MIT); coming from Atuin, setup brings your history along. Search by <a href="https://huggingface.co/BAAI/bge-small-en-v1.5">bge-small-en-v1.5</a> (MIT) on ONNX Runtime. <a href="https://github.com/rdarshan10/reman/blob/master/THIRD_PARTY_NOTICES.md">All notices</a>.</p>
   </div>
 </footer>
 
