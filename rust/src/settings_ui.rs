@@ -1,6 +1,7 @@
 //! `reman settings` - one page for everything onboarding set up, so nothing needs a command:
 //! which coding tools reman is plugged into, which folders agents may see, the privacy switches,
-//! the HTTP endpoint, and whether each shell is wired. Every change is written as it's made.
+//! the HTTP endpoint, and whether each shell is wired. Every change is written as it's made,
+//! except reman's keys: those are a draft until `s` saves them (`u` drops them).
 //! Drawn with the finder's renderer (whole-line repaints, named ANSI colours).
 use crate::tui::{self, ACCENT, BAD, INFO, MUTED, OK, WARN, Screen};
 use crate::{client, complete, connect, settings};
@@ -16,6 +17,7 @@ use ratatui::widgets::{Paragraph, Widget, Wrap};
 use unicode_width::UnicodeWidthStr;
 use serde_json::json;
 use std::io::Write;
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -45,10 +47,11 @@ enum Row {
     OutputRuns(u32),
     /// shells open inside `reman shell`
     ShellLayer(bool),
-    /// the keys' preset (standard, gentle, vim)
-    KeyPreset(String),
-    /// one action's keys: its id, its keys as shown ("" = off), whether the user changed it
-    Key { id: &'static str, keys: String, changed: bool },
+    /// the keys' preset (standard, gentle, vim), and whether that's an unsaved change
+    KeyPreset { preset: String, pending: bool },
+    /// one action's keys: its id, its keys as shown ("" = off), whether they're the user's own
+    /// rather than the preset's, and whether that's an unsaved change
+    Key { id: &'static str, keys: String, changed: bool, pending: bool },
     Shell { name: &'static str, wired: bool, detail: String },
     Info { label: &'static str, value: String },
 }
@@ -79,13 +82,13 @@ impl Row {
             Row::FinderVim(_) => "↵ switches the finder's keys: as in a text box, or vim (Esc for normal mode: j k move, dd forgets, i types, q closes).".into(),
             Row::OutputRuns(_) => "↵ cycles: the newest 3000 runs · 300 · none. What commands printed, kept for `reman output` and the finder's ^O (agents' as they run, yours inside reman shell).".into(),
             Row::ShellLayer(_) => "↵ switches it: new shells open inside reman shell (a terminal layer of reman's own), so what your commands print is kept too.".into(),
-            Row::KeyPreset(p) => {
-                let what = crate::keys::PRESETS.iter().find(|x| x.0 == p).map(|x| x.1).unwrap_or("");
-                format!("↵ cycles: standard · gentle · vim (starting over from one drops your changes). Now: {what}.")
+            Row::KeyPreset { preset, .. } => {
+                let what = crate::keys::PRESETS.iter().find(|x| x.0 == preset).map(|x| x.1).unwrap_or("");
+                format!("↵ cycles: standard · gentle · vim (starting over from one drops your own keys). This one: {what}.")
             }
             Row::Key { id, .. } => match crate::keys::action(id) {
-                Some(a) if a.fixed.is_some() => format!("↵ turns it on or off. {}.", cap(a.what)),
-                Some(a) => format!("↵ then press the new key · Del turns it off · r gives it the preset's key. {}.", cap(a.what)),
+                Some(a) if a.fixed.is_some() => format!("{}. ↵ turns it on or off.", cap(a.what)),
+                Some(a) => format!("{}. ↵ new key · + a second key · Del off · r the preset's.", cap(a.what)),
                 None => String::new(),
             },
             Row::FinderEveryone(_) => "↵ switches what the finder lists at first: your own commands, or agents' too. F3 in the finder changes it for the moment.".into(),
@@ -97,6 +100,26 @@ impl Row {
     }
 }
 
+/// reman's keys as the page has them: changed here, saved only on `s`.
+#[derive(Clone, PartialEq)]
+struct KeyDraft {
+    preset: Option<String>,
+    keys: BTreeMap<String, Vec<String>>,
+    /// the finder's vim mode, when picking a preset changed it
+    vim: Option<bool>,
+}
+
+impl KeyDraft {
+    fn saved() -> KeyDraft {
+        let st = settings::load();
+        KeyDraft { preset: st.key_preset, keys: st.keys, vim: None }
+    }
+
+    fn map(&self) -> crate::keys::Map {
+        crate::keys::Map::of(self.preset.as_deref(), &self.keys)
+    }
+}
+
 struct Page {
     rows: Vec<Row>,
     sel: usize,
@@ -104,8 +127,52 @@ struct Page {
     message: Option<(String, Color)>,
     /// typing a folder to share: Some(text)
     input: Option<String>,
-    /// changing an action's key: the next key pressed is the new one
-    capture: Option<&'static str>,
+    /// changing an action's key: the next key pressed is the new one (or, when true, a second one)
+    capture: Option<(&'static str, bool)>,
+    /// key changes not saved yet, and what's saved
+    draft: KeyDraft,
+    saved: KeyDraft,
+    /// Esc was pressed once with unsaved key changes: a second one leaves without them
+    leaving: bool,
+}
+
+impl Page {
+    fn dirty(&self) -> bool {
+        self.draft != self.saved
+    }
+
+    /// Rebuild the rows, staying on the same one.
+    fn rebuild(&mut self) {
+        let was = self.sel;
+        self.rows = build(&self.draft, &self.saved);
+        self.sel = was.min(self.rows.len().saturating_sub(1));
+    }
+
+    /// Write the key changes. What changes where, said plainly.
+    fn save_keys(&mut self) -> (String, Color) {
+        if !self.dirty() {
+            return ("nothing to save: the keys are as saved".into(), MUTED);
+        }
+        let mut st = settings::load();
+        st.key_preset = self.draft.preset.clone();
+        st.keys = self.draft.keys.clone();
+        if let Some(v) = self.draft.vim {
+            st.finder_keys = v.then(|| "vim".to_string());
+        }
+        if let Err(e) = settings::save(&st) {
+            return (format!("not saved: {e:#}"), BAD);
+        }
+        let (old, new) = (self.saved.map(), self.draft.map());
+        let shell = crate::keys::ACTIONS.iter().any(|a| a.layer == crate::keys::Layer::Shell && old.get(a.id) != new.get(a.id));
+        self.draft.vim = None;
+        self.saved = self.draft.clone();
+        self.rebuild();
+        if shell {
+            ("Saved. The finder has them now; open shells at their next prompt (nushell, xonsh and Command Prompt: new terminals).".into(), OK)
+        } else {
+            ("Saved. The finder has them the next time it opens.".into(), OK)
+        }
+    }
 }
 
 fn exes() -> (PathBuf, PathBuf) {
@@ -116,7 +183,7 @@ fn exes() -> (PathBuf, PathBuf) {
     })
 }
 
-fn build() -> Vec<Row> {
+fn build(draft: &KeyDraft, saved: &KeyDraft) -> Vec<Row> {
     let (exe, _) = exes();
     let st = settings::load();
     let mut r = vec![Row::Header("Coding tools")];
@@ -151,20 +218,20 @@ fn build() -> Vec<Row> {
     r.push(Row::Header("Finder"));
     r.push(Row::FinderHeight(st.finder_lines()));
     r.push(Row::FinderEveryone(st.finder_everyone()));
-    r.push(Row::FinderVim(st.finder_vim()));
+    r.push(Row::FinderVim(draft.vim.unwrap_or_else(|| st.finder_vim())));
 
     r.push(Row::Header("What commands print"));
     r.push(Row::OutputRuns(st.output_runs()));
     r.push(Row::ShellLayer(st.shell_layer));
 
     r.push(Row::Header("Keys"));
-    let map = crate::keys::Map::of(st.key_preset.as_deref(), &st.keys);
-    r.push(Row::KeyPreset(map.preset.clone()));
-    for (layer, title) in [(crate::keys::Layer::Shell, "in your shell (new terminals; open PowerShell windows at their next prompt)"), (crate::keys::Layer::Finder, "in the finder")] {
+    let (map, was) = (draft.map(), saved.map());
+    r.push(Row::KeyPreset { preset: map.preset.clone(), pending: map.preset != was.preset });
+    for (layer, title) in [(crate::keys::Layer::Shell, "in your shell"), (crate::keys::Layer::Finder, "in the finder")] {
         r.push(Row::Note(title.into()));
         for a in crate::keys::ACTIONS.iter().filter(|a| a.layer == layer) {
             let keys = map.get(a.id).iter().map(crate::keys::Key::label).collect::<Vec<_>>().join(", ");
-            r.push(Row::Key { id: a.id, keys, changed: st.keys.contains_key(a.id) });
+            r.push(Row::Key { id: a.id, keys, changed: draft.keys.contains_key(a.id), pending: map.get(a.id) != was.get(a.id) });
         }
     }
 
@@ -337,25 +404,8 @@ fn act(row: &Row) -> Result<(String, Color)> {
             settings::save(&st)?;
             (if *on { "new shells open as before" } else { "new shells open inside reman shell - open a new terminal" }.to_string(), OK)
         }
-        Row::KeyPreset(now) => {
-            let mut st = settings::load();
-            let i = crate::keys::PRESETS.iter().position(|x| x.0 == now).unwrap_or(0);
-            let (next, what) = crate::keys::PRESETS[(i + 1) % crate::keys::PRESETS.len()];
-            st.key_preset = (next != "standard").then(|| next.to_string());
-            st.finder_keys = (next == "vim").then(|| "vim".to_string());
-            st.keys.clear();
-            settings::save(&st)?;
-            (format!("{next}: {what}"), OK)
-        }
-        Row::Key { id, keys, .. } => {
-            // only a fixed one gets here (the others wait for their new key)
-            let mut st = settings::load();
-            let a = crate::keys::action(id).filter(|a| a.fixed.is_some()).ok_or_else(|| anyhow::anyhow!("press a key"))?;
-            let on = !keys.is_empty();
-            st.keys.insert(id.to_string(), if on { vec![] } else { vec![a.fixed.unwrap_or("").to_string()] });
-            settings::save(&st)?;
-            (format!("{} {}", cap(a.what), if on { "is off" } else { "is on" }), OK)
-        }
+        // the keys are changed in the draft, by the page itself
+        Row::KeyPreset { .. } | Row::Key { .. } => (String::new(), MUTED),
         Row::FinderEveryone(on) => {
             let mut st = settings::load();
             st.finder_who = (!on).then(|| "all".to_string());
@@ -401,21 +451,28 @@ fn cap(s: &str) -> String {
     c.next().map(|f| f.to_uppercase().collect::<String>() + c.as_str()).unwrap_or_default()
 }
 
-/// A new key for an action, if it may be one (what's wrong with it otherwise, or what to know).
-fn set_key(id: &'static str, key: &crate::keys::Key) -> Result<(String, Color)> {
-    let mut st = settings::load();
-    let map = crate::keys::Map::of(st.key_preset.as_deref(), &st.keys);
+/// A new key for an action in the draft (or a second one, `add`), if it may be one: what's wrong
+/// with it otherwise, or what to know about it.
+fn set_key(d: &mut KeyDraft, id: &'static str, key: &crate::keys::Key, add: bool) -> (String, Color) {
+    let map = d.map();
+    let name = crate::keys::action(id).map(|a| a.name).unwrap_or(id);
+    let now = map.get(id);
+    if now.contains(key) {
+        return (format!("{} is already {name}'s key", key.label()), MUTED);
+    }
     let note = match crate::keys::check(&map, id, key) {
-        Some((true, why)) => return Ok((format!("not {}: {why}", key.label()), BAD)),
+        Some((true, why)) => return (format!("not {}: {why}", key.label()), BAD),
         Some((false, why)) => Some(why),
         None => None,
     };
-    st.keys.insert(id.to_string(), vec![key.label()]);
-    settings::save(&st)?;
-    Ok(match note {
-        Some(why) => (format!("{} now; note: {why}", key.label()), WARN),
-        None => (format!("{} now", key.label()), OK),
-    })
+    let mut keys: Vec<String> = if add { now.iter().map(crate::keys::Key::label).collect() } else { vec![] };
+    keys.push(key.label());
+    d.keys.insert(id.to_string(), keys);
+    let done = if add { format!("{name}: {} too", key.label()) } else { format!("{name}: {}", key.label()) };
+    match note {
+        Some(why) => (format!("{done}. {why}. s saves"), WARN),
+        None => (format!("{done}. s saves, u undoes"), OK),
+    }
 }
 
 fn share(st: &mut settings::Settings, path: &str) -> Result<(String, Color)> {
@@ -506,11 +563,15 @@ fn row_line(row: &Row, sel: bool, w: usize) -> Line<'static> {
             },
         ]),
         Row::FinderEveryone(on) => Line::from(vec![bar, check(*on), Span::styled("List agents' commands too", name_st)]),
-        Row::KeyPreset(p) => Line::from(vec![bar, Span::styled("Preset: ", name_st), state(p.clone(), OK)]),
-        Row::Key { id, keys, changed } => {
-            let what = crate::keys::action(id).map(|a| cap(a.what)).unwrap_or_default();
-            let shown = if keys.is_empty() { state("off".into(), MUTED) } else { state(format!("{keys}{}", if *changed { "  (yours)" } else { "" }), if *changed { WARN } else { OK }) };
-            Line::from(vec![bar, Span::styled(label(&what), name_st), shown])
+        Row::KeyPreset { preset, pending } => {
+            Line::from(vec![bar, Span::styled("Preset: ", name_st), state(format!("{preset}{}", if *pending { "  • not saved" } else { "" }), if *pending { ACCENT } else { OK })])
+        }
+        Row::Key { id, keys, changed, pending } => {
+            let name = crate::keys::action(id).map(|a| a.name).unwrap_or(id);
+            let shown = if keys.is_empty() { "off".to_string() } else { keys.clone() };
+            let tag = if *pending { "  • not saved" } else if *changed { "  (yours)" } else { "" };
+            let c = if *pending { ACCENT } else if keys.is_empty() { MUTED } else if *changed { WARN } else { OK };
+            Line::from(vec![bar, Span::styled(label(name), name_st), state(format!("{shown}{tag}"), c)])
         }
         Row::OutputRuns(n) => Line::from(vec![
             bar,
@@ -525,7 +586,7 @@ fn row_line(row: &Row, sel: bool, w: usize) -> Line<'static> {
             Span::styled(label(name), name_st),
             state(detail.clone(), if *wired { OK } else { WARN }),
         ]),
-        Row::Info { label, value } => Line::from(vec![Span::raw("       "), Span::styled(format!("{label:<10}"), Style::default().fg(MUTED)), Span::raw(value.clone())]),
+        Row::Info { label, value } => Line::from(vec![Span::raw("       "), Span::styled(format!("{label:<11}"), Style::default().fg(MUTED)), Span::raw(value.clone())]),
     }
 }
 
@@ -535,7 +596,7 @@ fn draw(buf: &mut Buffer, p: &mut Page) -> (u16, u16) {
     // title: the logo with "settings" beside its last row (one plain line on a short terminal),
     // then a blank row
     let subtitle = |lead: &'static str, room: usize| {
-        let tag = "   every change is saved as you make it";
+        let tag = "   changes are saved as you make them (keys: s saves)";
         let mut l = vec![Span::styled(lead, Style::default().add_modifier(Modifier::BOLD))];
         if lead.chars().count() + tag.len() <= room {
             l.push(Span::styled(tag, Style::default().fg(MUTED)));
@@ -595,6 +656,10 @@ fn draw(buf: &mut Buffer, p: &mut Page) -> (u16, u16) {
     }
     let keys = if p.input.is_some() {
         vec![("↵", "share", "share"), ("tab", "complete", "complete"), ("esc", "cancel", "cancel")]
+    } else if p.capture.is_some() {
+        vec![("any key", "is the new one", "new key"), ("esc", "keep it as it is", "keep")]
+    } else if p.dirty() {
+        vec![("↑↓", "move", "move"), ("↵ / space", "change", "change"), ("s", "save the keys", "save"), ("u", "undo", "undo"), ("esc", "close", "close")]
     } else {
         vec![("↑↓", "move", "move"), ("↵ / space", "change", "change"), ("a", "share a folder", "share"), ("esc", "close", "close")]
     };
@@ -641,7 +706,8 @@ pub fn run() -> Result<()> {
 }
 
 fn page_loop(screen: &mut Screen) -> Result<()> {
-    let mut p = Page { rows: build(), sel: 0, scroll: 0, message: None, input: None, capture: None };
+    let saved = KeyDraft::saved();
+    let mut p = Page { rows: build(&saved, &saved), sel: 0, scroll: 0, message: None, input: None, capture: None, draft: saved.clone(), saved, leaving: false };
     step(&mut p, 1);
     let mut size = terminal::size().unwrap_or((80, 24));
     loop {
@@ -672,7 +738,7 @@ fn page_loop(screen: &mut Screen) -> Result<()> {
                     let path = std::mem::take(text);
                     p.input = None;
                     p.message = Some(share(&mut settings::load(), &path).unwrap_or_else(|e| (format!("{e:#}"), BAD)));
-                    p.rows = build();
+                    p.rebuild();
                 }
                 KeyCode::Tab => {
                     if let Some(c) = complete::dirs(text).first() {
@@ -688,49 +754,91 @@ fn page_loop(screen: &mut Screen) -> Result<()> {
             }
             continue;
         }
-        if let Some(id) = p.capture.take() {
-            p.message = Some(match (k.code, crate::keys::Key::from_event(&k)) {
-                (KeyCode::Esc, _) => ("unchanged".into(), MUTED),
+        if let Some((id, add)) = p.capture.take() {
+            let (m, c) = match (k.code, crate::keys::Key::from_event(&k)) {
+                (KeyCode::Esc, _) => ("kept as it was".into(), MUTED),
                 (_, None) => ("that key can't be one of reman's".into(), BAD),
-                (_, Some(key)) => set_key(id, &key).unwrap_or_else(|e| (format!("{e:#}"), BAD)),
-            });
-            let was = p.sel;
-            p.rows = build();
-            p.sel = was.min(p.rows.len().saturating_sub(1));
+                (_, Some(key)) => set_key(&mut p.draft, id, &key, add),
+            };
+            // refused: still asking, so the next key pressed can be the one
+            if c == BAD {
+                p.capture = Some((id, add));
+                p.message = Some((format!("{m}. Press another, or Esc."), BAD));
+            } else {
+                p.message = Some((m, c));
+            }
+            p.rebuild();
             continue;
         }
-        if let Row::Key { id, .. } = p.rows[p.sel].clone() {
-            let fixed = crate::keys::action(id).is_some_and(|a| a.fixed.is_some());
+        // leaving with unsaved keys asks once; anything but a second Esc stays
+        let leave = matches!(k.code, KeyCode::Esc | KeyCode::Char('q')) || (ctrl && k.code == KeyCode::Char('c'));
+        if leave && p.dirty() && !p.leaving {
+            p.leaving = true;
+            p.message = Some(("Your key changes aren't saved: s saves them, Esc again leaves without them.".into(), WARN));
+            continue;
+        }
+        p.leaving = false;
+        if let Row::Key { id, keys, .. } = p.rows[p.sel].clone() {
+            let a = crate::keys::action(id);
+            let name = a.map(|a| a.name).unwrap_or(id);
+            let fixed = a.and_then(|a| a.fixed);
             let done = match k.code {
-                KeyCode::Enter | KeyCode::Char(' ') if !fixed => {
-                    p.capture = Some(id);
-                    p.message = Some((format!("press the new key for: {} (Esc leaves it)", crate::keys::action(id).map(|a| a.what).unwrap_or(id)), ACCENT));
+                KeyCode::Enter | KeyCode::Char(' ') if fixed.is_some() => {
+                    let on = !keys.is_empty();
+                    p.draft.keys.insert(id.to_string(), if on { vec![] } else { vec![fixed.unwrap_or_default().to_string()] });
+                    p.message = Some((format!("{name}: {}. s saves, u undoes", if on { "off" } else { "on" }), OK));
                     true
                 }
-                KeyCode::Delete | KeyCode::Char('r') => {
-                    let mut st = settings::load();
-                    if k.code == KeyCode::Delete {
-                        st.keys.insert(id.to_string(), vec![]);
-                    } else {
-                        st.keys.remove(id);
-                    }
-                    p.message = Some(match settings::save(&st) {
-                        Ok(_) if k.code == KeyCode::Delete => ("off: that key does what it did before reman".into(), OK),
-                        Ok(_) => ("back to the preset's key".into(), OK),
-                        Err(e) => (format!("{e:#}"), BAD),
-                    });
-                    let was = p.sel;
-                    p.rows = build();
-                    p.sel = was;
+                KeyCode::Enter | KeyCode::Char(' ') | KeyCode::Char('+') if fixed.is_none() => {
+                    let add = k.code == KeyCode::Char('+') && !keys.is_empty();
+                    p.capture = Some((id, add));
+                    let now = if keys.is_empty() { "off now".to_string() } else { format!("now {keys}") };
+                    p.message = Some((
+                        if add { format!("Press a second key for {name} ({keys} stays). Esc cancels.") } else { format!("Press the new key for {name} ({now}). Esc keeps it.") },
+                        ACCENT,
+                    ));
+                    true
+                }
+                KeyCode::Delete | KeyCode::Backspace => {
+                    p.draft.keys.insert(id.to_string(), vec![]);
+                    p.message = Some((format!("{name}: off, so the key does what it did before reman. s saves"), OK));
+                    true
+                }
+                KeyCode::Char('r') => {
+                    p.draft.keys.remove(id);
+                    let k = p.draft.map().get(id).iter().map(crate::keys::Key::label).collect::<Vec<_>>().join(", ");
+                    p.message = Some((format!("{name}: the preset's key ({}). s saves", if k.is_empty() { "none" } else { &k }), OK));
                     true
                 }
                 _ => false,
             };
             if done {
+                p.rebuild();
                 continue;
             }
         }
+        if let Row::KeyPreset { preset, .. } = &p.rows[p.sel]
+            && matches!(k.code, KeyCode::Enter | KeyCode::Char(' '))
+        {
+            let i = crate::keys::PRESETS.iter().position(|x| x.0 == preset).unwrap_or(0);
+            let (next, what) = crate::keys::PRESETS[(i + 1) % crate::keys::PRESETS.len()];
+            let lost = p.draft.keys.len();
+            p.draft.preset = (next != "standard").then(|| next.to_string());
+            let vim = next == "vim";
+            p.draft.vim = (vim != settings::load().finder_vim()).then_some(vim);
+            p.draft.keys.clear();
+            let lost = if lost > 0 { format!(" ({lost} key change(s) of yours dropped; u brings them back)") } else { String::new() };
+            p.message = Some((format!("{next}: {what}{lost}. s saves"), OK));
+            p.rebuild();
+            continue;
+        }
         match k.code {
+            KeyCode::Char('s') => p.message = Some(p.save_keys()),
+            KeyCode::Char('u') => {
+                p.message = Some(if p.dirty() { ("key changes undone".into(), OK) } else { ("nothing to undo".into(), MUTED) });
+                p.draft = p.saved.clone();
+                p.rebuild();
+            }
             KeyCode::Esc | KeyCode::Char('q') => return Ok(()),
             KeyCode::Char('c') if ctrl => return Ok(()),
             KeyCode::Up | KeyCode::Char('k') => step(&mut p, -1),
@@ -756,9 +864,14 @@ fn page_loop(screen: &mut Screen) -> Result<()> {
                 let cur = draw(&mut buf, &mut p);
                 screen.frame(&buf, cur)?;
                 p.message = Some(act(&row).unwrap_or_else(|e| (format!("{e:#}"), BAD)));
+                // the finder's vim switch, saved: a preset picked earlier no longer decides it
+                if matches!(row, Row::FinderVim(_)) {
+                    p.draft.vim = None;
+                    p.saved.vim = None;
+                }
                 let keep = std::mem::discriminant(&row);
                 let was = p.sel;
-                p.rows = build();
+                p.rows = build(&p.draft, &p.saved);
                 // stay on the same row (or the nearest selectable one)
                 p.sel = was.min(p.rows.len().saturating_sub(1));
                 if !p.rows[p.sel].selectable() || std::mem::discriminant(&p.rows[p.sel]) != keep {

@@ -20,7 +20,11 @@ for ext in ("", "-wal", "-shm"):
     except FileNotFoundError:
         pass
 shutil.copy(os.path.join(os.path.expanduser("~"), ".reman", "reman.db"), DB)
-BASE_ENV = dict(os.environ, REMAN_PORT=PORT, REMAN_DB=DB, REMAN_SPOOL=os.path.join(TMP, "reman-shells-spool.jsonl"), TERM="xterm-256color")
+# reman's settings as a new user has them (yours may move keys: reman settings, Keys)
+CFG = os.path.join(TMP, "reman-shells-config.json")
+with open(CFG, "w") as f:
+    f.write("{}")
+BASE_ENV = dict(os.environ, REMAN_PORT=PORT, REMAN_DB=DB, REMAN_CONFIG=CFG, REMAN_SPOOL=os.path.join(TMP, "reman-shells-spool.jsonl"), TERM="xterm-256color")
 for k in ("CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "AGENT"):
     BASE_ENV.pop(k, None)
 subprocess.run([EXE, "ping"], env=BASE_ENV, capture_output=True, timeout=60)

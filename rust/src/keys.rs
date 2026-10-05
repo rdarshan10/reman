@@ -12,6 +12,8 @@ pub enum Layer {
 
 pub struct Action {
     pub id: &'static str,
+    /// a few words, for a row: `Finder, this folder`
+    pub name: &'static str,
     pub layer: Layer,
     /// what it does, in a few words
     pub what: &'static str,
@@ -21,34 +23,34 @@ pub struct Action {
     pub fixed: Option<&'static str>,
 }
 
-const fn shell(id: &'static str, what: &'static str, standard: &'static [&'static str], gentle: &'static [&'static str]) -> Action {
-    Action { id, layer: Layer::Shell, what, standard, gentle, fixed: None }
+const fn shell(id: &'static str, name: &'static str, what: &'static str, standard: &'static [&'static str], gentle: &'static [&'static str]) -> Action {
+    Action { id, name, layer: Layer::Shell, what, standard, gentle, fixed: None }
 }
-const fn finder(id: &'static str, what: &'static str, keys: &'static [&'static str]) -> Action {
-    Action { id, layer: Layer::Finder, what, standard: keys, gentle: keys, fixed: None }
+const fn finder(id: &'static str, name: &'static str, what: &'static str, keys: &'static [&'static str]) -> Action {
+    Action { id, name, layer: Layer::Finder, what, standard: keys, gentle: keys, fixed: None }
 }
 
 pub const ACTIONS: &[Action] = &[
-    shell("find_here", "open the finder for this folder", &["Up"], &[]),
-    shell("find_all", "open the finder for every folder", &["Ctrl+R"], &["Ctrl+R"]),
-    shell("fix", "insert the fix offered after a failure", &["Alt+F"], &["Alt+F"]),
-    shell("next", "what you usually run next here", &["Alt+N"], &["Alt+N"]),
-    Action { id: "tab", layer: Layer::Shell, what: "Tab: complete, else the grey suggestion, else the finder", standard: &["Tab"], gentle: &[], fixed: Some("Tab") },
-    Action { id: "hold", layer: Layer::Shell, what: "Enter: hold a command that keeps failing here", standard: &["Enter"], gentle: &[], fixed: Some("Enter") },
-    finder("runs", "every run of the command, and what it printed", &["Ctrl+O"]),
-    finder("pin", "pin it: pinned commands rank first", &["Ctrl+P"]),
-    finder("forget", "forget it everywhere (pressed twice)", &["Delete"]),
-    finder("fold", "fold variants of a command / show each", &["Ctrl+G"]),
-    finder("who", "who ran it: you, you and agents, agents", &["F3"]),
-    finder("outcome", "outcome: any, worked, failed", &["F2"]),
-    finder("next_tab", "next tab: Recall, Fixes, Flows", &["Tab", "Ctrl+T"]),
-    finder("prev_tab", "previous tab", &["Shift+Tab"]),
-    finder("all_steps", "a flow: insert every step as one line", &["Ctrl+A"]),
-    finder("stop_flow", "stop the flow in progress", &["Ctrl+X"]),
-    finder("clear", "clear the query", &["Ctrl+U"]),
-    finder("delete_word", "delete a word of the query", &["Ctrl+W"]),
-    finder("help", "every key", &["F1"]),
-    finder("settings", "open the settings", &["F10"]),
+    shell("find_here", "Finder, this folder", "open the finder for this folder", &["Up"], &[]),
+    shell("find_all", "Finder, every folder", "open the finder for every folder", &["Ctrl+R"], &["Ctrl+R"]),
+    shell("fix", "Insert the fix", "insert the fix offered after a failure", &["Alt+F"], &["Alt+F"]),
+    shell("next", "Next step", "put what you usually run next here on the prompt", &["Alt+N"], &["Alt+N"]),
+    Action { id: "tab", name: "Tab opens the finder", layer: Layer::Shell, what: "Tab: complete, else the grey suggestion, else the finder", standard: &["Tab"], gentle: &[], fixed: Some("Tab") },
+    Action { id: "hold", name: "Enter holds a failing one", layer: Layer::Shell, what: "Enter: hold a command that keeps failing here, once", standard: &["Enter"], gentle: &[], fixed: Some("Enter") },
+    finder("runs", "Every run", "every run of the command, and what it printed", &["Ctrl+O"]),
+    finder("pin", "Pin", "pin the command: pinned ones rank first", &["Ctrl+P"]),
+    finder("forget", "Forget", "forget the command everywhere (pressed twice)", &["Delete"]),
+    finder("fold", "Fold variants", "fold variants of a command, or show each", &["Ctrl+G"]),
+    finder("who", "Who ran it", "who ran it: you, you and agents, agents", &["F3"]),
+    finder("outcome", "Outcome", "outcome: any, worked, failed", &["F2"]),
+    finder("next_tab", "Next tab", "next tab: Recall, Fixes, Flows", &["Tab", "Ctrl+T"]),
+    finder("prev_tab", "Previous tab", "previous tab", &["Shift+Tab"]),
+    finder("all_steps", "All steps", "a flow: insert every step as one line", &["Ctrl+A"]),
+    finder("stop_flow", "Stop the flow", "stop the flow in progress", &["Ctrl+X"]),
+    finder("clear", "Clear the query", "clear the query", &["Ctrl+U"]),
+    finder("delete_word", "Delete a word", "delete a word of the query", &["Ctrl+W"]),
+    finder("help", "Every key", "show every key", &["F1"]),
+    finder("settings", "Settings", "open the settings", &["F10"]),
 ];
 
 pub const PRESETS: &[(&str, &str)] = &[
@@ -356,7 +358,7 @@ pub fn check(map: &Map, id: &str, key: &Key) -> Option<(bool, String)> {
     }
     // the same key for two actions of one layer
     if let Some(o) = ACTIONS.iter().find(|o| o.id != id && o.layer == a.layer && map.get(o.id).contains(key)) {
-        return Some((true, format!("{l} already does: {}", o.what)));
+        return Some((true, format!("{l} is already the key for {}: change that one first", o.name)));
     }
     // taken before reman ever sees it, in some places
     let terminal: &[(&str, &str)] = &[
@@ -378,6 +380,19 @@ pub fn check(map: &Map, id: &str, key: &Key) -> Option<(bool, String)> {
     ];
     if let Some((_, why)) = terminal.iter().find(|(k, _)| core(k)) {
         return Some((false, (*why).to_string()));
+    }
+    let default = a.standard.iter().any(|d| d.eq_ignore_ascii_case(&l));
+    let history: &[(&str, &str)] = &[
+        ("Up", "goes back through history in your shell"),
+        ("Down", "goes forward through history in your shell"),
+        ("PageUp", "scrolls or searches history in your shell"),
+        ("PageDown", "scrolls or searches history in your shell"),
+        ("Ctrl+P", "goes back through history in bash, zsh and fish"),
+        ("Ctrl+N", "goes forward through history in bash, zsh and fish"),
+        ("Ctrl+S", "searches history forward in bash and zsh"),
+    ];
+    if let Some((_, does)) = history.iter().find(|(k, _)| core(k)).filter(|_| a.layer == Layer::Shell && !default) {
+        return Some((false, format!("{l} no longer {does}")));
     }
     if a.layer == Layer::Shell && ["Ctrl+A", "Ctrl+E", "Ctrl+K", "Ctrl+U", "Ctrl+W", "Ctrl+Y", "Ctrl+L", "Alt+B", "Alt+D"].iter().any(|k| core(k)) {
         return Some((false, format!("{l} edits the line in most shells; it won't any more")));
@@ -617,28 +632,34 @@ pub fn bindings(shell: &str, map: &Map) -> String {
     match shell {
         "powershell" | "pwsh" => {
             let pairs: Vec<String> = fns.iter().flat_map(|(a, f)| map.get(a).iter().map(move |k| format!("@('{}', '{f}')", powershell(k)))).collect();
+            out.push(format!("$global:__RemanFixHint = '{}'; $global:__RemanNextKey = '{}'", fix_hint(map).replace('\'', "''"), next_key(map).replace('\'', "''")));
             out.push(format!("__RemanBindKeys @({})", pairs.join(", ")));
         }
         "zsh" => {
+            out.push(format!("__reman_fix_hint={}", sq(&fix_hint(map))));
+            // the keys reman had before are given back first (an open shell taking a change)
+            out.push("__reman_unbind_all".into());
             for (a, f) in fns {
                 for k in map.get(a) {
                     for seq in zsh(k) {
                         // what the key did before (Alt-F's forward-word, Alt-N's history search), for when there's nothing to do
-                        out.push(format!("__reman_bind '{seq}' {f}"));
+                        out.push(format!("__reman_bind {} {f}", sq(&seq)));
                     }
                 }
             }
         }
         "bash" => {
+            out.push(format!("__reman_fix_hint={}", sq(&fix_hint(map))));
+            out.push("__reman_unbind_all".into());
             for (a, f) in fns {
                 for k in map.get(a) {
                     if let Some(seq) = readline(k) {
-                        out.push(format!("bind -x '\"{seq}\": {f}'"));
+                        out.push(format!("__reman_bindx {} {}", sq(&seq), sq(f)));
                     }
                 }
             }
             if map.on("tab") {
-                out.push("complete -o nospace -E -F __reman_tab_empty 2>/dev/null".into());
+                out.push("complete -o nospace -E -F __reman_tab_empty 2>/dev/null && __reman_tab_on=1".into());
             }
         }
         "cmd" | "clink" => {
@@ -652,10 +673,12 @@ pub fn bindings(shell: &str, map: &Map) -> String {
             }
         }
         "fish" => {
+            out.push(format!("set -g __reman_fix_hint {}", sq(&fix_hint(map))));
+            out.push("__reman_unbind_all".into());
             for (a, f) in fns {
                 for k in map.get(a) {
                     if let Some(seq) = fish(k) {
-                        out.push(format!("bind {seq} '{f}'"));
+                        out.push(format!("__reman_bindf {seq} '{f}'"));
                     }
                 }
             }
@@ -693,7 +716,17 @@ pub fn bindings(shell: &str, map: &Map) -> String {
     out.join("\n")
 }
 
+/// A word for a POSIX shell, single-quoted.
+fn sq(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\''"))
+}
+
 /// What a message about the fix key says: `Alt+F inserts`, or how to get it without a key.
+/// What a message names the next-step key as.
+pub fn next_key(map: &Map) -> String {
+    map.label("next").unwrap_or_else(|| "it".into())
+}
+
 pub fn fix_hint(map: &Map) -> String {
     match map.label("fix") {
         Some(l) => format!("{l} inserts"),
@@ -772,6 +805,10 @@ mod tests {
         let (refused, why) = check(&m, "find_all", &k("Ctrl+K")).unwrap();
         assert!(!refused && why.contains("VS Code"), "{why}");
         assert!(check(&m, "find_all", &k("Ctrl+Space")).is_none());
+        // the shell's own history keys: taken, with what they did; the preset's Up says nothing
+        let (refused, why) = check(&m, "find_here", &k("Down")).unwrap();
+        assert!(!refused && why == "Down no longer goes forward through history in your shell", "{why}");
+        assert!(check(&m, "find_here", &k("Up")).is_none());
     }
 
     #[test]
@@ -780,9 +817,10 @@ mod tests {
         let ps = bindings("powershell", &m);
         assert!(ps.contains("@('UpArrow', 'FindHere')") && ps.contains("@('Enter', 'Hold')"), "{ps}");
         let z = bindings("zsh", &m);
-        assert!(z.contains("__reman_bind '^[[A' __reman_find_here") && z.contains("__reman_bind '^[OA' __reman_find_here"), "{z}");
+        assert!(z.contains("__reman_fix_hint='Alt+F inserts'\n__reman_unbind_all") &&z.contains("__reman_bind '^[[A' __reman_find_here") && z.contains("__reman_bind '^[OA' __reman_find_here"), "{z}");
         let b = bindings("bash", &Map::of(Some("gentle"), &BTreeMap::new()));
-        assert!(!b.contains("\\e[A") && !b.contains("complete -o nospace -E") && b.contains("\\C-r"), "{b}");
+        assert!(!b.contains("\\e[A") && !b.contains("complete -o nospace -E") && b.contains("__reman_bindx '\\C-r' '__reman_find all'"), "{b}");
+        assert_eq!(sq("a'b"), "'a'\\''b'");
         let n = bindings("nu", &m);
         assert!(n.contains("keycode: up") && n.contains("menuup"), "{n}");
         let x = bindings("xonsh", &m);

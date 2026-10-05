@@ -183,9 +183,11 @@ pub fn print_suggestion(sg: &Value) {
         Some("same_error") => "the same error was fixed by",
         _ => "did you mean",
     };
-    // what it changes, when it's a variant of what failed (adds --build, gti -> git). The key
-    // that inserts it is the shell's to name (Clink adds it to this line)
-    let how = sg.get("diff").and_then(Value::as_str).map(|d| format!("   ({d})")).unwrap_or_default();
+    // what it changes, when it's a variant of what failed (adds --build, gti -> git), and the key
+    // that inserts it, when the shell names it (REMAN_FIX_HINT; Clink adds it to this line itself)
+    let hint = std::env::var("REMAN_FIX_HINT").ok().filter(|h| !h.is_empty());
+    let parts: Vec<&str> = [sg.get("diff").and_then(Value::as_str), hint.as_deref()].into_iter().flatten().collect();
+    let how = if parts.is_empty() { String::new() } else { format!("   ({})", parts.join("; ")) };
     eprintln!("\x1b[90m  reman: {lead} \u{2192} \x1b[36m{cmd}\x1b[90m{how}\x1b[0m");
 }
 

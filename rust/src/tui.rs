@@ -831,7 +831,7 @@ fn draw(buf: &mut Buffer, app: &App) -> ((u16, u16), Hits) {
     Paragraph::new(line).render(Rect::new(0, filter_y, area.width, 1), buf);
 
     // first line: the keys that matter right now
-    Paragraph::new(hint_line(app)).render(Rect::new(0, 0, area.width, 1), buf);
+    Paragraph::new(hint_line(app, area.width as usize)).render(Rect::new(0, 0, area.width, 1), buf);
 
     // body: list + card (right column when wide, above the list when narrow)
     let body = Rect::new(0, 1, area.width, filter_y - 1);
@@ -921,7 +921,7 @@ fn filter_line<'a>(app: &App, items: &[&Item], w: usize) -> Line<'a> {
     Line::from(row)
 }
 
-fn hint_line<'a>(app: &App) -> Line<'a> {
+fn hint_line<'a>(app: &App, w: usize) -> Line<'a> {
     // an action's key as the user has it; an action with none is left out
     let a = |id: &str, what: &'static str| app.keys.short(id).map(|k| (if k == "Tab" { "tab".to_string() } else { k }, what));
     let f = |k: &str, what: &'static str| Some((k.to_string(), what));
@@ -931,13 +931,26 @@ fn hint_line<'a>(app: &App) -> Line<'a> {
     } else if app.flow.is_some() {
         vec![f("↵", "run this step, queue the rest"), a("all_steps", "insert all steps"), f("↑↓", "move"), f("←", "back to flows")]
     } else if app.mode == Mode::Flows {
-        vec![f("↵", "open flow"), a("all_steps", "insert all steps"), f("↑↓", "move"), a("next_tab", "next tab"), a("help", "keys"), f("esc", "close")]
+        vec![f("↵", "open flow"), a("all_steps", "insert all steps"), f("↑↓", "move"), a("next_tab", "next tab"), a("help", "keys"), a("settings", "settings"), f("esc", "close")]
     } else {
         let enter = if app.selected().is_some_and(|it| app.fix_of(&it).is_some()) { "insert the fix" } else { "insert" };
-        vec![f("↵", enter), f("↑↓", "move"), a("next_tab", "Recall · Fixes · Flows"), a("runs", "every run"), a("forget", "forget"), a("pin", "pin"), a("help", "keys"), f("esc", "close")]
+        vec![f("↵", enter), f("↑↓", "move"), a("next_tab", "Recall · Fixes · Flows"), a("runs", "every run"), a("forget", "forget"), a("pin", "pin"), a("help", "keys"), a("settings", "settings"), f("esc", "close")]
     };
+    let mut k: Vec<(String, &str)> = k.into_iter().flatten().collect();
+    // too wide for the terminal: shorter words first, then the hints you need least go
+    let width = |k: &[(String, &str)]| 1 + k.iter().map(|(key, what)| UnicodeWidthStr::width(key.as_str()) + what.chars().count() + 4).sum::<usize>();
+    for (long, short) in [("Recall · Fixes · Flows", "next tab"), ("every run", "runs"), ("insert the fix", "fix")] {
+        if width(&k) > w {
+            k.iter_mut().filter(|(_, what)| *what == long).for_each(|(_, what)| *what = short);
+        }
+    }
+    for drop in ["move", "pin", "forget", "next tab", "runs"] {
+        if width(&k) > w {
+            k.retain(|(_, what)| *what != drop);
+        }
+    }
     let mut sp = vec![Span::raw(" ")];
-    for (key, what) in k.into_iter().flatten() {
+    for (key, what) in k {
         sp.push(Span::styled(key.to_string(), Style::default().add_modifier(Modifier::BOLD)));
         sp.push(Span::styled(format!(" {what}   "), muted()));
     }
@@ -1379,7 +1392,7 @@ fn draw_help(buf: &mut Buffer, area: Rect, map: &crate::keys::Map) {
         }
     }
     keys.push(("mouse".into(), "click a tab or a row, wheel to scroll".into()));
-    keys.push(("esc".into(), "back / close   (change keys: reman settings, Keys)".into()));
+    keys.push(("esc".into(), "back / close   (change keys: settings, Keys)".into()));
     let bw = (area.width as usize).min(78) as u16;
     let bh = (keys.len() as u16 + 4).min(area.height);
     let r = Rect::new((area.width - bw) / 2, (area.height - bh) / 2, bw, bh);

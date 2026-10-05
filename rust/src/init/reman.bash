@@ -113,7 +113,7 @@ __reman_precmd() {
     [[ $reply == *'"kind":"same_error"'* ]] && lead="the same error was fixed by"
     __reman_fix=$fix
     # what it changes, when it's a variant of what failed (adds --build, gti -> git)
-    local how="__FIX_HINT__"
+    local how=$__reman_fix_hint
     if [[ $reply =~ \"diff\":\"(([^\"\\]|\\.)*)\" ]]; then how="${BASH_REMATCH[1]}; $how"; fi
     printf '\e[90m  reman: %s -> \e[36m%s\e[90m   (%s)\e[0m\n' "$lead" "$fix" "$how" >&2
   fi
@@ -202,5 +202,44 @@ __reman_complete() {
   if (( ${#COMPREPLY[@]} )) && [[ ${COMPREPLY[0]} == */ || ${COMPREPLY[0]} == *\\ ]]; then compopt -o nospace 2>/dev/null; fi
 }
 complete -F __reman_complete reman reman.exe
+
+# reman's keys, given back what they did before when reman stops using one (readline's own
+# functions, read once from `bind -p` into a file: no subshell)
+declare -gA __reman_seq_prev 2>/dev/null
+__reman_bindx() {
+  if [ -z "$__reman_rl_read" ]; then
+    __reman_rl_read=1
+    bind -p > "$__reman_histfile" 2>/dev/null && mapfile -t __reman_rl_before < "$__reman_histfile"
+  fi
+  if [ -z "${__reman_seq_prev[$1]+x}" ]; then
+    local l prev=
+    for l in "${__reman_rl_before[@]}"; do
+      [[ $l == "\"$1\": "* ]] && { prev=${l#*\": }; break; }
+    done
+    __reman_seq_prev[$1]=$prev
+  fi
+  bind -x "\"$1\": $2"
+}
+__reman_unbind_all() {
+  local s
+  for s in "${!__reman_seq_prev[@]}"; do
+    bind -r "$s" 2>/dev/null
+    [ -n "${__reman_seq_prev[$s]}" ] && bind "\"$s\": ${__reman_seq_prev[$s]}" 2>/dev/null
+  done
+  __reman_seq_prev=()
+  [ -n "$__reman_tab_on" ] && complete -r -E 2>/dev/null
+  __reman_tab_on=
+}
+# reman's keys changed in `reman settings`: taken up at the next prompt (one file-time test)
+__reman_config="__CONFIG__"
+__reman_keystamp="${TMPDIR:-/tmp}/.reman-keys-$$"
+: >| "$__reman_keystamp" 2>/dev/null
+__reman_keys_reload() {
+  [[ $__reman_config -nt $__reman_keystamp ]] || return 0
+  : >| "$__reman_keystamp" 2>/dev/null
+  eval "$("$__reman_exe" keys --print bash 2>/dev/null)"
+}
+# (after reman's own, which reads the exit code first)
+PROMPT_COMMAND="${PROMPT_COMMAND:+$PROMPT_COMMAND; }__reman_keys_reload"
 # reman's keys (`reman settings`, Keys)
 __KEYS__

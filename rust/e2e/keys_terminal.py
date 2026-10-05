@@ -5,7 +5,8 @@ With ↑ and Tab given back, the finder on Alt+J and the fix on Alt+K:
   * ↑ is the shell's own again (the last command comes back), and Alt+J opens the finder;
   * Alt+K inserts the fix after a typo;
   * in the finder (PowerShell), Ctrl+E is "every run" instead of Ctrl+O, and the hint line says so;
-  * a change made while PowerShell is open applies at its next prompt.
+  * a change made while the shell is open applies at its next prompt: Down for the finder, the
+    fix on Alt+M (its message too), and keys reman no longer uses do what they did before.
 
   python e2e/keys_terminal.py
 """
@@ -19,7 +20,7 @@ EXE_FWD = EXE.replace("\\", "/")
 PORT = 8783
 ROWS, COLS = 30, 120
 TABS = "Recall  Fixes  Flows"
-KEY = {"enter": "\r", "up": "\x1b[A", "esc": "\x1b", "alt_j": "\x1bj", "alt_k": "\x1bk", "alt_l": "\x1bl", "ctrl_e": "\x05", "ctrl_o": "\x0f", "ctrl_u": "\x15", "ctrl_c": "\x03"}
+KEY = {"enter": "\r", "up": "\x1b[A", "down": "\x1b[B", "alt_m": "\x1bm", "esc": "\x1b", "alt_j": "\x1bj", "alt_k": "\x1bk", "alt_l": "\x1bl", "ctrl_e": "\x05", "ctrl_o": "\x0f", "ctrl_u": "\x15", "ctrl_c": "\x03"}
 results = []
 
 
@@ -135,6 +136,8 @@ def exercise(sh, t, cfg):
     print(f"\n{sh}:")
     check(f"{sh}: starts", t.wait(re.escape(t.prompt.strip()), 40), t.text())
     time.sleep(1.0)
+    errors = ("FullyQualifiedErrorId", "Exception", "command not found", "Unknown command", "parse error", "bad pattern", "no such", "Error:")
+    check(f"{sh}: no error while reman loads", not any(e in t.text() for e in errors), t.text())
     t.clear()
     t.run(f"echo zz-up-{sh}", 1.5)
     t.keys("up", wait=1.5)
@@ -157,21 +160,51 @@ def exercise(sh, t, cfg):
     t.keys("alt_k", wait=1.0)
     check(f"{sh}: Alt+K inserts the fix", t.line().strip() == "git status", repr(t.line()) + "\n" + t.text())
     t.keys("ctrl_u" if sh != "powershell" else "esc")
-    if sh == "powershell":
-        # changed while the shell is open: its next prompt takes it up
-        time.sleep(1.2)
-        with open(cfg, "w") as f:
-            json.dump({"finder_height": 0, "keys": {"find_all": ["Alt+L"]}}, f)
-        time.sleep(1.2)
-        t.run("echo zz-reload", 2.0)
-        t.keys("alt_l", wait=2.5)
-        check(f"{sh}: a change applies at the next prompt (Alt+L opens the finder)", t.wait(TABS, 15), t.text())
-        t.keys("esc", wait=1.5)
-        t.clear()
-        t.keys("up", wait=2.5)
-        check(f"{sh}: ...and Up opens it again, as the standard keys have it", t.wait(TABS, 15), t.text())
-        t.keys("esc", wait=1.0)
-
+    # changed while the shell is open: its next prompt takes it up. The finder here moves to Down,
+    # every folder to Alt+L, the fix to Alt+M; Alt+J goes back to what it did before
+    time.sleep(1.2)
+    with open(cfg, "w") as f:
+        json.dump({"finder_height": 0, "keys": {"find_here": ["Down"], "tab": [], "find_all": ["Alt+L"], "fix": ["Alt+M"]}}, f)
+    time.sleep(1.2)
+    t.run(f"echo zz-reload-{sh}", 2.0)
+    t.clear()
+    t.keys("alt_l", wait=2.5)
+    check(f"{sh}: a change applies at the next prompt (Alt+L opens the finder)", t.wait(TABS, 15), t.text())
+    t.keys("esc", wait=1.5)
+    t.clear()
+    t.keys("alt_j", wait=2.0)
+    check(f"{sh}: ...and Alt+J is given back (no finder)", TABS not in t.text(), t.text())
+    t.keys("ctrl_u" if sh != "powershell" else "esc")
+    t.clear()
+    t.keys("down", wait=2.5)
+    check(f"{sh}: Down opens the finder for this folder", t.wait(TABS, 15), t.text())
+    t.keys("esc", wait=1.5)
+    t.clear()
+    t.keys("enter", wait=1.0)
+    t.keys("up", wait=1.5)
+    # (the screen was cleared first: the command showing at all means Up brought it back)
+    check(f"{sh}: Up is still the shell's own", f"echo zz-reload-{sh}" in t.text() and TABS not in t.text(), repr(t.line()) + "\n" + t.text())
+    t.keys("ctrl_u" if sh != "powershell" else "esc")
+    t.clear()
+    t.run("gti status", 3.0)
+    check(f"{sh}: the fix line names the new key", "Alt+M inserts" in t.text(), t.text())
+    t.keys("alt_m", wait=1.0)
+    check(f"{sh}: Alt+M inserts the fix", t.line().strip() == "git status", repr(t.line()) + "\n" + t.text())
+    t.keys("ctrl_u" if sh != "powershell" else "esc")
+    # back to the standard keys: Up is reman's again, Down the shell's
+    time.sleep(1.2)
+    with open(cfg, "w") as f:
+        json.dump({"finder_height": 0}, f)
+    time.sleep(1.2)
+    t.run(f"echo zz-std-{sh}", 2.0)
+    t.clear()
+    t.keys("up", wait=2.5)
+    check(f"{sh}: back to standard, Up opens the finder again", t.wait(TABS, 15), t.text())
+    t.keys("esc", wait=1.5)
+    t.clear()
+    t.keys("down", wait=2.0)
+    check(f"{sh}: ...and Down is given back (no finder)", TABS not in t.text(), t.text())
+    t.keys("ctrl_u" if sh != "powershell" else "esc")
 
 def main():
     tmp = tempfile.mkdtemp(prefix="reman-keys-")

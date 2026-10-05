@@ -1,6 +1,25 @@
 # Changelog
 
-## v0.3.1
+## v0.3.2
+
+### Changes you'll notice
+
+- **Key changes in `reman settings` wait for `s`.** Changing a key, turning one off or picking a preset is a draft, marked *not saved*; `s` saves it, `u` undoes it, and leaving with changes unsaved asks first.
+- **No new terminal needed.** Open bash, zsh and fish take saved key changes at their next prompt, as PowerShell already did; the finder uses them the next time it opens. Keys reman stops using go back to what they did before. nushell, xonsh and Command Prompt still take them in new terminals.
+
+### New
+
+- `+` on a key gives an action a second key. A refused key keeps the page asking, so the next key you press can be the one.
+- The finder's key line shows **F10 settings**, so the settings page can be found from the finder. On a narrow terminal the line shortens its words and leaves out the hints you need least instead of running off the edge.
+- Each key has a short name on the page (*Finder, this folder*), with what it does in full on the line below.
+- Taking a key your shell moves through history with (Down, PageUp, Ctrl+P, ...) says so: *Down no longer goes forward through history in your shell*.
+
+### Fixed
+
+- PowerShell: a new window printed *Index operation failed; the array index evaluated to null* as reman loaded (v0.3.1). Keys worked regardless.
+- PowerShell: the finder on a key other than Up (Down, say) left multi-line input and the predictions list unable to use that key; it now does what it did before there.
+- fish: the fix line after a failure names the key that inserts it, as the other shells do.
+- The fix line and the next-step message name the key you set, in an open shell too.
 
 ### New
 

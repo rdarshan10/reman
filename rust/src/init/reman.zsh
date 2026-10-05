@@ -88,7 +88,7 @@ __reman_accept() {
       __reman_field "$reply" error && print -P -- "%F{8}         last error: ${REPLY//\%/%%}%f"
       if __reman_field "$reply" fix; then
         __reman_fix=$REPLY
-        local how="__FIX_HINT__"
+        local how=$__reman_fix_hint
         __reman_field "$reply" diff && how="$REPLY; $how"
         print -P -- "%F{8}  reman: worked instead -> %F{6}${__reman_fix//\%/%%}%F{8}   (${how//\%/%%})%f"
       fi
@@ -177,7 +177,7 @@ __reman_precmd() {
     [[ $reply == *'"kind":"same_error"'* ]] && lead="the same error was fixed by"
     __reman_fix=$fix
     # what it changes, when it's a variant of what failed (adds --build, gti -> git)
-    local how="__FIX_HINT__"
+    local how=$__reman_fix_hint
     __reman_field "$reply" diff && how="$REPLY; $how"
     print -P -- "%F{8}  reman: $lead -> %F{6}${fix//\%/%%}%F{8}   (${how//\%/%%})%f" >&2
   fi
@@ -232,12 +232,34 @@ zle -N __reman_insert_fix
 # What a key did before reman bound it, by reman's widget (its first key): Alt-F's forward-word
 # (which zsh-autosuggestions also uses to accept a word), Alt-N's own, for when reman has nothing
 # to do with it.
-typeset -gA __reman_prev_widget
+typeset -gA __reman_prev_widget __reman_seq_prev
 __reman_bind() {
   local w=${${(z)"$(bindkey "$1")"}[2]}
   [[ $w == (__reman_*|undefined-key) || -n ${__reman_prev_widget[$2]} ]] || __reman_prev_widget[$2]=$w
+  # what this key did, to give it back if reman stops using it
+  (( ${+__reman_seq_prev[$1]} )) || __reman_seq_prev[$1]=${w:#(__reman_*|undefined-key)}
   bindkey "$1" $2
 }
+# give every key reman took back what it did before (reman's keys changed in `reman settings`)
+__reman_unbind_all() {
+  local s
+  for s in ${(k)__reman_seq_prev}; do
+    if [[ -n ${__reman_seq_prev[$s]} ]]; then bindkey "$s" ${__reman_seq_prev[$s]}; else bindkey -r "$s"; fi
+  done
+  __reman_seq_prev=() __reman_prev_widget=()
+}
+# reman's keys changed in `reman settings`: taken up at the next prompt (one file-time test)
+__reman_config="__CONFIG__"
+__reman_keystamp="${TMPDIR:-/tmp}/.reman-keys-$$"
+: >| "$__reman_keystamp" 2>/dev/null
+__reman_keys_reload() {
+  [[ $__reman_config -nt $__reman_keystamp ]] || return
+  : >| "$__reman_keystamp" 2>/dev/null
+  eval "$("$__reman_exe" keys --print zsh 2>/dev/null)"
+}
+add-zsh-hook precmd __reman_keys_reload
+__reman_keys_bye() { rm -f "$__reman_keystamp" }
+add-zsh-hook zshexit __reman_keys_bye
 # what the key that ran this reman widget did before
 __reman_prev() {
   local w=${__reman_prev_widget[$WIDGET]}

@@ -78,7 +78,7 @@ function __reman_postexec --on-event fish_postexec
     string match -q -- ' *' $cmd; and return   # leading space: never recorded
     set -g __reman_fix   # a fix is offered for the command just run, until the next one
     if test $ec -ne 0
-        set -g __reman_fix (env REMAN_CAPTURE="$cap" $__reman_hook record --exit $ec --cwd $PWD --duration-ms $CMD_DURATION --suggest --print-fix -- $cmd)
+        set -g __reman_fix (env REMAN_CAPTURE="$cap" REMAN_FIX_HINT="$__reman_fix_hint" $__reman_hook record --exit $ec --cwd $PWD --duration-ms $CMD_DURATION --suggest --print-fix -- $cmd)
     else
         __reman_q $cmd; set -l qc $__reman_qv
         __reman_q $PWD; set -l qd $__reman_qv
@@ -135,7 +135,7 @@ function __reman_enter
             end
             if test -n "$parts[2]"
                 set -g __reman_fix $parts[2]
-                set -l how "__FIX_HINT__"
+                set -l how $__reman_fix_hint
                 test -n "$parts[4]"; and set how "$parts[4]; $how"
                 set_color brblack; echo -n "  reman: worked instead -> "; set_color cyan; echo -n $parts[2]; set_color brblack; echo "   ($how)"; set_color normal
             end
@@ -191,5 +191,27 @@ function __reman_complete
 end
 complete -c reman -f -a '(__reman_complete)'
 complete -c reman.exe -f -a '(__reman_complete)'
+
+# reman's keys: bound as yours, so a key reman stops using goes back to fish's own
+set -g __reman_keyseqs
+function __reman_bindf
+    set -ga __reman_keyseqs (string escape -- $argv[1..-2] | string join ' ')
+    bind $argv
+end
+function __reman_unbind_all
+    for s in $__reman_keyseqs
+        eval bind -e $s
+    end
+    set -g __reman_keyseqs
+end
+# reman's keys changed in `reman settings`: taken up at the next prompt (one file-time check)
+set -g __reman_config "__CONFIG__"
+set -g __reman_config_t (path mtime -- $__reman_config 2>/dev/null)
+function __reman_keys_reload --on-event fish_prompt
+    set -l t (path mtime -- $__reman_config 2>/dev/null)
+    test "$t" = "$__reman_config_t"; and return
+    set -g __reman_config_t $t
+    $__reman_exe keys --print fish 2>/dev/null | source
+end
 # reman's keys (`reman settings`, Keys)
 __KEYS__

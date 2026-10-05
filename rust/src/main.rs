@@ -316,8 +316,8 @@ enum Cmd {
     /// reman's keys: in your shell (what opens the finder, inserts a fix, ...) and in the finder.
     /// `reman keys` lists them; `set <action> <key>...` or `set <action> off` changes one;
     /// `preset standard|gentle|vim` starts over from a preset; `reset` goes back to standard.
-    /// Also on one page in `reman settings` (Keys). New terminals pick changes up; open PowerShell
-    /// windows at their next prompt
+    /// Also on one page in `reman settings` (Keys). The finder and open shells take a change at
+    /// once (shells at their next prompt; nushell, xonsh and Command Prompt in new terminals)
     Keys {
         /// list | set | preset | reset
         what: Option<String>,
@@ -1296,7 +1296,7 @@ fn keys_cmd(what: Option<&str>, args: &[String], print: Option<&str>) -> Result<
         }
     }
     if what.is_some_and(|w| w != "list") {
-        println!("\nNew terminals use these; open PowerShell windows take them at their next prompt.");
+        println!("\nThe finder uses these now; open shells at their next prompt (nushell, xonsh and Command Prompt: new terminals).");
     }
     Ok(())
 }

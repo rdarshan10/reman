@@ -148,7 +148,7 @@ function global:__RemanCapture {
             Write-Host "  reman: $lead -> " -NoNewline -ForegroundColor DarkGray
             Write-Host $global:__RemanFix -NoNewline -ForegroundColor Cyan
             # what it changes, when it's a variant of what failed (adds --build, gti -> git)
-            $how = if ($r.suggest.diff) { "   ($($r.suggest.diff); __FIX_HINT__)" } else { '   (__FIX_HINT__)' }
+            $how = if ($r.suggest.diff) { "   ($($r.suggest.diff); $global:__RemanFixHint)" } else { "   ($global:__RemanFixHint)" }
             Write-Host $how -ForegroundColor DarkGray
           }
           # it used to work here: what ran here since
@@ -328,15 +328,32 @@ if (Get-Module PSReadLine -ErrorAction SilentlyContinue) {
     $line = $null; $cur = $null
     [Microsoft.PowerShell.PSConsoleReadLine]::GetBufferState([ref]$line, [ref]$cur)
     $up = $key -and $key.Key -eq [ConsoleKey]::UpArrow -and $key.Modifiers -eq 0
-    if ($up -and $line.Contains("`n")) { [Microsoft.PowerShell.PSConsoleReadLine]::PreviousLine(); return }
-    # predictions shown as a list: Up moves through that list (an empty line still opens the finder)
+    # a line of several lines, or predictions shown as a list: the key moves through those, as it
+    # did before reman (an empty line still opens the finder)
     $o = Get-PSReadLineOption
-    if ($up -and $line -and "$($o.PredictionViewStyle)" -eq 'ListView' -and "$($o.PredictionSource)" -notin '', 'None') {
-      [Microsoft.PowerShell.PSConsoleReadLine]::PreviousHistory($key, $arg); return
+    $list = $line -and "$($o.PredictionViewStyle)" -eq 'ListView' -and "$($o.PredictionSource)" -notin '', 'None'
+    if ($line.Contains("`n") -or $list) {
+      if ($up) {
+        if ($line.Contains("`n")) { [Microsoft.PowerShell.PSConsoleReadLine]::PreviousLine() } else { [Microsoft.PowerShell.PSConsoleReadLine]::PreviousHistory($key, $arg) }
+        return
+      }
+      if (__RemanPrev $key $arg) { return }
     }
     $chosen = __RemanFind $line 'folder'
     if ($chosen) { __RemanPut $line $chosen }
     [Microsoft.PowerShell.PSConsoleReadLine]::InvokePrompt()
+  }
+  # What the key that ran a handler did before reman took it (else what the action's first key did)
+  function global:__RemanPrevOf($action) {
+    $f = if ($global:__RemanChord -and $global:__RemanPrevKey) { $global:__RemanPrevKey[$global:__RemanChord] }
+    if (-not $f -and $action -and $global:__RemanPrevFor) { $f = $global:__RemanPrevFor[$action] }
+    $f
+  }
+  function global:__RemanPrev($key, $arg, $action) {
+    $f = __RemanPrevOf $action
+    if (-not $f) { return $false }
+    [Microsoft.PowerShell.PSConsoleReadLine]::($f).Invoke($key, $arg)
+    $true
   }
   # The finder for every folder (Ctrl+R)
   function global:__RemanKeyFindAll {
@@ -385,7 +402,7 @@ if (Get-Module PSReadLine -ErrorAction SilentlyContinue) {
     } else {
       # nothing found before (Emacs mode set later in the profile, or a reload after an update,
       # when the binding was reman's own): Emacs mode's default for Alt+F
-      $prev = $global:__RemanPrevFor['Fix']
+      $prev = __RemanPrevOf 'Fix'
       if (-not $prev -and "$((Get-PSReadLineOption).EditMode)" -eq 'Emacs' -and $key -and $key.Key -eq [ConsoleKey]::F -and $key.Modifiers -eq [ConsoleModifiers]::Alt) { $prev = 'ForwardWord' }
       if ($prev) { [Microsoft.PowerShell.PSConsoleReadLine]::($prev).Invoke($key, $arg) }
     }
@@ -406,7 +423,7 @@ if (Get-Module PSReadLine -ErrorAction SilentlyContinue) {
         if ($empty) {
           # why, once, above a fresh prompt (cycling just swaps the line)
           $e = [char]27
-          $more = if ($r.of -gt 1) { "   (__NEXT_KEY__ again: $($r.of - 1) more)" } else { '' }
+          $more = if ($r.of -gt 1) { "   ($global:__RemanNextKey again: $($r.of - 1) more)" } else { '' }
           [Console]::Write("$e[K`n$e[J$e[90m  reman: $($r.reason)$more$e[0m`n")
           [Microsoft.PowerShell.PSConsoleReadLine]::InvokePrompt($null, [Console]::CursorTop)
         }
@@ -415,8 +432,7 @@ if (Get-Module PSReadLine -ErrorAction SilentlyContinue) {
       }
       if ($empty) { return }
     }
-    $prev = $global:__RemanPrevFor['Next']
-    if ($prev) { [Microsoft.PowerShell.PSConsoleReadLine]::($prev).Invoke($key, $arg) }
+    __RemanPrev $key $arg 'Next' | Out-Null
   }
   # Enter: a command that keeps failing here is held once, with why (and the fix, on Alt+F);
   # Enter again runs it. An exact lookup with tight timeouts: a slow or absent daemon never
@@ -440,7 +456,7 @@ if (Get-Module PSReadLine -ErrorAction SilentlyContinue) {
         if ($r.error) { $msg += "`n$e[90m         last error: $($r.error)$e[0m" }
         if ($r.fix) {
           $global:__RemanFix = [string]$r.fix
-          $how = if ($r.diff) { "$($r.diff); __FIX_HINT__" } else { '__FIX_HINT__' }
+          $how = if ($r.diff) { "$($r.diff); $global:__RemanFixHint" } else { $global:__RemanFixHint }
           $msg += "`n$e[90m  reman: worked instead -> $e[36m$($r.fix)$e[90m   ($how)$e[0m"
         }
         $msg += "`n$e[90m  Enter again runs it anyway$e[0m`n"
@@ -461,7 +477,8 @@ if (Get-Module PSReadLine -ErrorAction SilentlyContinue) {
   function global:__RemanBindKeys {
     param($pairs)
     if ($null -eq $global:__RemanPrevKey) { $global:__RemanPrevKey = @{} }
-    foreach ($c in @($global:__RemanBoundKeys)) {
+    # (the first time there are none: @($null) is one $null, not an empty list)
+    foreach ($c in @($global:__RemanBoundKeys | Where-Object { $_ })) {
       $f = $global:__RemanPrevKey[$c]
       try { if ($f) { Set-PSReadLineKeyHandler -Chord $c -Function $f } else { Remove-PSReadLineKeyHandler -Chord $c } } catch { }
     }
@@ -476,7 +493,8 @@ if (Get-Module PSReadLine -ErrorAction SilentlyContinue) {
         $global:__RemanPrevKey[$chord] = $f
       }
       if (-not $global:__RemanPrevFor.ContainsKey($action)) { $global:__RemanPrevFor[$action] = $global:__RemanPrevKey[$chord] }
-      $sb = [scriptblock]::Create("param(`$key, `$arg) __RemanKey$action `$key `$arg")
+      # which key ran it, so each one can fall back to what it did before
+      $sb = [scriptblock]::Create("param(`$key, `$arg) `$global:__RemanChord = '$chord'; __RemanKey$action `$key `$arg")
       Set-PSReadLineKeyHandler -Chord $chord -BriefDescription "reman: $action" -ScriptBlock $sb
       $global:__RemanBoundKeys += $chord
     }
