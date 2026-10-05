@@ -21,6 +21,8 @@
 - fish: the fix line after a failure names the key that inserts it, as the other shells do.
 - The fix line and the next-step message name the key you set, in an open shell too.
 
+## v0.3.1
+
 ### New
 
 - **Your own keys.** Every key reman takes, in your shell and in the finder, can be changed or turned off: `reman settings` (Keys) asks for the new key and says when one is taken, types a character, or is one your shell or terminal needs; `reman keys` lists them, `reman keys set find_all Alt+J` changes one, `reman keys set find_here off` gives a key back. Presets to start from: *standard* (as before, the default), *gentle* (reman leaves ↑, Tab and Enter alone: Ctrl+R, Alt+F and Alt+N only) and *vim*. Every shell takes them: PowerShell, bash, zsh, fish, nushell, xonsh and Command Prompt with Clink. New terminals use them; open PowerShell windows at their next prompt.
