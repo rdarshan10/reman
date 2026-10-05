@@ -1,6 +1,6 @@
 [package]
 name = "reman"
-version = "0.3.1"
+version = "0.3.2"
 edition = "2024"
 description = "Your shell history, searchable by meaning, with proof of what worked. For you and your AI agents."
 license = "Apache-2.0"
