@@ -4,6 +4,7 @@
 
 ### For agents
 
+- **What's running, and whose it is.** A new tool, `reman_running`, lists the servers listening in the agent's folders: port and url, folder, how long each has run, the command you recorded for it, and who started it (this agent session, another agent, you in a terminal, an editor, the Claude app's preview pane). Where the shell that started a server has exited, the run reman recorded as it began says who. Ports held elsewhere are listed by number only, so the agent picks a free one. It only reads, never stops anything, and answers in about 0.1 s; a stuck `netstat` or `lsof` is given 3 s. reman's instructions tell agents to call it before starting, restarting or stopping a server.
 - **Start with the runbook.** reman's instructions now tell an agent new to a project to call `reman_runbook` first: one call answers how it is set up, run, tested, built and deployed. An empty `reman_search` points there too.
 - **A program that isn't installed.** `reman_check` says when a command's program is not on this machine (`missing`): not on the agent's PATH, and never run successfully here, with the last time it failed for not being found. The agent does the task another way instead of retrying it or waiting on it. What a shell runs itself (`cd`, `Get-ChildItem`, PowerShell's `ls`) and the user's own aliases (they have worked before) are never called missing.
 

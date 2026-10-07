@@ -589,6 +589,51 @@ def run(tmp):
     c = call({"op": "mcp", "tool": "reman_check", "args": {"command": "Get-ChildItem -Recurse; echo done", "cwd": API}, "allow_global": True, "path": empty_path})
     check("what the shell runs itself is never missing", "missing" not in c, c)
 
+    # --- what is running now ------------------------------------------------------------------
+    print("running now")
+    srv, other = os.path.join(tmp, "srv"), os.path.join(tmp, "other")
+    os.makedirs(srv)
+    os.makedirs(other)
+    norm = lambda p: os.path.normcase(os.path.abspath(p)).rstrip("\/")
+    port = 8799
+    typed = f"python -m http.server {port} --bind 127.0.0.1"
+    ingest(typed, srv, NOW - 3 * DAY)
+    ingest(typed, srv, NOW - 2 * DAY)
+    server = subprocess.Popen([sys.executable, "-m", "http.server", str(port), "--bind", "127.0.0.1"], cwd=srv,
+                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        for _ in range(100):
+            try:
+                socket.create_connection(("127.0.0.1", port), timeout=0.2).close()
+                break
+            except OSError:
+                time.sleep(0.1)
+        t0 = time.time()
+        r = call({"op": "mcp", "tool": "reman_running", "args": {}, "roots": [tmp], "notes": True})
+        took = time.time() - t0
+        mine = [x for x in r["result"]["servers"] if port in x["ports"]]
+        x = mine[0] if mine else {}
+        check("reman_running: the server, its port and url, in its folder", x.get("url") == f"http://localhost:{port}" and norm(x.get("folder", "")) == norm(srv), r)
+        check("...with the command reman recorded for it", (x.get("recorded_as") or {}).get("command") == typed and x["recorded_as"]["runs"] == 2, x)
+        check("...what started it, and what to do", x.get("started_by_kind") in ("user", "agent", "editor", "app", "unknown") and bool(x.get("advice")), x)
+        check("...quickly", took < 2, f"{took:.2f}s")
+        r = call({"op": "mcp", "tool": "reman_running", "args": {}, "roots": [tmp], "session_pids": [os.getpid()], "notes": True})
+        x = next((x for x in r["result"]["servers"] if port in x["ports"]), {})
+        check("started under the agent's own process: this session's", x.get("started_by_kind") == "this_session" and "stop it when you are done" in x.get("advice", ""), x)
+        # an agent's background command, recorded as it began: reman knows who, even with the shell gone
+        call({"op": "ingest", "command": typed, "exit": 0, "cwd": srv, "session": "s-bg", "actor": "agent:codex", "ts": int(time.time()), "duration_ms": 0})
+        r = call({"op": "mcp", "tool": "reman_running", "args": {}, "roots": [tmp], "notes": True})
+        x = next((x for x in r["result"]["servers"] if port in x["ports"]), {})
+        check("the recorded run that began with it says who started it", x.get("started_by_kind") == "agent" and "codex" in x.get("started_by", ""), x)
+        r = call({"op": "mcp", "tool": "reman_running", "args": {"cwd": other}, "roots": [tmp], "notes": True})
+        check("another folder: not listed there, its port only a number in use", r["result"]["servers"] == [] and port in r["result"]["other_ports_in_use"] and "No server is listening" in (r.get("note") or ""), r)
+        r = call({"op": "mcp", "tool": "reman_running", "args": {}, "roots": [other], "notes": True})
+        check("a folder not shared: nothing about the server but its port", all(port not in s["ports"] for s in r["result"]["servers"]) and port in r["result"]["other_ports_in_use"], r)
+        check("never the OS's short-lived ports", all(p < 49152 for p in r["result"]["other_ports_in_use"]), r["result"]["other_ports_in_use"])
+    finally:
+        server.kill()
+        server.wait()
+
 
 if __name__ == "__main__":
     sys.exit(main())

@@ -30,6 +30,9 @@ pub struct Policy {
     pub project: Option<String>,
     /// the agent's PATH (its bridge's environment): whether a command's program is there to run
     pub path: Option<String>,
+    /// the processes the agent's session runs under (sent with reman_running): a server below one
+    /// of them is the agent's own
+    pub session_pids: Vec<u32>,
 }
 
 /// The project the agent launched us in: the repo around that folder (a git worktree counts as
@@ -83,13 +86,14 @@ impl Policy {
             strict: std::env::var("REMAN_MCP_STRICT_SECRETS").map(|v| v == "1").unwrap_or(st.strict_secrets),
             old_history: std::env::var("REMAN_MCP_OLD_HISTORY").map(|v| v == "1").unwrap_or(st.share_old_history),
             path: std::env::var("PATH").ok(),
+            session_pids: Vec::new(),
         }
     }
 
     /// The HTTP endpoint has no per-agent env: config.json only (no roots configured = sees nothing).
     pub fn from_settings() -> Self {
         let st = crate::settings::load();
-        Self { roots: st.mcp_roots.iter().map(|r| config::norm_path(r)).collect(), allow_global: false, strict: st.strict_secrets, old_history: st.share_old_history, project: None, path: None }
+        Self { roots: st.mcp_roots.iter().map(|r| config::norm_path(r)).collect(), allow_global: false, strict: st.strict_secrets, old_history: st.share_old_history, project: None, path: None, session_pids: Vec::new() }
     }
 
     pub fn from_req(req: &Value) -> Self {
@@ -100,6 +104,7 @@ impl Policy {
             old_history: req.get("old_history").and_then(Value::as_bool).unwrap_or(false),
             project: req.get("project").and_then(Value::as_str).map(config::norm_path),
             path: req.get("path").and_then(Value::as_str).map(str::to_string),
+            session_pids: req.get("session_pids").and_then(Value::as_array).map(|a| a.iter().filter_map(|p| p.as_u64().map(|p| p as u32)).collect()).unwrap_or_default(),
         }
     }
 
@@ -239,6 +244,7 @@ fn answer_inner(d: &Daemon, name: &str, args: &Value, pol: &Policy) -> Result<An
     }
     let value = match name {
         "reman_search" => return tool_search(d, args, pol, cwd),
+        "reman_running" => return Ok(tool_running(d, pol, cwd)),
         "reman_recent" | "reman_failures" => {
             let v = tool_recent(d, args, pol, cwd, name == "reman_failures");
             let empty = v.as_array().is_some_and(|a| a.is_empty());
@@ -700,6 +706,114 @@ fn not_found_before(d: &Daemon, prog: &str, pol: &Policy) -> Option<(i64, Option
         })
 }
 
+/// The servers listening right now in the folders this agent may see: port, folder, how long it
+/// has run, what started it, and the command recorded for it. Ports in use elsewhere are listed
+/// as bare numbers, so the agent can pick a free one.
+fn tool_running(d: &Daemon, pol: &Policy, cwd: Option<&str>) -> Answer {
+    use crate::running::{self, Starter};
+    let sep = std::path::MAIN_SEPARATOR;
+    let inside = |f: &str, top: &str| f == top || f.starts_with(&format!("{top}{sep}"));
+    let all = running::listeners();
+    let mut elsewhere: Vec<u16> = Vec::new();
+    // (listener, its folder, the command recorded for it and that command's record)
+    let mut found: Vec<(&running::Listener, String, Option<(String, Value)>)> = Vec::new();
+    {
+        let st = d.store.read();
+        for l in &all {
+            let folder = l.folder().map(|f| config::norm_path(f.trim_end_matches(['\\', '/'])));
+            let Some(folder) = folder.filter(|f| pol.within(Some(f)) && cwd.is_none_or(|c| inside(f, &config::norm_path(c)))) else {
+                // a port someone else holds, by number only; never the OS's own or its
+                // short-lived ones (49152 and up), which nobody picks for a server
+                elsewhere.extend(l.ports.iter().filter(|p| (1024..49152).contains(*p)));
+                continue;
+            };
+            // the command reman recorded that started it: the most specific one its lines ran
+            let lines = running::Lines::of(l);
+            let rec = st
+                .entries
+                .iter()
+                .filter(|e| e.text.len() <= 200 && !e.text.contains('\n') && lines.ran(&e.text))
+                .filter_map(|e| {
+                    let rows = visible(&st, e, pol, Some(&folder));
+                    (!rows.is_empty()).then(|| (e, sum(&st, &rows)))
+                })
+                .max_by_key(|(e, s)| (e.text.split_whitespace().count(), s.runs))
+                .and_then(|(e, s)| {
+                    let shown = pol.safe(&e.text)?;
+                    Some((e.text.clone(), json!({"command": shown, "runs": s.runs, "last_run": config::age(s.last_used), "actor": who_ran(&s)})))
+                });
+            found.push((l, folder, rec));
+        }
+    }
+    let mut servers: Vec<(bool, i64, Value)> = Vec::new();
+    for (l, folder, rec) in found {
+        // who started it: this session (its own process tree), else the recorded run that began
+        // when the process did (an agent's background command outlives the shell that ran it),
+        // else the nearest ancestor that says
+        let mine = l.ancestors.iter().any(|a| pol.session_pids.contains(&a.pid));
+        let run_by = if mine { None } else { rec.as_ref().and_then(|(text, _)| run_started_at(d, text, &folder, l.proc.started)) };
+        const YOURS: &str = "You started this in this session: stop it when you are done with it.";
+        const USERS: &str = "The user started this. Don't stop or restart it; use it. If it must change, ask the user.";
+        const AGENTS: &str = "An agent started this (another session, or you earlier). Stop it only if you started it; otherwise use it, or ask the user.";
+        const OTHERS: &str = "You didn't start this. Don't stop it without asking the user; use it if it is the server you need.";
+        let (kind, by, advice) = match (mine, run_by.as_deref()) {
+            (true, _) => ("this_session", "you (this agent session)".to_string(), YOURS),
+            (_, Some(a)) if a.starts_with("agent") => ("agent", format!("an agent ({}), as reman recorded it", actor_name(Some(a))), AGENTS),
+            (_, Some(_)) => ("user", "the user, as reman recorded it".to_string(), USERS),
+            _ => {
+                let who = running::starter(l);
+                let advice = match &who {
+                    Starter::Terminal => USERS,
+                    Starter::Agent(..) => AGENTS,
+                    _ => OTHERS,
+                };
+                (who.kind(), who.label(), advice)
+            }
+        };
+        let port = l.ports.first().copied().unwrap_or(0);
+        let mut v = json!({"ports": l.ports, "url": format!("http://localhost:{port}"), "folder": folder, "pid": l.proc.pid,
+            "program": l.proc.name, "running_for": config::age(l.proc.started).trim_end_matches(" ago").to_string(),
+            "started_by": by, "started_by_kind": kind, "advice": advice, "generated": false});
+        let line: String = l.proc.cmd.chars().take(300).collect();
+        if let Some(c) = pol.safe(&line).filter(|c| !c.is_empty()) {
+            v["process"] = json!(c);
+        }
+        if let Some((_, r)) = rec {
+            v["recorded_as"] = r;
+        }
+        let here = pol.project.as_deref().is_some_and(|p| inside(&folder, p));
+        servers.push((here, -l.proc.started, v));
+    }
+    // the agent's own project first, then the newest
+    servers.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
+    elsewhere.sort();
+    elsewhere.dedup();
+    let note = servers.is_empty().then(|| {
+        let place = cwd.map(|c| format!("in {c}")).unwrap_or_else(|| "in the folders shared with this agent".into());
+        if all.is_empty() { "No process is listening on a TCP port (or this system won't say which).".to_string() } else { format!("No server is listening {place}.") }
+    });
+    Answer { value: json!({"servers": servers.into_iter().map(|s| s.2).collect::<Vec<_>>(), "other_ports_in_use": elsewhere, "generated": false}), note }
+}
+
+/// Who ran `command` in `folder` in the run that began when a process did (`started`, unix
+/// seconds): a run is recorded as it ends, so its start is its time less how long it took.
+fn run_started_at(d: &Daemon, command: &str, folder: &str, started: i64) -> Option<String> {
+    const SLACK: i64 = 15;
+    let conn = d.db.lock();
+    let mut q = conn
+        .prepare(
+            "SELECT e.actor, e.cwd, e.ts, e.duration_ms FROM executions e JOIN commands c ON c.id = e.command_id
+             WHERE c.cmd_text = ?1 AND e.ts >= ?2 ORDER BY e.ts LIMIT 50",
+        )
+        .ok()?;
+    let rows: Vec<(Option<String>, Option<String>, i64, Option<i64>)> =
+        q.query_map(rusqlite::params![command, started - SLACK], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))).ok()?.filter_map(|r| r.ok()).collect();
+    rows.into_iter()
+        .filter(|(_, c, ..)| folder_eq(c.as_deref().map(|c| c.trim_end_matches(['\\', '/'])), folder))
+        .find(|(_, _, ts, ms)| (ts - ms.unwrap_or(0) / 1000 - started).abs() <= SLACK)
+        .map(|(a, ..)| a.unwrap_or_else(|| "human".into()))
+}
+
 fn tool_flows(d: &Daemon, a: &Value, pol: &Policy) -> Value {
     let n = arg_n(a, "n", 15);
     let st = d.store.read();
@@ -803,6 +917,8 @@ pub fn tools() -> Value {
                          "error": {"type": "string", "description": "What the command printed when it failed. reman then also offers what fixed a DIFFERENT command that failed with the same error."}}, "required": ["failed_command"]}},
         {"name": "reman_check", "description": "Vet a command before running it: has this user run it, did it work, who ran it, where. Verdicts: verified | failed | mixed | ran_unknown | never_run (with nearest known commands). When the program it runs is not installed on this machine, `missing` says so: do the task another way instead of retrying it.",
          "inputSchema": {"type": "object", "properties": {"command": {"type": "string"}, "cwd": cwd}, "required": ["command"]}},
+        {"name": "reman_running", "description": "What is running RIGHT NOW: the servers listening on a port in the folders shared with you, each with its port and url, folder, how long it has run, what started it (started_by: you in this session, another agent, the user in a terminal, an editor, the Claude app) and the command reman recorded for it (recorded_as). Call it before starting, restarting or stopping a dev server: use one that is already up, never stop one you didn't start without asking the user, and pick a port that is not in other_ports_in_use. It never stops anything.",
+         "inputSchema": {"type": "object", "properties": {"cwd": {"type": "string", "description": "Only servers running in this folder or below it. It must be a folder the user shared with agents."}}}},
         {"name": "reman_flows", "description": "Recurring command SEQUENCES the user runs (workflow memory), e.g. add -> commit -> push.",
          "inputSchema": {"type": "object", "properties": {"cwd": cwd, "n": {"type": "integer", "default": 15}}}},
         {"name": "reman_next", "description": "Predict the user's likely NEXT commands in a folder, from what they usually run after the last (or given) command there.",
@@ -855,7 +971,7 @@ pub fn rpc(msg: &Value, call: &mut dyn FnMut(&str, &Value) -> Result<Value>) -> 
             "protocolVersion": params.get("protocolVersion").and_then(Value::as_str).unwrap_or("2025-06-18"),
             "capabilities": {"tools": {"listChanged": false}},
             "serverInfo": {"name": "reman", "version": config::VERSION},
-            "instructions": "Ground-truth memory of the commands this user really ran (with exit codes, folders, who ran them). New to a project? Call reman_runbook first: one call answers how it is set up, run, tested, built and deployed here. Use it before guessing a command: reman_search the task in a few plain words, naming the tool or framework when you know it (\"astro dev server\", not \"dev server\"), reman_check a command before running it, and after a failure call reman_fixes with the failed command and its error. To see what a command printed when it last ran (the user's test run, an earlier error), call reman_output instead of running it again. An empty answer means nothing is known; read the note that comes with it rather than substituting a loosely similar command. Agents see only folders the user approved; if yours is not, call reman_share_project and the app asks the user to approve it for this session - never run `reman connect` yourself."
+            "instructions": "Ground-truth memory of the commands this user really ran (with exit codes, folders, who ran them). New to a project? Call reman_runbook first: one call answers how it is set up, run, tested, built and deployed here. Before starting, restarting or stopping a server, call reman_running: it says what is already up and who started it. Use it before guessing a command: reman_search the task in a few plain words, naming the tool or framework when you know it (\"astro dev server\", not \"dev server\"), reman_check a command before running it, and after a failure call reman_fixes with the failed command and its error. To see what a command printed when it last ran (the user's test run, an earlier error), call reman_output instead of running it again. An empty answer means nothing is known; read the note that comes with it rather than substituting a loosely similar command. Agents see only folders the user approved; if yours is not, call reman_share_project and the app asks the user to approve it for this session - never run `reman connect` yourself."
         })),
         "ping" => Ok(json!({})),
         "tools/list" => Ok(json!({"tools": tools()})),
@@ -895,8 +1011,12 @@ impl Bridge {
     }
 
     pub fn call(&mut self, tool: &str, args: &Value) -> Result<Value> {
-        let req = json!({"op": "mcp", "tool": tool, "args": args, "roots": self.pol.roots, "project": self.pol.project, "notes": true,
+        let mut req = json!({"op": "mcp", "tool": tool, "args": args, "roots": self.pol.roots, "project": self.pol.project, "notes": true,
                          "allow_global": self.pol.allow_global, "strict": self.pol.strict, "old_history": self.pol.old_history, "path": self.pol.path});
+        // which servers this session started: the processes it runs under, seen from here
+        if tool == "reman_running" {
+            req["session_pids"] = json!(crate::running::session_pids());
+        }
         for attempt in 0..2 {
             if self.client.is_none() {
                 self.client = Some(Client::connect()?);
@@ -1362,7 +1482,7 @@ mod tests {
 
     fn site() -> (&'static str, Policy) {
         let project = if cfg!(windows) { r"D:\site" } else { "/home/u/site" };
-        (project, Policy { roots: vec![], allow_global: false, strict: false, old_history: false, project: Some(config::norm_path(project)), path: None })
+        (project, Policy { roots: vec![], allow_global: false, strict: false, old_history: false, project: Some(config::norm_path(project)), path: None, session_pids: vec![] })
     }
 
     #[test]
@@ -1522,7 +1642,7 @@ mod tests {
         } else {
             ("/home/u/Work", "/home/u/Work/api", "/home/u/WorkEvil", "/home/u")
         };
-        let p = Policy { roots: vec![config::norm_path(root)], allow_global: false, strict: false, old_history: false, project: None, path: None };
+        let p = Policy { roots: vec![config::norm_path(root)], allow_global: false, strict: false, old_history: false, project: None, path: None, session_pids: vec![] };
         assert!(p.within(Some(root)));
         assert!(p.within(Some(sub)));
         assert!(!p.within(Some(evil)));
@@ -1539,7 +1659,7 @@ mod tests {
         st.apply_run(2, true, &mk("docker ps", Some("unknown")), None);
         st.apply_run(3, true, &mk("python train.py", None), None);
         st.apply_run(4, true, &mk("docker ps", Some(r"C:\elsewhere")), None);
-        let off = Policy { roots: vec![config::norm_path(r"D:\P")], allow_global: false, strict: false, old_history: false, project: None, path: None };
+        let off = Policy { roots: vec![config::norm_path(r"D:\P")], allow_global: false, strict: false, old_history: false, project: None, path: None, session_pids: vec![] };
         let on = Policy { old_history: true, ..off.clone() };
         let e = |t: &str| st.entry(t).unwrap().1;
         assert!(visible(&st, e("docker ps"), &off, None).is_empty());
@@ -1561,7 +1681,7 @@ mod rpc_tests {
         assert_eq!(init["result"]["protocolVersion"], "2025-03-26");
         assert!(rpc(&json!({"jsonrpc": "2.0", "method": "notifications/initialized"}), &mut call).is_none());
         let list = rpc(&json!({"jsonrpc": "2.0", "id": 2, "method": "tools/list"}), &mut call).unwrap();
-        assert_eq!(list["result"]["tools"].as_array().unwrap().len(), 10);
+        assert_eq!(list["result"]["tools"].as_array().unwrap().len(), 11);
         let res = rpc(&json!({"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {"name": "reman_next", "arguments": {}}}), &mut call).unwrap();
         assert_eq!(res["result"]["structuredContent"]["result"][0]["command"], "reman_next");
         assert_eq!(rpc(&json!({"jsonrpc": "2.0", "id": 4, "method": "nope"}), &mut call).unwrap()["error"]["code"], -32601);

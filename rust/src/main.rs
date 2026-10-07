@@ -26,6 +26,7 @@ mod pty;
 mod keys;
 mod predict;
 mod redact;
+mod running;
 mod search;
 mod settings;
 mod store;
