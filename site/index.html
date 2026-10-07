@@ -744,7 +744,7 @@
       <h2>Your agents stop <em>guessing</em> commands.</h2>
       <p>Claude Code, Codex and Cursor usually write commands from scratch. With reman they ask first, and reuse the ones that already work on your machine. reman never generates a command; every result is one that really ran.</p>
       <ul class="notes">
-        <li>Connected automatically at install: nine MCP tools, plus a local HTTP endpoint for SDKs and scripts. <code>reman_output</code> tells an agent what a command printed last time, instead of running it again. <code>reman_runbook</code> tells an agent how the project is run before it guesses.</li>
+        <li>Connected automatically at install: ten MCP tools, plus a local HTTP endpoint for SDKs and scripts. <code>reman_output</code> tells an agent what a command printed last time, instead of running it again. <code>reman_runbook</code> tells an agent how the project is run before it guesses. <code>reman_running</code> tells it which servers are already up and who started each, so it uses your dev server instead of killing it. <code>reman_check</code> says when a tool isn't installed here, so it doesn't retry it.</li>
         <li>Agents see no history until you approve a folder, not even the project they are working in. An agent cannot approve one for itself.</li>
         <li>No close match means an empty answer, not the least-bad guess.</li>
         <li>What Claude Code and Codex run is recorded too, with how long it took and what a failure printed.</li>
@@ -889,7 +889,7 @@
         <tr><td><b>Runbook</b></td><td>How a project is run, from the commands that worked there.</td></tr>
         <tr><td><b>What it printed</b></td><td><code>reman shell</code> keeps your commands' output; <code>reman output</code> finds it.</td></tr>
         <tr class="sub"><td colspan="2">Your agents</td></tr>
-        <tr><td><b>Real commands only</b></td><td>Claude Code, Codex, Cursor and others ask before guessing; nine tools over MCP and HTTP.</td></tr>
+        <tr><td><b>Real commands only</b></td><td>Claude Code, Codex, Cursor and others ask before guessing; ten tools over MCP and HTTP.</td></tr>
         <tr><td><b>Only what you share</b></td><td>No history until you approve a folder. An agent can't approve one for itself.</td></tr>
         <tr><td><b>Loops broken</b></td><td>An agent retrying a command that keeps failing the same way is told to stop.</td></tr>
         <tr><td><b>Sessions</b></td><td>Find the agent session that did it, and reopen it where it worked.</td></tr>
