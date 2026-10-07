@@ -28,6 +28,8 @@ pub struct Policy {
     /// the project the agent works in (the repo it launched us in). Visible only when the user
     /// shared it; then its commands rank first. When not, answers say how to ask for it.
     pub project: Option<String>,
+    /// the agent's PATH (its bridge's environment): whether a command's program is there to run
+    pub path: Option<String>,
 }
 
 /// The project the agent launched us in: the repo around that folder (a git worktree counts as
@@ -80,13 +82,14 @@ impl Policy {
             allow_global: std::env::var("REMAN_MCP_ALLOW_GLOBAL").as_deref() == Ok("1"),
             strict: std::env::var("REMAN_MCP_STRICT_SECRETS").map(|v| v == "1").unwrap_or(st.strict_secrets),
             old_history: std::env::var("REMAN_MCP_OLD_HISTORY").map(|v| v == "1").unwrap_or(st.share_old_history),
+            path: std::env::var("PATH").ok(),
         }
     }
 
     /// The HTTP endpoint has no per-agent env: config.json only (no roots configured = sees nothing).
     pub fn from_settings() -> Self {
         let st = crate::settings::load();
-        Self { roots: st.mcp_roots.iter().map(|r| config::norm_path(r)).collect(), allow_global: false, strict: st.strict_secrets, old_history: st.share_old_history, project: None }
+        Self { roots: st.mcp_roots.iter().map(|r| config::norm_path(r)).collect(), allow_global: false, strict: st.strict_secrets, old_history: st.share_old_history, project: None, path: None }
     }
 
     pub fn from_req(req: &Value) -> Self {
@@ -96,6 +99,7 @@ impl Policy {
             strict: req.get("strict").and_then(Value::as_bool).unwrap_or(false),
             old_history: req.get("old_history").and_then(Value::as_bool).unwrap_or(false),
             project: req.get("project").and_then(Value::as_str).map(config::norm_path),
+            path: req.get("path").and_then(Value::as_str).map(str::to_string),
         }
     }
 
@@ -340,7 +344,7 @@ fn tool_search(d: &Daemon, a: &Value, pol: &Policy, cwd: Option<&str>) -> Result
     res.sort_by(|a, b| (prefer_human && a.1 == 0).cmp(&(prefer_human && b.1 == 0)).then(b.2.total_cmp(&a.2)));
     let mut notes: Vec<String> = Vec::new();
     if res.is_empty() {
-        notes.push(format!("Nothing close to \"{intent}\" in the history this agent can see. Do not take a loosely similar command as the answer; check the project's own scripts and docs."));
+        notes.push(format!("Nothing close to \"{intent}\" in the history this agent can see. Do not take a loosely similar command as the answer; call reman_runbook for how this project is run (set up, run, test, build, deploy), or check the project's own scripts and docs."));
         // what the agent's folder does have that is loosely related, marked as such
         if let Some(f) = home.as_deref() {
             let loose: Vec<String> = out
@@ -505,7 +509,12 @@ fn tool_check(d: &Daemon, command: &str, pol: &Policy, cwd: Option<&str>) -> Res
             (sum(&st, &rows), folders, rows.len())
         })
     };
+    let missing = missing_programs(d, cmd, pol);
     let Some((s, folders, nrows)) = found.filter(|f| f.2 > 0) else {
+        if !missing.is_empty() {
+            return Ok(json!({"command": pol.safe(cmd).unwrap_or_default(), "verdict": "never_run", "run_count": 0,
+                             "advice": missing_advice(&missing), "missing": missing, "generated": false}));
+        }
         let mut similar: Vec<Value> = tool_fixes(d, cmd, pol, cwd, 3)?.as_array().cloned().unwrap_or_default();
         if similar.is_empty() && cwd.is_some() {
             similar = tool_fixes(d, cmd, pol, None, 3)?.as_array().cloned().unwrap_or_default();
@@ -536,6 +545,11 @@ fn tool_check(d: &Daemon, command: &str, pol: &Policy, cwd: Option<&str>) -> Res
         "actor": actor, "generated": false});
     if cwd.is_none() {
         out["folders"] = json!(folders);
+    }
+    if !missing.is_empty() {
+        out["advice"] = json!(missing_advice(&missing));
+        out["missing"] = json!(missing);
+        return Ok(out);
     }
     // how long it usually takes when it works (here, else anywhere): an agent's timeout
     let typical = {
@@ -606,6 +620,84 @@ fn tool_check(d: &Daemon, command: &str, pol: &Policy, cwd: Option<&str>) -> Res
         }
     }
     Ok(out)
+}
+
+/// The programs `cmd` runs that are not on this machine: not on the agent's PATH, and never run
+/// successfully here (so not a shell alias or function of the user's either). With each, the last
+/// time it failed for not being there, when that ran where this agent may look.
+fn missing_programs(d: &Daemon, cmd: &str, pol: &Policy) -> Vec<Value> {
+    let progs: Vec<String> = crate::onpath::programs(cmd).into_iter().filter(|p| !crate::onpath::on_path(p, pol.path.as_deref())).collect();
+    if progs.is_empty() {
+        return Vec::new();
+    }
+    let worked: Vec<bool> = {
+        let st = d.store.read();
+        progs
+            .iter()
+            .map(|p| {
+                let lp = p.to_ascii_lowercase();
+                st.entries.iter().any(|e| {
+                    e.rows.iter().any(|r| r.ok > 0)
+                        && e.text.to_ascii_lowercase().contains(&lp)
+                        && crate::onpath::programs(&e.text).iter().any(|q| q.eq_ignore_ascii_case(p))
+                })
+            })
+            .collect()
+    };
+    progs
+        .into_iter()
+        .zip(worked)
+        .filter(|(_, w)| !w)
+        .map(|(p, _)| {
+            let mut v = json!({"program": p});
+            if let Some((ts, actor, err)) = not_found_before(d, &p, pol) {
+                v["last_not_found"] = json!({"when": config::age(ts), "by": actor_name(actor.as_deref()), "error": err});
+            }
+            v
+        })
+        .collect()
+}
+
+fn missing_advice(missing: &[Value]) -> String {
+    let names: Vec<String> = missing.iter().filter_map(|m| m["program"].as_str()).map(|p| format!("`{p}`")).collect();
+    let (them, is) = if names.len() == 1 { ("it", "is") } else { ("them", "are") };
+    format!(
+        "{} {is} not installed on this machine: not on PATH, and never run successfully here. Don't run or retry this command, and don't wait on it; do the task another way (another tool, a plain HTTP request), or ask the user to install {them}.",
+        names.join(", ")
+    )
+}
+
+fn actor_name(actor: Option<&str>) -> &str {
+    match actor {
+        Some(a) if a.starts_with("agent") => a.trim_start_matches("agent:"),
+        _ => "user",
+    }
+}
+
+/// The last run, in a folder this agent may see, that failed because `prog` wasn't there (exit
+/// 127 or 9009, or an error saying so): when, who ran it, and its error line.
+fn not_found_before(d: &Daemon, prog: &str, pol: &Policy) -> Option<(i64, Option<String>, Option<String>)> {
+    #[allow(clippy::type_complexity)]
+    let rows: Vec<(i64, Option<String>, Option<String>, Option<i64>, Option<String>, String)> = {
+        let conn = d.db.lock();
+        let mut q = conn
+            .prepare(
+                "SELECT e.ts, e.actor, e.cwd, e.exit, e.err, c.cmd_text FROM executions e JOIN commands c ON c.id = e.command_id
+                 WHERE e.exit IN (127, 9009) OR e.err LIKE '%not found%' OR e.err LIKE '%not recognized%'
+                 ORDER BY e.ts DESC LIMIT 200",
+            )
+            .ok()?;
+        q.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?))).ok()?.filter_map(|r| r.ok()).collect()
+    };
+    let lp = prog.to_ascii_lowercase();
+    rows.into_iter()
+        .filter(|(_, _, cwd, ..)| pol.within(cwd.as_deref()))
+        .filter(|(_, _, _, _, _, text)| crate::onpath::programs(text).iter().any(|q| q.eq_ignore_ascii_case(prog)))
+        .find_map(|(ts, actor, _, exit, err, _)| {
+            // the error line that names it; a bare 127 / 9009 says it on its own
+            let line = err.as_deref().and_then(|e| e.lines().find(|l| l.to_ascii_lowercase().contains(&lp)).map(str::to_string));
+            (line.is_some() || matches!(exit, Some(127 | 9009))).then(|| (ts, actor, line.and_then(|l| pol.safe(&l))))
+        })
 }
 
 fn tool_flows(d: &Daemon, a: &Value, pol: &Policy) -> Value {
@@ -709,7 +801,7 @@ pub fn tools() -> Value {
         {"name": "reman_fixes", "description": "For a failed command: first the PROVEN fixes (what the user actually ran next that worked), then similar commands from their successes. Real commands only.",
          "inputSchema": {"type": "object", "properties": {"failed_command": {"type": "string"}, "cwd": cwd,
                          "error": {"type": "string", "description": "What the command printed when it failed. reman then also offers what fixed a DIFFERENT command that failed with the same error."}}, "required": ["failed_command"]}},
-        {"name": "reman_check", "description": "Vet a command before running it: has this user run it, did it work, who ran it, where. Verdicts: verified | failed | mixed | ran_unknown | never_run (with nearest known commands).",
+        {"name": "reman_check", "description": "Vet a command before running it: has this user run it, did it work, who ran it, where. Verdicts: verified | failed | mixed | ran_unknown | never_run (with nearest known commands). When the program it runs is not installed on this machine, `missing` says so: do the task another way instead of retrying it.",
          "inputSchema": {"type": "object", "properties": {"command": {"type": "string"}, "cwd": cwd}, "required": ["command"]}},
         {"name": "reman_flows", "description": "Recurring command SEQUENCES the user runs (workflow memory), e.g. add -> commit -> push.",
          "inputSchema": {"type": "object", "properties": {"cwd": cwd, "n": {"type": "integer", "default": 15}}}},
@@ -763,7 +855,7 @@ pub fn rpc(msg: &Value, call: &mut dyn FnMut(&str, &Value) -> Result<Value>) -> 
             "protocolVersion": params.get("protocolVersion").and_then(Value::as_str).unwrap_or("2025-06-18"),
             "capabilities": {"tools": {"listChanged": false}},
             "serverInfo": {"name": "reman", "version": config::VERSION},
-            "instructions": "Ground-truth memory of the commands this user really ran (with exit codes, folders, who ran them). Use it before guessing a command: reman_search the task in a few plain words, naming the tool or framework when you know it (\"astro dev server\", not \"dev server\"), reman_check a command before running it, and after a failure call reman_fixes with the failed command and its error. To see what a command printed when it last ran (the user's test run, an earlier error), call reman_output instead of running it again. An empty answer means nothing is known; read the note that comes with it rather than substituting a loosely similar command. Agents see only folders the user approved; if yours is not, call reman_share_project and the app asks the user to approve it for this session - never run `reman connect` yourself."
+            "instructions": "Ground-truth memory of the commands this user really ran (with exit codes, folders, who ran them). New to a project? Call reman_runbook first: one call answers how it is set up, run, tested, built and deployed here. Use it before guessing a command: reman_search the task in a few plain words, naming the tool or framework when you know it (\"astro dev server\", not \"dev server\"), reman_check a command before running it, and after a failure call reman_fixes with the failed command and its error. To see what a command printed when it last ran (the user's test run, an earlier error), call reman_output instead of running it again. An empty answer means nothing is known; read the note that comes with it rather than substituting a loosely similar command. Agents see only folders the user approved; if yours is not, call reman_share_project and the app asks the user to approve it for this session - never run `reman connect` yourself."
         })),
         "ping" => Ok(json!({})),
         "tools/list" => Ok(json!({"tools": tools()})),
@@ -804,7 +896,7 @@ impl Bridge {
 
     pub fn call(&mut self, tool: &str, args: &Value) -> Result<Value> {
         let req = json!({"op": "mcp", "tool": tool, "args": args, "roots": self.pol.roots, "project": self.pol.project, "notes": true,
-                         "allow_global": self.pol.allow_global, "strict": self.pol.strict, "old_history": self.pol.old_history});
+                         "allow_global": self.pol.allow_global, "strict": self.pol.strict, "old_history": self.pol.old_history, "path": self.pol.path});
         for attempt in 0..2 {
             if self.client.is_none() {
                 self.client = Some(Client::connect()?);
@@ -1270,7 +1362,7 @@ mod tests {
 
     fn site() -> (&'static str, Policy) {
         let project = if cfg!(windows) { r"D:\site" } else { "/home/u/site" };
-        (project, Policy { roots: vec![], allow_global: false, strict: false, old_history: false, project: Some(config::norm_path(project)) })
+        (project, Policy { roots: vec![], allow_global: false, strict: false, old_history: false, project: Some(config::norm_path(project)), path: None })
     }
 
     #[test]
@@ -1430,7 +1522,7 @@ mod tests {
         } else {
             ("/home/u/Work", "/home/u/Work/api", "/home/u/WorkEvil", "/home/u")
         };
-        let p = Policy { roots: vec![config::norm_path(root)], allow_global: false, strict: false, old_history: false, project: None };
+        let p = Policy { roots: vec![config::norm_path(root)], allow_global: false, strict: false, old_history: false, project: None, path: None };
         assert!(p.within(Some(root)));
         assert!(p.within(Some(sub)));
         assert!(!p.within(Some(evil)));
@@ -1447,7 +1539,7 @@ mod tests {
         st.apply_run(2, true, &mk("docker ps", Some("unknown")), None);
         st.apply_run(3, true, &mk("python train.py", None), None);
         st.apply_run(4, true, &mk("docker ps", Some(r"C:\elsewhere")), None);
-        let off = Policy { roots: vec![config::norm_path(r"D:\P")], allow_global: false, strict: false, old_history: false, project: None };
+        let off = Policy { roots: vec![config::norm_path(r"D:\P")], allow_global: false, strict: false, old_history: false, project: None, path: None };
         let on = Policy { old_history: true, ..off.clone() };
         let e = |t: &str| st.entry(t).unwrap().1;
         assert!(visible(&st, e("docker ps"), &off, None).is_empty());

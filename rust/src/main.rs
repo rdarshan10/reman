@@ -20,6 +20,7 @@ mod import;
 mod insight;
 mod mcp;
 mod notify;
+mod onpath;
 mod output;
 mod pty;
 mod keys;

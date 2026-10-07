@@ -570,6 +570,25 @@ def run(tmp):
     out = cli("sessions", "migration")
     check("reman sessions prints it", "claude-code" in out and "alembic upgrade head" in out and f"claude --resume {s1}" in out, out)
 
+    # --- a program not on this machine -------------------------------------------------------
+    print("not installed")
+    empty_path, tool_path = os.path.join(tmp, "path-empty"), os.path.join(tmp, "path-gh")
+    os.makedirs(empty_path)
+    os.makedirs(tool_path)
+    open(os.path.join(tool_path, "gh.exe" if os.name == "nt" else "gh"), "w").close()
+    call({"op": "ingest", "command": "gh pr checks 12", "exit": 127, "cwd": API, "session": "s-gh", "actor": "agent:claude-code",
+          "ts": NOW - 2 * DAY, "error": "bash: gh: command not found"})
+    c = call({"op": "mcp", "tool": "reman_check", "args": {"command": "gh run list", "cwd": API}, "allow_global": True, "path": empty_path})
+    miss = (c.get("missing") or [{}])[0]
+    check("reman_check: a program not on PATH is missing", miss.get("program") == "gh" and "not installed on this machine" in c.get("advice", ""), c)
+    check("...with the last time it wasn't found", (miss.get("last_not_found") or {}).get("by") == "claude-code" and "command not found" in (miss.get("last_not_found") or {}).get("error", ""), c)
+    c = call({"op": "mcp", "tool": "reman_check", "args": {"command": "gh run list", "cwd": API}, "allow_global": True, "path": tool_path})
+    check("installed since (on PATH now): nothing said", "missing" not in c, c)
+    c = call({"op": "mcp", "tool": "reman_check", "args": {"command": "alembic upgrade head", "cwd": API}, "allow_global": True, "path": empty_path})
+    check("not on PATH but it has worked here (an alias, another PATH): not missing", "missing" not in c and c.get("verdict") == "verified", c)
+    c = call({"op": "mcp", "tool": "reman_check", "args": {"command": "Get-ChildItem -Recurse; echo done", "cwd": API}, "allow_global": True, "path": empty_path})
+    check("what the shell runs itself is never missing", "missing" not in c, c)
+
 
 if __name__ == "__main__":
     sys.exit(main())

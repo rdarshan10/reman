@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+### For agents
+
+- **Start with the runbook.** reman's instructions now tell an agent new to a project to call `reman_runbook` first: one call answers how it is set up, run, tested, built and deployed. An empty `reman_search` points there too.
+- **A program that isn't installed.** `reman_check` says when a command's program is not on this machine (`missing`): not on the agent's PATH, and never run successfully here, with the last time it failed for not being found. The agent does the task another way instead of retrying it or waiting on it. What a shell runs itself (`cd`, `Get-ChildItem`, PowerShell's `ls`) and the user's own aliases (they have worked before) are never called missing.
+
 ## v0.3.2
 
 ### Changes you'll notice
