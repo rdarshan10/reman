@@ -38,6 +38,8 @@ enum Row {
     Ai(bool),
     /// a notification when a long command of yours finishes: after this many seconds, or never
     DoneAlert(Option<u64>),
+    /// new versions: "notify", "auto" or "off", and a newer version a check already found
+    Updates { mode: &'static str, waiting: Option<String> },
     /// the finder: lines under the prompt, or None for the whole screen
     FinderHeight(Option<u16>),
     FinderVim(bool),
@@ -77,6 +79,7 @@ impl Row {
             Row::Strict(_) => "Strict mode withholds any command that still looks like it holds a secret after redaction.".into(),
             Row::OldHistory(_) => "Old, imported history has no folder. When on, agents also get its generic commands (no paths, quotes or hosts).".into(),
             Row::Secrets(_) => "↵ cycles: mask the value (`export API_TOKEN=***`) · drop the command · keep as typed, so your finder shows it whole. Agents always get secrets masked. `reman scrub` cleans older history.".into(),
+            Row::Updates { .. } => "↵ cycles: tell me · install on their own · never check. reman asks GitHub once a day for a new version; installs check its SHA-256 first. `reman update` installs one now.".into(),
             Row::DoneAlert(_) => "↵ cycles: after 1 minute · after 5 minutes · never. A desktop notification when a command of yours that ran that long finishes, with how long it took.".into(),
             Row::FinderHeight(_) => "↵ cycles: 20 lines under the prompt · 30 lines · the whole screen. Where the finder (↑, Tab, Ctrl+R) opens.".into(),
             Row::FinderVim(_) => "↵ switches the finder's keys: as in a text box, or vim (Esc for normal mode: j k move, dd forgets, i types, q closes).".into(),
@@ -212,8 +215,9 @@ fn build(draft: &KeyDraft, saved: &KeyDraft) -> Vec<Row> {
     let (nc, nf) = (st.ignore_commands.len(), st.ignore_folders.len());
     r.push(Row::Info { label: "never kept", value: if nc + nf == 0 { "commands typed with a leading space; add patterns as ignore_commands / ignore_folders in config.json".into() } else { format!("a leading space, {nc} command pattern(s), {nf} folder pattern(s) (config.json)") } });
 
-    r.push(Row::Header("Alerts"));
+    r.push(Row::Header("Alerts and updates"));
     r.push(Row::DoneAlert(st.done_alert_after()));
+    r.push(Row::Updates { mode: st.updates_mode(), waiting: crate::update::waiting() });
 
     r.push(Row::Header("Finder"));
     r.push(Row::FinderHeight(st.finder_lines()));
@@ -358,6 +362,20 @@ fn act(row: &Row) -> Result<(String, Color)> {
             st.secrets = (next != "mask").then(|| next.to_string());
             settings::save(&st)?;
             (msg.to_string(), c)
+        }
+        Row::Updates { mode: "notify", .. } if connect::run_by_agent().is_some() => {
+            (connect::refuse_if_agent("Turning on automatic updates").unwrap_err().to_string(), BAD)
+        }
+        Row::Updates { mode, .. } => {
+            let mut st = settings::load();
+            let (next, msg) = match *mode {
+                "notify" => (Some("auto"), "new versions install on their own, after their SHA-256 is checked"),
+                "auto" => (Some("off"), "reman no longer checks for new versions; `reman update` still installs one"),
+                _ => (None, "reman tells you when a new version is out"),
+            };
+            st.updates = next.map(String::from);
+            settings::save(&st)?;
+            (msg.to_string(), OK)
         }
         Row::DoneAlert(after) => {
             let mut st = settings::load();
@@ -544,6 +562,19 @@ fn row_line(row: &Row, sel: bool, w: usize) -> Line<'static> {
             },
         ]),
         Row::Ai(on) => Line::from(vec![bar, check(*on), Span::styled("Use a language model to arrange runbooks", name_st)]),
+        Row::Updates { mode, waiting } => Line::from(vec![
+            bar,
+            Span::styled("Updates: ", name_st),
+            match *mode {
+                "auto" => state("install them on their own".into(), OK),
+                "off" => state("never check".into(), MUTED),
+                _ => state("tell me".into(), OK),
+            },
+            match waiting {
+                Some(v) => state(format!("   {v} is out: reman update"), ACCENT),
+                None => Span::raw(""),
+            },
+        ]),
         Row::DoneAlert(after) => Line::from(vec![
             bar,
             Span::styled("Done alerts: ", name_st),

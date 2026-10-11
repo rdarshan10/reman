@@ -59,7 +59,7 @@ reman stats week` (or `month`, `year`, `yesterday`, a date) counts what ran then
 - **Agents stuck in a loop.** When Claude Code runs a command that fails the same way for the third time in a session, its hook tells Claude right there: running it again unchanged will fail again, and what fixed that error before, if anything did. `reman_check` says the same about agents' last half hour in a folder. `reman agents` reports what each agent ran this week: runs, failures, and the commands it retried 4+ times while they failed the same way each time.
 - **What's running, and whose it is.** Before an agent starts, restarts or stops a server, `reman_running` tells it what is already up in its folders: the port and url, how long it has run, the command you ran to start it, and who did: you in a terminal, this agent session, another agent, an editor, or the Claude app's preview pane. So an agent uses your dev server instead of killing it or starting a second one, and picks a port nobody holds. It reads the process tree, and where the shell that started a server is gone, the run reman recorded when it began. It only reads; it never stops anything.
 - **A tool that isn't there.** `reman_check` tells an agent when a command's program isn't installed on this machine (not on its PATH, and never run successfully here), with the last time it failed for that, so the agent does the task another way instead of retrying it.
-- **Private by default.** Everything stays in `~/.reman` on your machine. Secrets are masked before anything is saved (`export API_TOKEN=***`), along with the token shapes of AWS, GitHub, GitLab, Slack, Stripe, npm, Netlify and Pulumi wherever they appear, and a command whose secret can't be located isn't saved at all. Commands typed with a leading space are never recorded, nor anything matching your `ignore_commands` / `ignore_folders` patterns; `Del Del` in the finder forgets one everywhere. `reman scrub` masks secrets in history saved before. If you'd rather see your own commands whole, set secrets to *keep as typed* in `reman settings`: they are saved as you typed them, and agents still get them masked.
+- **Private by default.** Everything stays in `~/.reman` on your machine. The only thing reman sends anywhere is a daily question to GitHub about new versions (no history, nothing about you), which `reman settings` can turn off. Secrets are masked before anything is saved (`export API_TOKEN=***`), along with the token shapes of AWS, GitHub, GitLab, Slack, Stripe, npm, Netlify and Pulumi wherever they appear, and a command whose secret can't be located isn't saved at all. Commands typed with a leading space are never recorded, nor anything matching your `ignore_commands` / `ignore_folders` patterns; `Del Del` in the finder forgets one everywhere. `reman scrub` masks secrets in history saved before. If you'd rather see your own commands whole, set secrets to *keep as typed* in `reman settings`: they are saved as you typed them, and agents still get them masked.
 
 ## Install
 
@@ -108,6 +108,18 @@ cd reman/rust
 cargo build --release
 ./target/release/reman setup
 ```
+
+### Updates
+
+```sh
+reman update               # install the latest release now
+reman update --check       # only say whether one is out
+reman update --auto on     # from now on, install new versions on their own (off: just tell me)
+```
+
+Once a day reman asks GitHub whether a new version is out, and a desktop notification says so, once per version. With `--auto on` it installs it instead, and tells you it did. `reman settings` has the same choice, plus *never check*, which keeps reman off the network entirely.
+
+Every update is checked before anything runs. Each release's `SHA256SUMS.txt` is signed with reman's release key (Ed25519), whose public half is built into reman, so a release that wasn't signed with it, or a file changed after signing, is refused. The archive must then match its signed checksum. Only a newer version is installed, never an older one. Of GitHub's answer only the version number is used, and every download address is built by reman itself, over https only. An AI agent can't turn automatic updates on.
 
 ### Uninstall
 
@@ -168,6 +180,7 @@ One page for everything setup configured. Every change is saved as you make it:
 - **Coding tools:** connect or disconnect each one with Enter, and turn the local HTTP endpoint (for SDKs and scripts) on or off.
 - **What agents can see:** share or unshare folders. Your busiest folders are suggested, with their run counts, and `a` types in any other folder.
 - **Privacy:** secrets in commands (mask the value, drop the command, or keep as typed for you while agents still get them masked), strict secret redaction for agents, and whether generic commands from old, folder-less history are shared.
+- **Updates:** tell me when a new version is out (the default), install them on their own, or never check.
 - **Finder:** where it opens (20 or 30 lines under the prompt, or the whole screen), whether it lists agents' commands from the start, and vim keys.
 - **Keys:** every key reman takes, in your shell and in the finder. Press Enter on one and then the new key, `Del` to turn it off (the key does what it did before reman), `r` for the preset's key. Presets: *standard*, *gentle* (reman leaves ↑, Tab and Enter alone) and *vim*. A key that's taken, types a character, or is one your shell or terminal needs is refused or flagged. From the command line: `reman keys`, `reman keys set find_all Alt+J`, `reman keys set find_here off`, `reman keys preset gentle`.
 - **What commands print:** how many runs keep their output (the newest 3000, 300, or none), and whether new shells open inside `reman shell`.

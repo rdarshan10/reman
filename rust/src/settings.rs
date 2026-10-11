@@ -42,6 +42,10 @@ pub struct Settings {
     /// absent = 60, 0 = never
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub done_alert_after_s: Option<u64>,
+    /// new versions (update.rs): absent = a daily check and a notification, "auto" = installed
+    /// on their own, "off" = no check at all
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub updates: Option<String>,
     /// the finder: how many lines it takes under the prompt; absent = 20, 0 = the whole screen
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub finder_height: Option<u16>,
@@ -73,6 +77,15 @@ impl Settings {
             None => Some(60),
             Some(0) => None,
             Some(n) => Some(n),
+        }
+    }
+
+    /// "notify" (the default), "auto" or "off"
+    pub fn updates_mode(&self) -> &'static str {
+        match self.updates.as_deref() {
+            Some("auto") => "auto",
+            Some("off") => "off",
+            _ => "notify",
         }
     }
 

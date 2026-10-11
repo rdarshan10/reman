@@ -87,7 +87,7 @@ pub fn daemon_up() -> bool {
 /// that pipe open and the reader would wait for EOF forever. Make our std handles non-inheritable
 /// first (std re-duplicates any handle it passes explicitly, so this is safe).
 #[cfg(windows)]
-fn stop_std_handle_inheritance() {
+pub(crate) fn stop_std_handle_inheritance() {
     use std::ffi::c_void;
     #[link(name = "kernel32")]
     unsafe extern "system" {
@@ -120,10 +120,16 @@ pub fn spawn_daemon() -> Result<()> {
 }
 
 pub fn spawn_daemon_exe(exe: &std::path::Path) -> Result<()> {
-    #[cfg(windows)]
-    stop_std_handle_inheritance();
     let mut cmd = std::process::Command::new(exe);
     cmd.arg("daemon").stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null());
+    spawn_detached(cmd).context("spawning daemon")
+}
+
+/// Start a process that outlives this one: no console, its own process group (and session), out
+/// of the caller's job object where Windows allows it.
+pub fn spawn_detached(mut cmd: std::process::Command) -> Result<()> {
+    #[cfg(windows)]
+    stop_std_handle_inheritance();
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
@@ -147,7 +153,7 @@ pub fn spawn_daemon_exe(exe: &std::path::Path) -> Result<()> {
             });
         }
     }
-    cmd.spawn().context("spawning daemon")?;
+    cmd.spawn()?;
     Ok(())
 }
 

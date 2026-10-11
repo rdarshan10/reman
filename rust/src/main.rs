@@ -34,6 +34,7 @@ mod timewords;
 mod settings_ui;
 mod tui;
 mod unwrap;
+mod update;
 mod verdict;
 
 use anyhow::{Context, Result, bail};
@@ -387,6 +388,15 @@ enum Cmd {
     },
     /// Call one agent tool from the command line: reman call reman_search '{"intent":"..."}'
     Call { tool: String, args: Option<String> },
+    /// Install the latest release (its SHA-256 checked first), or set how reman updates
+    Update {
+        /// only say whether a newer version is out
+        #[arg(long)]
+        check: bool,
+        /// on: install new versions on their own; off: just say when one is out
+        #[arg(long, value_name = "on|off", value_parser = ["on", "off"])]
+        auto: Option<String>,
+    },
     /// Ping / stop the daemon
     Ping,
     Stop,
@@ -1090,6 +1100,11 @@ fn real_main() -> Result<()> {
             }
             Ok(())
         }
+        Cmd::Update { check, auto } => match (auto.as_deref(), check) {
+            (Some(a), _) => update::set_auto(a == "on"),
+            (None, true) => update::check_now(),
+            (None, false) => update::install_now(),
+        },
         Cmd::Ping => {
             let t = Instant::now();
             let r = client::call(&json!({"op": "ping"}))?;
@@ -2123,8 +2138,9 @@ fn setup(no_profile: bool, no_connect: bool) -> Result<()> {
     let mut c = client::Client::connect_with(&installed)?;
     let p = c.call(&json!({"op": "ping"}))?;
     println!("  daemon          : up (engine={}, pid={}, {} commands)", p["engine"].as_str().unwrap_or("?"), p["pid"], p["indexed"]);
-    // 3. one-time Atuin import (final catch-up), then scrub the double captures it causes
-    if config::atuin_db_path().is_some() {
+    // 3. one-time Atuin import (final catch-up), then scrub the double captures it causes; never
+    //    into a sandbox's database (REMAN_DB: the test suites)
+    if config::atuin_db_path().is_some() && std::env::var_os("REMAN_DB").is_none() {
         let (mut runs, mut new) = (0, 0);
         loop {
             let r = c.call(&json!({"op": "import", "source": "atuin", "limit": 5000}))?;

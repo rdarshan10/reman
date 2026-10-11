@@ -94,6 +94,26 @@ jobs:
       - name: Checksums
         run: cd dist && sha256sum * > SHA256SUMS.txt && cat SHA256SUMS.txt
 
+      - name: Sign the checksums
+        # `reman update` installs a release only when SHA256SUMS.txt carries this signature, by the
+        # key whose public half is RELEASE_KEY in rust/src/update.rs
+        env:
+          REMAN_SIGNING_KEY: ${{ secrets.REMAN_SIGNING_KEY }}
+        run: |
+          if [ -z "$REMAN_SIGNING_KEY" ]; then
+            echo "::error::The REMAN_SIGNING_KEY secret is missing: reman would refuse to update to this release."
+            exit 1
+          fi
+          umask 077
+          key="$RUNNER_TEMP/release-key.pem"
+          printf '%s\n' "$REMAN_SIGNING_KEY" > "$key"
+          openssl pkeyutl -sign -rawin -inkey "$key" -in dist/SHA256SUMS.txt -out dist/SHA256SUMS.txt.sig
+          rm -f "$key"
+          # check it the way reman will: with the public key built into it
+          pub=$(grep -o 'hex32("[0-9a-f]\{64\}")' rust/src/update.rs | grep -o '[0-9a-f]\{64\}')
+          python3 -c "import sys; sys.stdout.buffer.write(bytes.fromhex('302a300506032b6570032100' + sys.argv[1]))" "$pub" > "$RUNNER_TEMP/release-key.pub.der"
+          openssl pkeyutl -verify -pubin -keyform DER -inkey "$RUNNER_TEMP/release-key.pub.der" -rawin -in dist/SHA256SUMS.txt -sigfile dist/SHA256SUMS.txt.sig
+
       - name: Add the install scripts
         run: cp install.ps1 install.sh dist/
 

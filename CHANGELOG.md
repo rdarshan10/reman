@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+### New
+
+- **Updates.** Once a day reman asks GitHub whether a new version is out, and a desktop notification says so, once per version, suggesting `reman update --auto on`. `reman update` installs the latest release now; `reman update --check` only says whether one is out. With `--auto on`, or *install them on their own* in `reman settings`, new versions install by themselves and a notification says so afterwards. *Never check* keeps reman off the network entirely.
+- **Signed releases.** Every release's `SHA256SUMS.txt` is now signed with reman's release key (Ed25519, `SHA256SUMS.txt.sig`). reman installs an update only when that signature is valid for the public key built into it, and the archive matches its signed checksum. It installs only newer versions; from GitHub's answer it uses only the version number, builds every download address itself, and uses https only. An AI agent can't turn automatic updates on.
+
 ## v0.3.3
 
 ### For agents

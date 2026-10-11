@@ -2330,6 +2330,9 @@ pub fn serve(port: u16) -> Result<()> {
             Err(e) => log(&format!("redescribe failed: {e}")),
         });
     }
+    if crate::update::daemon_checks() {
+        std::thread::spawn(crate::update::watch);
+    }
     {
         let d = d.clone();
         std::thread::spawn(move || {
