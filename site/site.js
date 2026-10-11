@@ -38,6 +38,7 @@ if (!document.getElementById("demo")) return;
 // sections are listed nearest-the-prompt first, rows best-first, as the finder ranks them
 const SCENES = [
   {
+    label: "by meaning",
     caption: "Describe it in words. The command that worked comes first.",
     count: "1 close match",
     query: "tear down containers",
@@ -50,6 +51,7 @@ const SCENES = [
     card: ["docker compose down -v", "docker: Stop and remove containers, networks, images, and volumes created by `docker compose up`", ["ok", "✓ worked every time (14 runs)"], "last 2 days ago · by you", "matched: close in meaning"],
   },
   {
+    label: "after a failure",
     caption: "Right after a failure, what worked last time is waiting.",
     count: "18 of 212",
     query: "",
@@ -67,6 +69,7 @@ const SCENES = [
     card: ["git push --set-upstream origin feat/search", "Last time this failed, you ran this next and it worked (3x).", ["ok", "✓ worked every time (3 runs)"], "last 2 days ago · by you", "Alt+F inserts it at the prompt"],
   },
   {
+    label: "flows",
     caption: "Walk through a flow you repeat: the next step waits on ↑.",
     count: "4 steps",
     query: "",
@@ -80,6 +83,7 @@ const SCENES = [
     card: ["npx prisma migrate dev", "Step 3 of 4. ↵ puts it on your prompt; `npm run dev` then waits on ↑.", ["ok", "✓ worked every time (8 runs)"], "last 2 days ago · by you", "in ~/work/web"],
   },
   {
+    label: "blanks",
     caption: "Thirty-eight commit messages, one command with a blank.",
     count: "3 results",
     query: "git commit",
@@ -96,6 +100,7 @@ const SCENES = [
     card: ['git commit -m "‹message›"', '38 variants · recent: "fix login", "wip", "bump deps"', ["ok", "✓ worked every time (38 runs)"], "usually 1s · last 1 hour ago · by you", "Enter: the cursor lands in the blank"],
   },
   {
+    label: "by time",
     caption: "Say when: only what ran then is left.",
     count: "2 results",
     query: "deploy last week",
@@ -116,7 +121,7 @@ let timer = null, token = 0;
 
 SCENES.forEach((s, i) => {
   const b = document.createElement("button");
-  b.textContent = String.fromCharCode(97 + i);
+  b.textContent = s.label;
   b.setAttribute("aria-label", "Example " + (i + 1) + ": " + s.caption);
   b.addEventListener("click", () => play(i));
   scenes.appendChild(b);
@@ -143,7 +148,7 @@ function render(s, typed, showResults, fade) {
       [...sec.rows].reverse().forEach((r) => lines.push(rowHTML(r, typed, fade)));
     });
   }
-  const pad = Math.max(0, 10 - lines.length);
+  const pad = Math.max(0, 7 - lines.length);
   const list = Array(pad).fill('<div class="t-row"> </div>').join("") + lines.join("");
   const f = fade ? " fade" : "";
   const card = showResults
@@ -182,13 +187,6 @@ function play(i) {
 }
 play(0);
 })();
-
-// ---------- the band: a second copy of each row makes the loop seamless ----------
-document.querySelectorAll(".feat-row").forEach((ul) => {
-  const copy = ul.cloneNode(true);
-  copy.setAttribute("aria-hidden", "true");
-  ul.parentNode.appendChild(copy);
-});
 
 // ---------- the name: what reman stands for ----------
 (function () {
