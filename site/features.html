@@ -407,7 +407,7 @@
       </table>
       <div class="spec-note">Median timings on a history of about 6,000 commands and 21,000 runs; the newer rows on one of about 7,700 commands.</div>
       <div class="facts">
-        <div><h3>Private by default</h3><p>Nothing leaves your machine. Secrets are masked before anything is saved, a command typed with a leading space is never recorded, and <kbd>Del</kbd> <kbd>Del</kbd> forgets one everywhere.</p></div>
+        <div><h3>Private by default</h3><p>Your history never leaves your machine; the one request reman makes is a daily check for a new version, which <code>reman settings</code> turns off. Secrets are masked before anything is saved, a command typed with a leading space is never recorded, and <kbd>Del</kbd> <kbd>Del</kbd> forgets one everywhere.</p></div>
         <div><h3>Every shell, one history</h3><p>PowerShell, bash, zsh, fish, nushell, xonsh and Command Prompt, plus the commands your agents run, tagged with the agent's name.</p></div>
         <div><h3>One settings page</h3><p><code>reman settings</code>, or <kbd>F10</kbd> in the finder: coding tools, shared folders, privacy, done alerts, keys and shells. Saved as you change them; key changes when you press <kbd>s</kbd>.</p></div>
       </div>
@@ -441,6 +441,7 @@
         <tr><td>Linux, x64</td><td><a href="https://github.com/rdarshan10/reman/releases/latest/download/reman-linux-x64.tar.gz">reman-linux-x64.tar.gz</a></td></tr>
         <tr><td>From source, Rust 1.85 or newer</td><td><a href="https://github.com/rdarshan10/reman#from-source">cargo build --release</a></td></tr>
       </table>
+      <p style="margin-top:22px;color:var(--ink-2)"><b>Staying up to date.</b> Once a day reman asks GitHub whether a new version is out, and tells you when one is. <code>reman update</code> installs it; <code>reman update --auto on</code> lets reman install new versions on its own. Every release is signed, and reman installs only what carries its signature and matches its signed checksum: never an older version, and never a file changed on the way.</p>
     </div>
   </div>
 </section>
@@ -478,6 +479,7 @@
         <tr><td><b>Your own keys</b></td><td>Every key reman takes can be changed or turned off: <code>reman settings</code>, Keys (<kbd>F10</kbd> in the finder). Open shells take a change at their next prompt. Presets: standard, gentle, vim.</td></tr>
         <tr><td><b>Private</b></td><td>On your machine only. Secrets masked before saving; a leading space is never recorded.</td></tr>
         <tr><td><b>Every shell</b></td><td>PowerShell, bash, zsh, fish, nushell, xonsh and Command Prompt, plus what your agents run.</td></tr>
+        <tr><td><b>Updates</b></td><td>Told when a new version is out, or installed on their own with <code>reman update --auto on</code>. Signed releases only.</td></tr>
         <tr><td><b>Open source</b></td><td>Apache License 2.0. One Rust binary for Windows, macOS and Linux.</td></tr>
       </table>
       <p style="margin-top:22px;color:var(--ink-3);font-size:14px">Every key is listed in the finder (<kbd>F1</kbd>) and by <code>reman keys</code>, as you have them.</p>
