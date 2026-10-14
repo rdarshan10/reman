@@ -21,7 +21,9 @@ fn usage() -> ! {
     eprintln!(
         "usage: reman-hook record [--exit N] [--cwd DIR] [--session ID] [--actor A] [--duration-ms MS] [--suggest] -- <command...>\n       reman-hook welcome [--cwd DIR] [--session ID]\n       reman-hook precheck [--cwd DIR] -- <command...>\n       reman-hook nextup [--cwd DIR] [--session ID] [--index N]\n       reman-hook claude|codex|cursor|gemini|windsurf|copilot    (that agent's hook payload on stdin)\n       reman-hook event     (a run from reman's opencode / pi plugin, JSON on stdin)"
     );
-    std::process::exit(2)
+    // never 2: an agent's hook that exits 2 blocks the tool call (Claude Code's PreToolUse, and
+    // others), so a hook entry missing its agent's name would stop every command the agent runs
+    std::process::exit(1)
 }
 
 fn main() {
