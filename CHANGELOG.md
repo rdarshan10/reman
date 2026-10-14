@@ -1,5 +1,11 @@
 # Changelog
 
+## v0.3.5
+
+### Fixed
+
+- **A broken hook entry no longer blocks your agent.** When an agent's hook entry in its settings was missing the agent's name, `reman-hook` printed its usage and exited with code 2, which Claude Code reads as "block this command": every shell command the agent ran was refused. It now exits 1, so the agent sees a hook error and the command still runs.
+
 ## v0.3.4
 
 ### New
