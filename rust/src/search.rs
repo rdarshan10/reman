@@ -247,6 +247,8 @@ fn synonyms(w: &str) -> &'static [&'static str] {
 /// the query's words. An agent's one-off is exploration, never the answer: its echo lines are
 /// full of words.
 pub fn is_close(sim: f32, words: f32, fuzzy: f32, cmd_like: bool, described: bool, oneoff: bool) -> bool {
+    // on the scale the thresholds were calibrated on (embed::close_shift)
+    let sim = sim - crate::embed::close_shift();
     let enough_words = if described { words > 0.0 } else { words >= UNDESCRIBED_WORDS };
     !oneoff
         && ((sim >= CLOSE_ALONE && (described || enough_words))

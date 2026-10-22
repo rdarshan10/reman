@@ -56,14 +56,50 @@ fn search_form(q: &str) -> String {
     format!("Represent this sentence for searching relevant passages: {q}")
 }
 
+/// A model in a folder of its own (model.onnx + tokenizer files, as tools/train_embedder.py
+/// exports them): REMAN_MODEL_DIR, for trying a fine-tuned model. Every stored vector must come
+/// from the same model, so a history is re-embedded after switching (the `reindex` op).
+fn load_from(dir: &std::path::Path, threads: usize) -> Result<TextEmbedding> {
+    use fastembed::{InitOptionsUserDefined, Pooling, TokenizerFiles, UserDefinedEmbeddingModel};
+    let read = |f: &str| std::fs::read(dir.join(f)).map_err(|e| anyhow!("{}: {e}", dir.join(f).display()));
+    let files = TokenizerFiles {
+        tokenizer_file: read("tokenizer.json")?,
+        config_file: read("config.json")?,
+        special_tokens_map_file: read("special_tokens_map.json")?,
+        tokenizer_config_file: read("tokenizer_config.json")?,
+    };
+    let model = UserDefinedEmbeddingModel::new(read("model.onnx")?, files).with_pooling(Pooling::Cls);
+    TextEmbedding::try_new_from_user_defined(model, InitOptionsUserDefined::new().with_intra_threads(threads)).map_err(|e| anyhow!("loading embedding model: {e}"))
+}
+
+/// How far this model's similarities sit from the ones search.rs's close rule was calibrated on
+/// (the shipped model): a fine-tuned model spreads them, scoring a right answer ~0.2 lower. Read
+/// from `reman.json` beside the model (`{"close_shift": -0.2}`); 0 for the shipped model.
+pub fn close_shift() -> f32 {
+    static SHIFT: std::sync::OnceLock<f32> = std::sync::OnceLock::new();
+    *SHIFT.get_or_init(|| {
+        let Some(dir) = std::env::var_os("REMAN_MODEL_DIR") else { return 0.0 };
+        std::fs::read_to_string(std::path::Path::new(&dir).join("reman.json"))
+            .ok()
+            .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+            .and_then(|v| v.get("close_shift").and_then(serde_json::Value::as_f64))
+            .unwrap_or(0.0) as f32
+    })
+}
+
 fn load_model() -> Result<TextEmbedding> {
     let t = std::time::Instant::now();
     let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4).min(8);
-    let opts = TextInitOptions::new(EmbeddingModel::BGESmallENV15)
-        .with_cache_dir(config::models_dir())
-        .with_intra_threads(threads)
-        .with_show_download_progress(false);
-    let mut model = TextEmbedding::try_new(opts).map_err(|e| anyhow!("loading embedding model: {e}"))?;
+    let mut model = match std::env::var_os("REMAN_MODEL_DIR") {
+        Some(dir) => load_from(std::path::Path::new(&dir), threads)?,
+        None => {
+            let opts = TextInitOptions::new(EmbeddingModel::BGESmallENV15)
+                .with_cache_dir(config::models_dir())
+                .with_intra_threads(threads)
+                .with_show_download_progress(false);
+            TextEmbedding::try_new(opts).map_err(|e| anyhow!("loading embedding model: {e}"))?
+        }
+    };
     // the first run sets up the session's buffers: done here, not on someone's query
     model.embed(&["warmup query to load the model once"], None).map_err(|e| anyhow!("embed: {e}"))?;
     crate::daemon::log(&format!("embedding model loaded in {:?}", t.elapsed()));
