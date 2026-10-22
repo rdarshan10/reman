@@ -136,7 +136,7 @@ impl ArmedFlow {
 
 /// Bumped whenever describe() or tldr_map.json changes what commands are described as; a daemon
 /// on an older db re-describes the affected commands once, in the background (`redescribe`).
-const DESCRIBE_VERSION: &str = "4";
+const DESCRIBE_VERSION: &str = "5";
 
 pub fn log(msg: &str) {
     let line = format!("[{}] {msg}\n", config::now());
@@ -1136,7 +1136,7 @@ impl Daemon {
         let rank = if s(req, "rank") == Some("semantic") { Rank::Semantic } else { Rank::Hybrid };
         // embed before taking the store lock; tiny queries go fuzzy-only (no model call at all)
         let t0 = Instant::now();
-        let qv = if text.trim().chars().count() >= 3 { Some(self.embedder.embed_query(text.trim())?) } else { None };
+        let (qv, rank_qv) = if text.trim().chars().count() >= 3 { self.embedder.embed_both(text.trim()).map(|(a, b)| (Some(a), Some(b)))? } else { (None, None) };
         let t_embed = t0.elapsed();
         let st = self.store.read();
         let (scope, here) = self.scope_of(&st, req);
@@ -1153,7 +1153,7 @@ impl Daemon {
             here,
             window: span,
         };
-        let out = search::search(&st, &q, qv.as_deref().map(|v| v.as_slice()));
+        let out = search::search_ranked(&st, &q, qv.as_deref().map(|v| v.as_slice()), rank_qv.as_deref().map(|v| v.as_slice()));
         let t_rank = t0.elapsed() - t_embed;
         let mut results: Vec<Value> = out.hits.iter().map(|h| self.item(&st, h, scope)).collect();
         // the finder (only it asks): a folded group that differs in one place is a command with a

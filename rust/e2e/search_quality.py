@@ -46,7 +46,8 @@ EVERYDAY = [
     ("ipconfig /flushdns", HOME, 2), ("Get-ChildItem -Recurse -Filter *.env", HOME, 1), ("python scripts/seed_db.py --users 50", API, 3),
     ("make lint", API, 4), ("go test ./...", HOME, 3), ("cargo build --release", HOME, 5), ("terraform plan -out plan.tfplan", HOME, 2),
     ("npx expo start --dev-client", APP, 6), ("npm start", APP, 8), ("ollama serve", HOME, 3), ("npx astro check", SITE, 3),
-    ("npx vercel --prod", SITE, 3),
+    ("npx vercel --prod", SITE, 3), ("mkdir reports", HOME, 3), ("New-Item -ItemType Directory -Path logs", HOME, 2), ("node -v", HOME, 4),
+    ('$env:API_URL = "http://localhost:8000"', API, 3), ("git branch -D old-feature", API, 2),
 ]
 
 # description -> the command(s) that count as right
@@ -79,6 +80,19 @@ FOUND = [
     ("clear the dns cache", ["ipconfig /flushdns"]),
     ("back up the data folder", ["tar -czf backup.tgz data/"]),
     ("copy the dump to staging", ["scp dump.sql deploy@staging.internal:/tmp"]),
+    # described by their options (tldr's `{{[-d|--delete]}}`, `-ItemType Directory`), by what
+    # tldr has no page for (`-v`, `$env:`), or as the directory change they are
+    ("make a new folder", ["mkdir reports", "New-Item -ItemType Directory -Path logs"]),
+    ("check the node version", ["node -v"]),
+    ("set an environment variable", ['$env:API_URL = "http://localhost:8000"']),
+    ("go up one directory", ["cd .."]),
+    ("delete a local branch", ["git branch -D old-feature", "git branch --merged main | grep -v main | xargs git branch -d"]),
+]
+
+# a request is never answered by its opposite, however alike the words (describe.rs, clash)
+OPPOSITE = [
+    ("install the node packages", "rm -rf node_modules package-lock.json"),
+    ("start the containers", "docker compose down -v"),
 ]
 
 # known limits: reported on every run, not asserted. Too little in the command or its description
@@ -260,6 +274,13 @@ def run_checks():
                 show(q, r)
             other = [x["command"] for x in r["results"] if x.get("close") and tool not in x["command"]]
             check(q, not other, f"close: {other[0][:70]!r}" if other else "")
+        print("\nOPPOSITE: a request is never answered by its opposite")
+        for q, opposite in OPPOSITE:
+            r = search(q)
+            if DIAG:
+                show(q, r)
+            bad = [x for x in r["results"] if x["command"] == opposite and x.get("close")]
+            check(f"{q} -> not {opposite!r}", not bad)
     print("\nABSENT: nothing marked close" + (" (a real history may hold something related: reported, not asserted)" if REAL else ""))
     for q in ABSENT + (ABSENT_REAL if REAL else []):
         r = search(q)

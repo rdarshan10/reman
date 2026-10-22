@@ -51,6 +51,11 @@ pub fn normalize(v: &mut [f32]) {
     v.iter_mut().for_each(|x| *x /= n);
 }
 
+/// A request as a search query: bge-v1.5's instruction for retrieval
+fn search_form(q: &str) -> String {
+    format!("Represent this sentence for searching relevant passages: {q}")
+}
+
 fn load_model() -> Result<TextEmbedding> {
     let t = std::time::Instant::now();
     let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4).min(8);
@@ -181,6 +186,29 @@ impl Embedder {
             out[i] = v;
         }
         Ok(out)
+    }
+
+    /// A request in words ("start the dev server") embedded as it is, and as a search query:
+    /// bge-v1.5 was trained to take a search query with an instruction in front (the commands and
+    /// descriptions it is matched against are embedded as they are), which orders commands
+    /// better (search::search_ranked). One run of the model when neither is cached: a batch of
+    /// two costs little more than one.
+    pub fn embed_both(&self, q: &str) -> Result<(Arc<Vec<f32>>, Arc<Vec<f32>>)> {
+        let s = search_form(q);
+        let cached = {
+            let c = self.cache.lock();
+            (c.get(q), c.get(&s))
+        };
+        if let (Some(a), Some(b)) = cached {
+            self.used.store(config::now(), Ordering::Relaxed);
+            return Ok((a, b));
+        }
+        let mut v = self.embed_many(&[q, &s])?.into_iter().map(Arc::new);
+        let (a, b) = (v.next().unwrap(), v.next().unwrap());
+        let mut c = self.cache.lock();
+        c.put(q.to_string(), a.clone());
+        c.put(s, b.clone());
+        Ok((a, b))
     }
 
     pub fn embed_query(&self, q: &str) -> Result<Arc<Vec<f32>>> {

@@ -69,6 +69,23 @@ pub struct Entry {
     pub noise: bool,
     /// the programs it runs (describe::programs): `npx astro dev` -> npx, astro
     pub progs: Vec<String>,
+    /// what its description says it does to its object (describe::Action)
+    pub action: Option<describe::Action>,
+    /// the last part of each path in it, lowercased (`tar -czf b.tgz data/`: "b.tgz data"):
+    /// words search matches a query against (search::says_word)
+    pub path_ends: Box<str>,
+}
+
+/// The last part of each path in a command, lowercased, space-separated.
+fn path_ends(lower: &str) -> Box<str> {
+    lower
+        .split_whitespace()
+        .filter(|t| t.contains(['/', '\\']))
+        .map(|t| t.trim_matches(|c: char| matches!(c, '"' | '\'' | '/' | '\\')).rsplit(['/', '\\']).next().unwrap_or(""))
+        .filter(|t| !t.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
+        .into()
 }
 
 impl Entry {
@@ -302,6 +319,11 @@ pub fn looks_like_code(text: &str) -> bool {
         return true;
     }
     if first.chars().all(|c| c.is_ascii_digit() || c.is_whitespace() || matches!(c, '.' | ',' | '-')) {
+        return true;
+    }
+    // a YAML list item (`- "8000:8000"`) or `key: value` line (`restart: unless-stopped`) from
+    // a pasted docker-compose or config file; a drive (`d: `) is no key
+    if first.starts_with("- ") || first.split_once(": ").is_some_and(|(k, _)| k.len() > 1 && k.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'))) {
         return true;
     }
     // an unfinished block line: `ports:`, `foo(`, `[`
@@ -591,13 +613,17 @@ impl Store {
         let mut progs = describe::programs(text);
         progs.shrink_to_fit();
         self.programs.extend(progs.iter().cloned());
+        let described = describe::describe(text);
+        let lower = text.to_lowercase();
         self.entries.push(Entry {
             text: text.to_string(),
-            lower: text.to_lowercase(),
+            path_ends: path_ends(&lower),
+            lower,
             mask: char_mask(text),
             gkey: describe::group_key(text),
             shape: describe::shape_key(text),
-            desc_words: Some(describe::describe(text).parts.iter().map(|p| p.1.to_lowercase()).collect::<Vec<_>>().join(" ; ")).filter(|w| !w.is_empty()),
+            desc_words: Some(described.parts.iter().map(|p| p.1.to_lowercase()).collect::<Vec<_>>().join(" ; ")).filter(|w| !w.is_empty()),
+            action: describe::command_action(text, &described),
             desc,
             rows: Vec::new(),
             pinned: false,
@@ -875,11 +901,13 @@ mod noise_tests {
     #[test]
     fn pasted_code_vs_shell() {
         for c in ["return db_obj", "async def update(", "for i in range(1, n + 1):", ".offset(skip)", "obj_in_data = obj_in",
-                  "from sqlalchemy import or_", "6 4 2 1 2 3", "ports:", "result = await db.execute(query)", "};", "print(*arr1)"] {
+                  "from sqlalchemy import or_", "6 4 2 1 2 3", "ports:", "result = await db.execute(query)", "};", "print(*arr1)",
+                  "build: .", "restart: unless-stopped", "- \"127.0.0.1:8000:8000\"", "image: postgres:16"] {
             assert!(looks_like_code(c), "{c}");
         }
         for c in ["docker-compose up -d", "FOO=1 npm test", "for f in *.py; do echo $f; done", "$x = 1", "d:", "./run.sh",
-                  "../x/build.ps1", "python -c \"import x\"", "git commit -m \"fix: y\"", "if (Test-Path x) { rm x }", "import-module posh-git"] {
+                  "../x/build.ps1", "python -c \"import x\"", "git commit -m \"fix: y\"", "if (Test-Path x) { rm x }", "import-module posh-git",
+                  "d: ", "git -C d:/x status", "echo key: value", "npm run dev -- --port 3000"] {
             assert!(!looks_like_code(c), "{c}");
         }
     }

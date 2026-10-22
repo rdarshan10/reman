@@ -298,12 +298,12 @@ fn tool_search(d: &Daemon, a: &Value, pol: &Policy, cwd: Option<&str>) -> Result
     let k = arg_n(a, "k", 5);
     let worked = a.get("worked_only").and_then(Value::as_bool).unwrap_or(true);
     let prefer_human = arg_s(a, "prefer") == Some("human");
-    let qv = if intent.trim().chars().count() >= 3 { Some(d.embedder.embed_query(intent.trim())?) } else { None };
+    let (qv, rank_qv) = if intent.trim().chars().count() >= 3 { d.embedder.embed_both(intent.trim()).map(|(a, b)| (Some(a), Some(b)))? } else { (None, None) };
     let st = d.store.read();
     // the folder asked about, else the agent's own project (when shared): its commands come first
     let home: Option<String> = cwd.map(config::norm_path).or_else(|| pol.project.clone().filter(|p| pol.within(Some(p))));
     let q = Query { text: intent, k: 400, offset: 0, scope: Scope::All, actor: None, status: None, group: true, rank: Rank::Hybrid, here: home.as_deref().and_then(|c| st.cwd_index(c)), window: window.map(|w| (w.since, w.until)) };
-    let out = search::search(&st, &q, qv.as_deref().map(|v| v.as_slice()));
+    let out = search::search_ranked(&st, &q, qv.as_deref().map(|v| v.as_slice()), rank_qv.as_deref().map(|v| v.as_slice()));
     let mut res: Vec<(Value, u32, f32)> = Vec::new();
     let mut failed_only = 0;
     // relevance floor: an empty answer ("nothing known") beats the least-bad unrelated command

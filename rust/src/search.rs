@@ -49,6 +49,21 @@ const W_ONEOFF: f32 = 0.03;
 const W_FAILING: f32 = 0.06;
 /// below this share of a perfect match, a fuzzy hit is letters scattered by chance
 const FUZZY_FLOOR: f32 = 0.3;
+/// a command that does the opposite of what the request asks (`rm node_modules` for "install node
+/// modules", `git branch` listing them for "make a branch"): never the answer, see describe::clash.
+/// (Doing the same gets nothing: "update" and "upgrade" agree, and `alembic upgrade head` is no
+/// answer to "ship an update to production users".)
+const W_CLASH: f32 = 0.08;
+/// The raw command's own similarity, as a tie-breaker: descriptions say what a kind of command
+/// does ("Upgrade a package"), so every `pip install --upgrade x` scores alike on them; the text
+/// knows `--upgrade pip` from `--upgrade setuptools` for "update pip to the latest".
+const W_RAW: f32 = 0.1;
+
+#[derive(Clone, Copy, PartialEq)]
+enum Fit {
+    Clash,
+    Neutral,
+}
 
 /// Bounded nudge against multi-KB / multi-line scripts (mostly agent-run) that merely mention the
 /// query's words: you want the command you'd rerun, not a 40-line heredoc. 0 up to 160 chars,
@@ -116,8 +131,10 @@ fn fuzzy_atoms(q: &str) -> Vec<String> {
         .collect()
 }
 
-/// Does the query read like the start of a command rather than a description of one? Its first
-/// word is (a prefix of) a program that appears in the history, or it has shell-ish punctuation.
+/// Does the query read like (the start of) a command rather than a description of one? It has
+/// shell-ish punctuation, or every word of it starts a word of one command in the history, its
+/// first word the program (`dock comp up` is `docker compose up -d`). Words that merely begin
+/// like a program don't make a sentence a command: "install dependencies", "check disk space".
 pub fn command_like(store: &Store, text: &str) -> bool {
     let Some(first) = text.split_whitespace().next().map(str::to_lowercase) else { return false };
     if text.contains(['-', '/', '\\', '.', '=', ':', '|']) {
@@ -125,9 +142,16 @@ pub fn command_like(store: &Store, text: &str) -> bool {
     }
     // "ssh into the server" starts with a program but reads as a sentence
     let sentence = text.split_whitespace().any(|w| STOP.contains(&w.to_lowercase().as_str()));
-    !sentence
-        && first.len() >= 2
-        && store.entries.iter().any(|e| e.alive && e.gkey.split(' ').next().is_some_and(|p| p.starts_with(first.as_str())))
+    if sentence || first.len() < 2 {
+        return false;
+    }
+    let words: Vec<String> = text.split_whitespace().map(str::to_lowercase).collect();
+    store.entries.iter().any(|e| {
+        e.alive
+            && e.lower.len() <= FUZZY_SPAN
+            && e.gkey.split(' ').next().is_some_and(|p| p.starts_with(first.as_str()))
+            && words.iter().all(|w| e.lower.split(|c: char| !c.is_ascii_alphanumeric()).any(|t| t.starts_with(w.as_str())))
+    })
 }
 
 fn is_subsequence(needle: &[u8], hay: &[u8]) -> bool {
@@ -143,6 +167,18 @@ fn content_words(q: &str) -> Vec<String> {
 /// `stem` at the start of a word of `text`: "start" is in "start-server", not in "restart".
 fn has_word(text: &str, stem: &str) -> bool {
     text.match_indices(stem).any(|(i, _)| i == 0 || !text.as_bytes()[i - 1].is_ascii_alphanumeric())
+}
+
+/// Does the command say `stem`: in the program it runs (its whole path: `venv/Scripts/activate`),
+/// its other words (its shape: quoted text is data), the last part of a path (`tar -czf b.tgz
+/// data/` is about the data folder; `python C:\me\Downloads\x.py` says nothing about
+/// downloading), or its description? A line that runs no program (`cd hls-downloader`) has only
+/// data for words.
+fn says_word(e: &crate::store::Entry, stem: &str) -> bool {
+    let program = e.lower.split_whitespace().find(|t| !matches!(*t, "&" | ".")).unwrap_or("");
+    (!e.progs.is_empty() && (has_word(program, stem) || has_word(&e.shape, stem) || has_word(&e.path_ends, stem)))
+        || e.progs.iter().any(|p| has_word(p, stem))
+        || e.desc_words.as_deref().is_some_and(|d| has_word(d, stem))
 }
 
 /// Crude stem for the word-overlap check: "migrations" / "migration" / "migrate" all share
@@ -174,17 +210,36 @@ fn osa_within_one(a: &str, b: &str) -> bool {
 
 /// The query's content words, as stems. A word found nowhere in the history is probably a typo:
 /// it is swapped for a history word one edit away (`dcoker` -> `docker`), if there is one.
-fn query_words(text: &str, blobs: &[&str]) -> Vec<String> {
+fn query_words(text: &str, blobs: &[&str]) -> Vec<Vec<String>> {
     content_words(text)
         .into_iter()
         .map(|w| {
             let s = stem(&w);
-            if w.len() < 5 || blobs.iter().any(|b| has_word(b, &s)) {
-                return s;
-            }
-            blobs.iter().flat_map(|b| b.split(|c: char| !c.is_ascii_alphanumeric())).find(|x| x.len() >= 4 && osa_within_one(&w, x)).map(stem).unwrap_or(s)
+            let s = if w.len() < 5 || blobs.iter().any(|b| has_word(b, &s)) {
+                s
+            } else {
+                blobs.iter().flat_map(|b| b.split(|c: char| !c.is_ascii_alphanumeric())).find(|x| x.len() >= 4 && osa_within_one(&w, x)).map(stem).unwrap_or(s)
+            };
+            std::iter::once(s).chain(synonyms(&w).iter().map(|x| stem(x))).collect()
         })
         .collect()
+}
+
+/// The few words people and command descriptions use for the same thing ("make a new folder":
+/// "Create a new directory"). Kept to true synonyms: each one widens what counts as having the
+/// query's words.
+fn synonyms(w: &str) -> &'static [&'static str] {
+    match w {
+        "folder" | "folders" => &["directory", "dir"],
+        "directory" | "directories" => &["folder"],
+        "delete" => &["remove"],
+        "remove" => &["delete"],
+        "make" => &["create"],
+        "create" => &["make"],
+        "kill" => &["terminate"],
+        "terminate" => &["kill"],
+        _ => &[],
+    }
 }
 
 /// See CLOSE_ALONE. For a command reman can't describe, similarity rests on raw text alone and
@@ -206,6 +261,8 @@ pub fn is_close(sim: f32, words: f32, fuzzy: f32, cmd_like: bool, described: boo
 fn named_tools(store: &Store, text: &str) -> Vec<String> {
     content_words(text)
         .into_iter()
+        // a verb is what to do, not the tool to do it with: "make a new folder" names no `make`
+        .filter(|w| crate::describe::action_of(w).is_none())
         .filter(|w| w.len() >= 3 && store.programs.contains(w.as_str()))
         .filter(|w| {
             let elsewhere = |e: &&crate::store::Entry| e.alive && !e.progs.iter().any(|p| p == w) && e.desc_words.as_deref().is_some_and(|d| has_word(d, w));
@@ -232,15 +289,17 @@ struct Cand {
     failing: bool,
 }
 
-/// Semantic similarity (max of raw-command and description vectors) for every entry.
-pub fn similarities(store: &Store, qv: &[f32]) -> Vec<f32> {
+/// Semantic similarity for every entry: the max of its raw-command and description vectors, and
+/// the raw command's alone.
+pub fn similarities(store: &Store, qv: &[f32]) -> (Vec<f32>, Vec<f32>) {
     let n = store.len();
-    let mut sim = vec![-1f32; n];
+    let mut raw = vec![-1f32; n];
     for (i, e) in store.entries.iter().enumerate() {
         if e.has_vec && e.alive {
-            sim[i] = crate::f16::dot(store.vec(i as u32), qv);
+            raw[i] = crate::f16::dot(store.vec(i as u32), qv);
         }
     }
+    let mut sim = raw.clone();
     for (j, &owner) in store.desc_owner.iter().enumerate() {
         let d = crate::f16::dot(&store.desc_vecs[j * DIM..(j + 1) * DIM], qv);
         let s = &mut sim[owner as usize];
@@ -248,10 +307,18 @@ pub fn similarities(store: &Store, qv: &[f32]) -> Vec<f32> {
             *s = d;
         }
     }
-    sim
+    (sim, raw)
 }
 
 pub fn search(store: &Store, q: &Query, qv: Option<&[f32]>) -> Outcome {
+    search_ranked(store, q, qv, qv)
+}
+
+/// `search`, ranking by `rank_qv` (the request embedded as a search query, Embedder::
+/// embed_both) while `qv` (embedded as it is) decides what is close: the close rule's
+/// thresholds were calibrated on plain embeddings, and the search-query form scores every
+/// command ~0.05 lower while ordering them better.
+pub fn search_ranked(store: &Store, q: &Query, qv: Option<&[f32]>, rank_qv: Option<&[f32]>) -> Outcome {
     let now = config::now();
     let show_self = q.text.to_lowercase().contains("reman");
     // a time named in the query (`deploy last week`): only commands that ran then, there
@@ -339,11 +406,15 @@ pub fn search(store: &Store, q: &Query, qv: Option<&[f32]>) -> Outcome {
     let prefix = |i: u32| store.entries[i as usize].lower.starts_with(&tlow) as u8 as f32;
 
     let t1 = std::time::Instant::now();
-    let sim_all = qv.map(|v| similarities(store, v));
+    let (rank_all, raw_all) = rank_qv.or(qv).map(|v| similarities(store, v)).unzip();
+    let sim_all = if std::ptr::eq(qv.unwrap_or(&[]).as_ptr(), rank_qv.unwrap_or(&[]).as_ptr()) { rank_all.clone() } else { qv.map(|v| similarities(store, v).0) };
     if trace {
         crate::daemon::log(&format!("  sims {:?}", t1.elapsed()));
     }
+    // `sim` decides what is close (and is what a hit reports); `rank` orders them
     let sim = |i: u32| sim_all.as_ref().map(|s| s[i as usize]).unwrap_or(-1.0);
+    let rank = |i: u32| rank_all.as_ref().map(|s| s[i as usize]).unwrap_or(-1.0);
+    let raw = |i: u32| raw_all.as_ref().map(|s| s[i as usize].max(0.0)).unwrap_or(0.0);
 
     // the query's words, and which of them each candidate's command or description contains.
     // Long scripts are left out: never the answer, and their echo lines are full of words.
@@ -353,7 +424,7 @@ pub fn search(store: &Store, q: &Query, qv: Option<&[f32]>) -> Outcome {
         .filter(|c| short_text(c))
         .flat_map(|c| {
             let e = &store.entries[c.idx as usize];
-            std::iter::once(e.lower.as_str()).chain(e.desc_words.as_deref())
+            std::iter::once(e.shape.as_str()).chain(e.progs.iter().map(String::as_str)).chain(e.desc_words.as_deref())
         })
         .collect();
     let toks = query_words(text, &texts);
@@ -368,7 +439,7 @@ pub fn search(store: &Store, q: &Query, qv: Option<&[f32]>) -> Outcome {
                 if !short_text(c) {
                     return vec![false; toks.len()];
                 }
-                toks.iter().map(|t| has_word(&e.lower, t) || e.desc_words.as_deref().is_some_and(|d| has_word(d, t))).collect()
+                toks.iter().map(|alts| alts.iter().any(|t| says_word(e, t))).collect()
             })
             .collect();
         let n = cands.len() as f32;
@@ -377,10 +448,16 @@ pub fn search(store: &Store, q: &Query, qv: Option<&[f32]>) -> Outcome {
         has.iter().map(|h| if total > 0.0 { h.iter().zip(&weight).filter(|(x, _)| **x).map(|(_, w)| w).sum::<f32>() / total } else { 0.0 }).collect()
     };
     let cmd_like = w_fuzzy == W_FUZZY;
+    // what the request does (install, stop, list...), against what each command does
+    let want = if cmd_like { None } else { crate::describe::request_action(text) };
+    let action_fit = |e: &crate::store::Entry| match (want, e.action) {
+        (Some(a), Some(b)) if crate::describe::clash(a, b) => Fit::Clash,
+        _ => Fit::Neutral,
+    };
     let named = named_tools(store, text);
     let for_named = |c: &Cand| {
         let e = &store.entries[c.idx as usize];
-        named.iter().all(|t| has_word(&e.lower, t) || e.desc_words.as_deref().is_some_and(|d| has_word(d, t)))
+        named.iter().all(|t| says_word(e, t))
     };
 
     let short = text.chars().count() < 3 || sim_all.is_none();
@@ -402,7 +479,7 @@ pub fn search(store: &Store, q: &Query, qv: Option<&[f32]>) -> Outcome {
             for (k, c) in cands.iter().enumerate() {
                 let s = sim(c.idx);
                 let e = &store.entries[c.idx as usize];
-                let score = s
+                let score = rank(c.idx)
                     + w_fuzzy * fz[k]
                     + W_WORDS * words[k]
                     + W_PREFIX * prefix(c.idx)
@@ -412,9 +489,11 @@ pub fn search(store: &Store, q: &Query, qv: Option<&[f32]>) -> Outcome {
                     + if e.pinned { W_PIN } else { 0.0 }
                     - if c.oneoff { W_ONEOFF } else { 0.0 }
                     - if c.failing { W_FAILING } else { 0.0 }
-                    - script_penalty(e);
+                    - script_penalty(e)
+                    + W_RAW * raw(c.idx)
+                    - if action_fit(e) == Fit::Clash { W_CLASH } else { 0.0 };
                 let mut h = hit(c.idx, score, s, fz[k]);
-                h.close = for_named(c) && is_close(s, words[k], fz[k], cmd_like, e.desc.is_some(), c.oneoff);
+                h.close = for_named(c) && action_fit(e) != Fit::Clash && is_close(s, words[k], fz[k], cmd_like, e.desc.is_some(), c.oneoff);
                 h.words = words[k];
                 scored.push(h);
             }
@@ -564,9 +643,14 @@ mod tests {
 
     #[test]
     fn command_like_queries() {
-        let s = store_with(&["docker compose up -d", "npm run dev", "git status"]);
+        let s = store_with(&["docker compose up -d", "npm run dev", "npm run e2e", "git status", "installer /S", "checkupdates"]);
         assert!(command_like(&s, "dock comp up"));
         assert!(command_like(&s, "npm e2e"));
+        assert!(command_like(&s, "git sta"));
+        assert!(command_like(&s, "install"));
+        // sentences whose first word only begins like a program (installer, checkupdates)
+        assert!(!command_like(&s, "install dependencies"));
+        assert!(!command_like(&s, "check disk space"));
         assert!(command_like(&s, "cd ../x"));
         assert!(!command_like(&s, "seed the database"));
         assert!(!command_like(&s, "tear down containers"));
