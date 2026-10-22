@@ -59,6 +59,10 @@ pub struct Settings {
     /// agents' (their hooks see it) and yours inside `reman shell`
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output_runs: Option<u32>,
+    /// the embedding model (most of the daemon's memory) is let go after this many minutes
+    /// with nobody using reman, and loaded again when someone does; absent = 15, 0 = kept
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_idle_min: Option<u32>,
     /// shells open inside `reman shell` (so what your commands print is kept too)
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub shell_layer: bool,
@@ -95,6 +99,15 @@ impl Settings {
             None => Some(20),
             Some(0) => None,
             Some(n) => Some(n.max(8)),
+        }
+    }
+
+    /// Minutes unused before the embedding model is let go; None = never.
+    pub fn model_idle_minutes(&self) -> Option<u32> {
+        match self.model_idle_min {
+            None => Some(15),
+            Some(0) => None,
+            Some(n) => Some(n),
         }
     }
 

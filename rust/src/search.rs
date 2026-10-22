@@ -105,19 +105,6 @@ pub struct Outcome {
     pub members: HashMap<u32, Vec<u32>>,
 }
 
-#[inline]
-pub fn dot(a: &[f32], b: &[f32]) -> f32 {
-    // 8 independent accumulators -> the compiler emits packed SIMD without fast-math
-    let mut acc = [0f32; 8];
-    let (ca, cb) = (a.chunks_exact(8), b.chunks_exact(8));
-    for (x, y) in ca.zip(cb) {
-        for i in 0..8 {
-            acc[i] += x[i] * y[i];
-        }
-    }
-    acc.iter().sum()
-}
-
 const FUZZY_SPAN: usize = 160;
 
 /// The positive, literal part of each nucleo atom (negations `!x` can't be prefiltered).
@@ -251,11 +238,11 @@ pub fn similarities(store: &Store, qv: &[f32]) -> Vec<f32> {
     let mut sim = vec![-1f32; n];
     for (i, e) in store.entries.iter().enumerate() {
         if e.has_vec && e.alive {
-            sim[i] = dot(store.vec(i as u32), qv);
+            sim[i] = crate::f16::dot(store.vec(i as u32), qv);
         }
     }
     for (j, &owner) in store.desc_owner.iter().enumerate() {
-        let d = dot(&store.desc_vecs[j * DIM..(j + 1) * DIM], qv);
+        let d = crate::f16::dot(&store.desc_vecs[j * DIM..(j + 1) * DIM], qv);
         let s = &mut sim[owner as usize];
         if d > *s {
             *s = d;
@@ -603,13 +590,5 @@ mod tests {
         assert!(!has_word("kubectl rollout restart", "start"));
         assert_eq!(stem("lines"), "line");
         assert_eq!(stem("containers"), "contai");
-    }
-
-    #[test]
-    fn dot_matches_naive() {
-        let a: Vec<f32> = (0..DIM).map(|i| i as f32 * 0.01).collect();
-        let b: Vec<f32> = (0..DIM).map(|i| 1.0 - i as f32 * 0.001).collect();
-        let naive: f32 = a.iter().zip(&b).map(|(x, y)| x * y).sum();
-        assert!((dot(&a, &b) - naive).abs() < 1e-2);
     }
 }

@@ -244,7 +244,7 @@ Measured on a history of about 6,000 commands and 21,000 runs:
 
 ```
 rust/src/
-├── daemon.rs      warm daemon: model loaded once, whole history in memory, JSON lines on localhost
+├── daemon.rs      warm daemon: model loaded when needed, whole history in memory, JSON lines on localhost
 ├── store.rs       in-memory model of the history (vectors, provenance, per-folder stats)
 ├── search.rs      hybrid ranking: meaning (bge-small) + fuzzy text + track record
 ├── dym.rs         did-you-mean for failed commands

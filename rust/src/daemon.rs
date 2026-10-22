@@ -1,4 +1,4 @@
-//! The warm daemon: model loaded once, whole history in memory, JSON-lines over localhost TCP.
+//! The warm daemon: model loaded when needed (embed.rs), whole history in memory, JSON-lines over localhost TCP.
 //! Wire-compatible with the Python daemon (same ops/fields on 127.0.0.1:8765), so old clients
 //! (the PowerShell hook, reman_hook_claude.py) keep working during cutover. New: persistent
 //! connections (many requests per socket), paging, hybrid ranking, fix-pairs, prediction,
@@ -280,13 +280,12 @@ impl Daemon {
         let store = Store::load(&conn)?;
         let fixes = Tracker::load(&conn)?;
         log(&format!("loaded {} commands / {} runs in {:?}", store.alive_count(), store.execs.len(), t.elapsed()));
-        let embedder = Embedder::load()?;
-        embedder.embed_query("warmup query to load the model once")?;
         Ok(Self {
             store: RwLock::new(store),
             fixes: Mutex::new(fixes),
             db: Mutex::new(conn),
-            embedder,
+            // loaded when first needed (embed.rs)
+            embedder: Embedder::new(),
             started: Instant::now(),
             flows_armed: Mutex::new(std::collections::HashMap::new()),
             greeted: Mutex::new(std::collections::HashSet::new()),
@@ -373,7 +372,7 @@ impl Daemon {
         let known: std::collections::HashMap<&str, (Vec<f32>, Option<String>)> = {
             let st = self.store.read();
             runs.iter()
-                .filter_map(|r| st.entry(&r.cmd).filter(|(_, e)| e.has_vec).map(|(i, e)| (r.cmd.as_str(), (st.vec(i).to_vec(), e.desc.clone()))))
+                .filter_map(|r| st.entry(&r.cmd).filter(|(_, e)| e.has_vec).map(|(i, e)| (r.cmd.as_str(), (st.vec(i).iter().map(|&h| crate::f16::decode(h)).collect(), e.desc.clone()))))
                 .collect()
         };
         let mut recorded = Vec::with_capacity(runs.len());
@@ -390,7 +389,9 @@ impl Daemon {
                         db::write_vectors(&tx, rec.command_id, rv, d.as_deref(), &p)?;
                     } else if let Some((v, d)) = known.get(r.cmd.as_str()) {
                         // new folder for a known command: reuse its vector so the row is complete
+                        // (another row's, exactly as stored; memory only holds it to 3 digits)
                         db::write_vectors(&tx, rec.command_id, v, d.as_deref(), &[])?;
+                        db::copy_vector(&tx, rec.command_id, &r.cmd)?;
                     }
                 }
                 recorded.push(rec);
@@ -2097,6 +2098,11 @@ impl Daemon {
 
     pub fn handle(&self, req: &Value) -> Result<Value> {
         let op = s(req, "op").unwrap_or("");
+        // someone is using reman (a shell's prompt, the finder opening, an agent): what they do
+        // next may need the model
+        if !matches!(op, "ping" | "shutdown") {
+            self.embedder.prewarm();
+        }
         Ok(match op {
             "ping" => json!({"ok": true, "indexed": self.store.read().alive_count(), "version": config::VERSION,
                               "pid": std::process::id(), "engine": "rust",
@@ -2347,6 +2353,11 @@ pub fn serve(port: u16) -> Result<()> {
                 }
                 if tick % 3600 == 0 {
                     let _ = d.purge_failed(1); // hourly retention
+                }
+                if tick % 30 == 0 {
+                    if let Some(min) = crate::settings::load().model_idle_minutes() {
+                        d.embedder.release_if_idle(min as i64 * 60);
+                    }
                 }
             }
         });

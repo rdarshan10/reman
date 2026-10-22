@@ -35,6 +35,7 @@ impl Row {
             x if x > 0 => &mut self.fail_ms,
             _ => return,
         };
+        v.reserve_exact(1);
         v.push(ms.min(u32::MAX as i64) as u32);
         if v.len() > Self::KEEP_MS {
             v.remove(0);
@@ -165,11 +166,12 @@ impl Interner {
 #[derive(Default)]
 pub struct Store {
     pub entries: Vec<Entry>,
-    /// entries.len() * DIM, L2-normalised; zero rows for entries without a vector
-    pub vecs: Vec<f32>,
-    pub desc_vecs: Vec<f32>,
+    /// entries.len() * DIM, L2-normalised, as half floats (f16.rs); zero rows for entries without
+    /// a vector
+    pub vecs: Vec<u16>,
+    pub desc_vecs: Vec<u16>,
     pub desc_owner: Vec<u32>,
-    pub by_text: HashMap<String, u32>,
+    by_text: TextIndex,
     pub by_id: HashMap<i64, u32>,
     cwds: Interner,
     cwd_repo: Vec<u32>,
@@ -199,6 +201,56 @@ pub fn char_bit(c: u8) -> u64 {
         _ => return 0,
     };
     1u64 << i
+}
+
+/// text -> entry, without a second copy of every text: keyed by the text's hash and checked
+/// against the entry's own text. A different text with the same hash (one in billions) goes in
+/// `clash`, keyed by itself.
+#[derive(Default)]
+struct TextIndex {
+    hasher: std::hash::RandomState,
+    by_hash: HashMap<u64, u32>,
+    clash: HashMap<String, u32>,
+}
+
+impl TextIndex {
+    fn get(&self, entries: &[Entry], text: &str) -> Option<u32> {
+        use std::hash::BuildHasher;
+        match self.by_hash.get(&self.hasher.hash_one(text)) {
+            Some(&i) if entries[i as usize].text == text => Some(i),
+            _ => self.clash.get(text).copied(),
+        }
+    }
+
+    fn insert(&mut self, entries: &[Entry], text: &str, i: u32) {
+        use std::hash::BuildHasher;
+        let h = self.hasher.hash_one(text);
+        match self.by_hash.get(&h) {
+            Some(&j) if entries[j as usize].text != text => {
+                self.clash.insert(text.to_string(), i);
+            }
+            _ => {
+                self.by_hash.insert(h, i);
+            }
+        }
+    }
+
+    fn remove(&mut self, entries: &[Entry], text: &str) {
+        use std::hash::BuildHasher;
+        let h = self.hasher.hash_one(text);
+        if self.by_hash.get(&h).is_some_and(|&i| entries[i as usize].text == text) {
+            self.by_hash.remove(&h);
+        }
+        self.clash.remove(text);
+    }
+}
+
+/// Room for one more vector: an eighth more at a time, not double (these are the big arrays, and
+/// a new command arrives one at a time)
+fn room(v: &mut Vec<u16>) {
+    if v.capacity() - v.len() < DIM {
+        v.reserve_exact((v.len() / 8).max(DIM * 64));
+    }
 }
 
 pub fn char_mask(t: &str) -> u64 {
@@ -267,18 +319,14 @@ impl Store {
 
     pub fn load(db: &Connection) -> Result<Self> {
         let mut s = Store::default();
-        let mut vec_by_id: HashMap<i64, Vec<u8>> = HashMap::new();
-        {
-            let mut st = db.prepare("SELECT command_id, vec FROM command_vec")?;
-            let mut rows = st.query([])?;
-            while let Some(r) = rows.next()? {
-                vec_by_id.insert(r.get(0)?, r.get(1)?);
-            }
-        }
+        // sized once: grown by doubling, the vectors would hold up to twice their size
+        let n: i64 = db.query_row("SELECT count(*) FROM commands", [], |r| r.get(0))?;
+        s.vecs.reserve_exact(n.max(0) as usize * DIM);
+        // each vector read with its row (not all of them gathered first: ~1.5 KB each)
         let mut st = db.prepare(
-            "SELECT id, cmd_text, cwd, run_count, success_count, fail_count, human_runs, agent_runs,
-                    last_used, last_exit, last_actor, description, pinned
-             FROM commands ORDER BY id",
+            "SELECT c.id, c.cmd_text, c.cwd, c.run_count, c.success_count, c.fail_count, c.human_runs, c.agent_runs,
+                    c.last_used, c.last_exit, c.last_actor, c.description, c.pinned, v.vec
+             FROM commands c LEFT JOIN command_vec v ON v.command_id = c.id ORDER BY c.id",
         )?;
         let mut rows = st.query([])?;
         while let Some(r) = rows.next()? {
@@ -305,7 +353,7 @@ impl Store {
             };
             let desc: Option<String> = r.get::<_, Option<String>>(11)?.filter(|d| !d.is_empty());
             let pinned = r.get::<_, Option<i64>>(12)?.unwrap_or(0) != 0;
-            let vec = vec_by_id.get(&id).and_then(|b| db::unpack(b));
+            let vec = r.get_ref(13)?.as_blob_or_null()?.and_then(db::unpack);
             let ei = s.upsert_entry(&text, vec.as_deref(), desc);
             let e = &mut s.entries[ei as usize];
             e.pinned |= pinned;
@@ -327,7 +375,7 @@ impl Store {
             }
             if let Some(mut v) = db::unpack(&r.get::<_, Vec<u8>>(2)?) {
                 crate::embed::normalize(&mut v);
-                s.desc_vecs.extend_from_slice(&v);
+                crate::f16::encode_into(&mut s.desc_vecs, &v);
                 s.desc_owner.push(ei);
             }
         }
@@ -361,6 +409,19 @@ impl Store {
                 row.note_ms(ex.exit, r.get(9)?);
             }
             s.execs.push(ex);
+        }
+        s.vecs.shrink_to_fit();
+        s.desc_vecs.shrink_to_fit();
+        s.desc_owner.shrink_to_fit();
+        s.execs.shrink_to_fit();
+        s.entries.shrink_to_fit();
+        // most commands have one row and a few runs: a Vec grown one push at a time holds 4+
+        for e in &mut s.entries {
+            e.rows.shrink_to_fit();
+            for r in &mut e.rows {
+                r.ok_ms.shrink_to_fit();
+                r.fail_ms.shrink_to_fit();
+            }
         }
         for i in 0..s.entries.len() {
             let e = &s.entries[i];
@@ -495,18 +556,20 @@ impl Store {
         actor_ok && status_ok && a.runs > 0
     }
 
-    pub fn vec(&self, i: u32) -> &[f32] {
+    pub fn vec(&self, i: u32) -> &[u16] {
         &self.vecs[i as usize * DIM..(i as usize + 1) * DIM]
     }
 
     fn upsert_entry(&mut self, text: &str, vec: Option<&[f32]>, desc: Option<String>) -> u32 {
-        if let Some(&i) = self.by_text.get(text) {
+        if let Some(i) = self.by_text.get(&self.entries, text) {
             let e = &mut self.entries[i as usize];
             if !e.has_vec {
                 if let Some(v) = vec {
                     let mut v = v.to_vec();
                     crate::embed::normalize(&mut v);
-                    self.vecs[i as usize * DIM..(i as usize + 1) * DIM].copy_from_slice(&v);
+                    for (d, x) in self.vecs[i as usize * DIM..(i as usize + 1) * DIM].iter_mut().zip(&v) {
+                        *d = crate::f16::encode(*x);
+                    }
                     e.has_vec = true;
                 }
             }
@@ -516,15 +579,17 @@ impl Store {
             return i;
         }
         let i = self.entries.len() as u32;
+        room(&mut self.vecs);
         match vec {
             Some(v) => {
                 let mut v = v.to_vec();
                 crate::embed::normalize(&mut v);
-                self.vecs.extend_from_slice(&v);
+                crate::f16::encode_into(&mut self.vecs, &v);
             }
-            None => self.vecs.extend(std::iter::repeat_n(0.0, DIM)),
+            None => self.vecs.extend(std::iter::repeat_n(0, DIM)),
         }
-        let progs = describe::programs(text);
+        let mut progs = describe::programs(text);
+        progs.shrink_to_fit();
         self.programs.extend(progs.iter().cloned());
         self.entries.push(Entry {
             text: text.to_string(),
@@ -543,19 +608,19 @@ impl Store {
             noise: false,
             progs,
         });
-        self.by_text.insert(text.to_string(), i);
+        self.by_text.insert(&self.entries, text, i);
         i
     }
 
     pub fn knows(&self, text: &str) -> bool {
-        self.by_text.contains_key(text)
+        self.by_text.get(&self.entries, text).is_some()
     }
 
     /// Mirror a db::record_run into memory. `vecs` = (raw, desc display, desc part vectors) for a
     /// brand-new text. Returns the entry index.
     pub fn apply_run(&mut self, command_id: i64, new_row: bool, run: &Run, vecs: Option<(&[f32], Option<String>, &[Vec<f32>])>) -> u32 {
-        let ei = match self.by_text.get(&run.cmd) {
-            Some(&i) => i,
+        let ei = match self.by_text.get(&self.entries, &run.cmd) {
+            Some(i) => i,
             None => {
                 let (raw, desc, parts) = match vecs {
                     Some((raw, d, p)) => (Some(raw), d, p),
@@ -565,7 +630,8 @@ impl Store {
                 for v in parts {
                     let mut v = v.clone();
                     crate::embed::normalize(&mut v);
-                    self.desc_vecs.extend_from_slice(&v);
+                    room(&mut self.desc_vecs);
+                    crate::f16::encode_into(&mut self.desc_vecs, &v);
                     self.desc_owner.push(i);
                 }
                 i
@@ -579,6 +645,7 @@ impl Store {
         e.alive = true;
         e.noise = false; // it just ran for real
         if new_row {
+            e.rows.reserve_exact(1);
             e.rows.push(Row {
                 id: command_id,
                 cwd,
@@ -698,8 +765,7 @@ impl Store {
                 e.rows.retain(|r| r.id != *id);
                 if e.rows.is_empty() && e.alive {
                     e.alive = false;
-                    let t = e.text.clone();
-                    self.by_text.remove(&t);
+                    self.by_text.remove(&self.entries, &self.entries[ei as usize].text);
                 }
             }
         }
@@ -732,12 +798,12 @@ impl Store {
 
     /// Row ids of a text (for `forget`).
     pub fn row_ids(&self, text: &str) -> Vec<i64> {
-        self.by_text.get(text).map(|&i| self.entries[i as usize].rows.iter().map(|r| r.id).collect()).unwrap_or_default()
+        self.by_text.get(&self.entries, text).map(|i| self.entries[i as usize].rows.iter().map(|r| r.id).collect()).unwrap_or_default()
     }
 
     pub fn set_pinned(&mut self, text: &str, on: bool) -> bool {
-        match self.by_text.get(text) {
-            Some(&i) => {
+        match self.by_text.get(&self.entries, text) {
+            Some(i) => {
                 self.entries[i as usize].pinned = on;
                 true
             }
@@ -746,7 +812,7 @@ impl Store {
     }
 
     pub fn entry(&self, text: &str) -> Option<(u32, &Entry)> {
-        self.by_text.get(text).map(|&i| (i, &self.entries[i as usize]))
+        self.by_text.get(&self.entries, text).map(|i| (i, &self.entries[i as usize]))
     }
 }
 
@@ -780,6 +846,25 @@ mod tests {
         s.remove_rows(&s.row_ids("ls"));
         assert!(!s.knows("ls"));
         assert_eq!(s.execs.len(), 2);
+    }
+
+    #[test]
+    fn the_text_index_finds_every_text_even_when_two_share_a_hash() {
+        use std::hash::BuildHasher;
+        let mut s = Store::default();
+        let a = s.upsert_entry("git status", None, None);
+        // a second text whose hash is (made to look like) the first one's
+        let h = s.by_text.hasher.hash_one("git stash");
+        s.by_text.by_hash.insert(h, a);
+        let b = s.upsert_entry("git stash", None, None);
+        assert_ne!(a, b);
+        assert_eq!(s.entry("git status").map(|x| x.0), Some(a));
+        assert_eq!(s.entry("git stash").map(|x| x.0), Some(b));
+        assert_eq!(s.upsert_entry("git stash", None, None), b, "found again, not added twice");
+        s.by_text.remove(&s.entries, "git stash");
+        assert!(!s.knows("git stash"));
+        assert!(s.knows("git status"));
+        assert!(!s.knows("git stat"));
     }
 }
 

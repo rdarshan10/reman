@@ -11,6 +11,7 @@ mod db;
 mod describe;
 mod dym;
 mod embed;
+mod f16;
 mod errors;
 mod fixpairs;
 mod git;

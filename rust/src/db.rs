@@ -308,6 +308,17 @@ pub fn write_vectors(db: &Connection, cid: i64, raw: &[f32], desc: Option<&str>,
     Ok(())
 }
 
+/// A new row of a text already known gets the vector one of its other rows has in the database.
+pub fn copy_vector(db: &Connection, cid: i64, text: &str) -> Result<()> {
+    db.execute(
+        "INSERT OR REPLACE INTO command_vec (command_id, vec)
+         SELECT ?1, v.vec FROM commands c JOIN command_vec v ON v.command_id = c.id
+         WHERE c.cmd_text = ?2 AND c.id != ?1 LIMIT 1",
+        params![cid, text],
+    )?;
+    Ok(())
+}
+
 /// Replace a command's description + description vectors, leaving its raw vector alone.
 pub fn write_descriptions(db: &Connection, cid: i64, desc: Option<&str>, descs: &[(&str, Vec<f32>)]) -> Result<()> {
     db.execute("DELETE FROM command_desc_vec WHERE command_id=?", [cid])?;

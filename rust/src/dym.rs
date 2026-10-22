@@ -2,7 +2,6 @@
 //! Dual signal (typo closeness + intent similarity), exactly the Python weighting
 //! (0.55 typo + 0.45 semantic), but OSA is pruned with a length bound so it stays in the
 //! low milliseconds instead of Python's ~1s full scan.
-use crate::search::dot;
 use crate::store::{Scope, Store};
 
 /// Optimal-string-alignment distance (Damerau-Levenshtein where an adjacent transposition = 1).
@@ -71,7 +70,7 @@ pub fn did_you_mean(store: &Store, failed: &str, qv: Option<&[f32]>, k: usize, w
             continue;
         }
         let sem = match qv {
-            Some(v) if e.has_vec => dot(store.vec(i as u32), v),
+            Some(v) if e.has_vec => crate::f16::dot(store.vec(i as u32), v),
             _ => 0.0,
         };
         // typo upper bound from the length difference alone: dist >= |la - lb|
