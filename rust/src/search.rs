@@ -146,10 +146,16 @@ pub fn command_like(store: &Store, text: &str) -> bool {
         return false;
     }
     let words: Vec<String> = text.split_whitespace().map(str::to_lowercase).collect();
+    // the first word starts the program's name, or a part of its path (`venv activ` is
+    // `venv/Scripts/activate`)
+    let runs_it = |e: &crate::store::Entry| {
+        e.gkey.split(' ').next().is_some_and(|p| p.starts_with(first.as_str()))
+            || e.lower.split_whitespace().next().is_some_and(|t| t.split(|c: char| !c.is_ascii_alphanumeric()).any(|w| w.starts_with(first.as_str())))
+    };
     store.entries.iter().any(|e| {
         e.alive
             && e.lower.len() <= FUZZY_SPAN
-            && e.gkey.split(' ').next().is_some_and(|p| p.starts_with(first.as_str()))
+            && runs_it(e)
             && words.iter().all(|w| e.lower.split(|c: char| !c.is_ascii_alphanumeric()).any(|t| t.starts_with(w.as_str())))
     })
 }
@@ -645,8 +651,10 @@ mod tests {
 
     #[test]
     fn command_like_queries() {
-        let s = store_with(&["docker compose up -d", "npm run dev", "npm run e2e", "git status", "installer /S", "checkupdates"]);
+        let s = store_with(&["docker compose up -d", "npm run dev", "npm run e2e", "git status", "installer /S", "checkupdates", "venv/Scripts/activate"]);
         assert!(command_like(&s, "dock comp up"));
+        // a part of the program's path
+        assert!(command_like(&s, "venv activ"));
         assert!(command_like(&s, "npm e2e"));
         assert!(command_like(&s, "git sta"));
         assert!(command_like(&s, "install"));

@@ -117,7 +117,7 @@ pub fn parse_cmd(cmd: &str) -> (Option<String>, Option<String>) {
 pub fn programs(cmd: &str) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     let cmd = without_heredoc_bodies(cmd);
-    for seg in cmd.split([';', '|', '&', '\n', '(', ')']) {
+    for seg in steps(&cmd) {
         let seg = seg.trim();
         let first = seg.split_whitespace().next().unwrap_or("").to_lowercase();
         if seg.is_empty() || matches!(first.as_str(), "cd" | "pushd" | "popd" | "set-location" | "sl") {
@@ -132,6 +132,43 @@ pub fn programs(cmd: &str) -> Vec<String> {
             }
         }
     }
+    out
+}
+
+/// The steps of a command line: split at `;`, `|`, `&`, newlines and parentheses, but not inside
+/// quotes (`grep "a\|b"` is one step: its `|` is the pattern's).
+fn steps(cmd: &str) -> Vec<&str> {
+    split_outside_quotes(cmd, |c| matches!(c, ';' | '|' | '&' | '\n' | '(' | ')'))
+}
+
+fn split_outside_quotes(cmd: &str, sep: impl Fn(char) -> bool) -> Vec<&str> {
+    let mut out = Vec::new();
+    let (mut start, mut quote, mut escaped) = (0, None::<char>, false);
+    for (i, c) in cmd.char_indices() {
+        // a line ends a step whatever is open on it (`$s = @'` starts a here-string, no quote)
+        if c == '\n' && sep(c) {
+            out.push(&cmd[start..i]);
+            start = i + 1;
+            (quote, escaped) = (None, false);
+            continue;
+        }
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        match (quote, c) {
+            (Some('"'), '\\') => escaped = true,
+            (Some(q), c) if c == q => quote = None,
+            (Some(_), _) => {}
+            (None, '"' | '\'') => quote = Some(c),
+            (None, c) if sep(c) => {
+                out.push(&cmd[start..i]);
+                start = i + c.len_utf8();
+            }
+            _ => {}
+        }
+    }
+    out.push(&cmd[start..]);
     out
 }
 
@@ -462,16 +499,47 @@ pub fn request_action(text: &str) -> Option<Action> {
 /// (the wrapped command's first: `docker exec web alembic upgrade head` upgrades). Never its
 /// program's in general: `npx kill-port 3000` is no "Execute binaries from npm packages".
 pub fn command_action(cmd: &str, d: &Description) -> Option<Action> {
-    // a pipeline or a chain does what its last step does, which its description doesn't say
-    // (`git branch --merged main | xargs git branch -d` lists, then deletes)
-    if cmd.trim().contains(['|', ';', '\n']) || cmd.contains("&&") {
-        return None;
+    // a chain does what its steps do when they agree (`rm -rf a; rm -rf b` deletes); steps that
+    // disagree (`npm install && npm run build`) say nothing. Changing directory is not a step's
+    // purpose, and a step of unknown purpose doesn't count either way.
+    let parts: Vec<&str> = split_outside_quotes(cmd, |c| matches!(c, ';' | '&' | '\n' | '(' | ')'))
+        .into_iter()
+        .map(str::trim)
+        .filter(|s| !s.is_empty() && !matches!(s.split_whitespace().next().map(str::to_lowercase).as_deref(), Some("cd" | "pushd" | "popd" | "set-location" | "sl" | "chdir")))
+        .collect();
+    // a pipeline does what its last step does with what flows into it (`... | xargs rm`)
+    let piped = |s: &str| -> Option<Action> {
+        let last = split_outside_quotes(s, |c| c == '|').into_iter().map(str::trim).rfind(|p| !p.is_empty())?;
+        let last = last.strip_prefix("xargs ").map(|_| xargs_step(&format!("| {last}"))).flatten().unwrap_or_else(|| last.to_string());
+        step_action(&last, &describe(&last))
+    };
+    match parts.as_slice() {
+        [] => None,
+        [one] if !one.contains('|') => {
+            if one.trim() == cmd.trim() { step_action(cmd, d) } else { step_action(one, &describe(one)) }
+        }
+        _ => {
+            let acts: Vec<Action> = parts.iter().filter_map(|s| piped(s)).collect();
+            acts.first().copied().filter(|a| acts.iter().all(|b| b == a))
+        }
     }
+}
+
+/// What one command does: the first verb its specific sentences start with, else its program's
+/// general sentence ("rd: Remove directories"), but never a wrapper's (`npx kill-port 3000` is no
+/// "Execute binaries from npm packages").
+fn step_action(cmd: &str, d: &Description) -> Option<Action> {
     let verb = |text: &str| {
         let sentence = text.split_once(": ").map_or(text, |(_, s)| s);
         sentence.split_whitespace().next().and_then(|w| action_of(&w.to_lowercase()))
     };
-    d.parts.iter().filter(|p| p.0 != "gen" && p.0 != "wgen").find_map(|p| verb(&p.1))
+    let general = |k: &str| k == "gen" || k == "wgen";
+    d.parts.iter().filter(|p| !general(p.0)).find_map(|p| verb(&p.1)).or_else(|| {
+        if wrapped(cmd).is_some() || cmd.split_whitespace().next().is_some_and(|w| matches!(w.to_lowercase().as_str(), "npx" | "pnpx" | "bunx" | "sudo" | "xargs" | "env" | "time" | "nohup")) {
+            return None;
+        }
+        d.parts.iter().filter(|p| general(p.0)).find_map(|p| verb(&p.1))
+    })
 }
 
 /// Requests and commands that undo each other, or read where the other writes: "install node
@@ -818,9 +886,18 @@ mod tests {
         assert_eq!(command_action("rm -rf node_modules", &describe("rm -rf node_modules")), Some(Delete));
         assert_eq!(command_action("npm install", &describe("npm install")), Some(Install));
         assert_eq!(command_action("git branch -D old", &describe("git branch -D old")), Some(Delete));
-        // a pipeline does what its last step does: not known
-        let p = "git branch --merged main | grep -v main | xargs git branch -d";
-        assert_eq!(command_action(p, &describe(p)), None);
+        let act = |c: &str| command_action(c, &describe(c));
+        // a pipeline does what its last step does with what flows into it
+        assert_eq!(act("git branch --merged main | grep -v main | xargs git branch -d"), Some(Delete));
+        // a chain, what its steps agree on; nothing when they don't
+        assert_eq!(act("rm -rf node_modules\nrm -rf .expo\nrm -f package-lock.json"), Some(Delete));
+        assert_eq!(act("npm install && npm run build"), None);
+        assert_eq!(act("cd web && npm install"), Some(Install));
+        // a program's general sentence when nothing more specific is known, never a wrapper's
+        assert_eq!(act("rd /s /q node_modules"), Some(Delete));
+        assert_eq!(act("npx kill-port 3000"), None);
+        // a `|` inside quotes is a grep pattern's, not a pipe
+        assert_eq!(programs(r#"grep -n "moduleGlows\|Modules drawn as a base" theme/colors.ts"#), vec!["grep"]);
         assert!(clash(Install, Delete) && clash(Show, Start) && clash(Start, Stop));
         assert!(!clash(Install, Install) && !clash(Show, Download));
     }

@@ -122,6 +122,17 @@ class Sandbox:
         shutil.rmtree(self.home, ignore_errors=True)
 
 
+def real_models_state():
+    """What is in the real models folder (names, sizes, times): the suite must not change it."""
+    out = []
+    for root, dirs, files in os.walk(REAL_MODELS):
+        for f in files:
+            p = os.path.join(root, f)
+            st = os.stat(p)
+            out.append((p, st.st_size, st.st_mtime_ns))
+    return sorted(out)
+
+
 def wait_for(pred, secs=300):
     end = time.time() + secs
     while time.time() < end:
@@ -136,6 +147,7 @@ def main():
     if not glob.glob(os.path.join(REAL_MODELS, BASE_CACHE, "snapshots", "*", "onnx", "model.onnx")):
         print("needs bge-small-en-v1.5 in ~/.reman/models (run reman once)")
         return 1
+    before = real_models_state()
     files = tempfile.mkdtemp(prefix="reman-model-srv-")
     if "--zip" in sys.argv:
         shutil.copy(sys.argv[sys.argv.index("--zip") + 1], os.path.join(files, "model.zip"))
@@ -161,7 +173,7 @@ def main():
             moved = wait_for(lambda: call({"op": "ping"}).get("model") == MODEL_ID)
             check("the daemon moves the history to reman's model", bool(moved), sb.log()[-600:])
             check("the model is unpacked and marked checked", os.path.exists(os.path.join(sb.home, "models", MODEL_ID, ".verified")))
-            check("the real models folder is untouched", not os.path.exists(os.path.join(REAL_MODELS, MODEL_ID)))
+            check("the real models folder is untouched", real_models_state() == before)
             r = call({"op": "search", "query": "start the containers", "k": 3})
             check("search finds things with it", r["results"] and r["results"][0]["command"] == "docker compose up -d", r["results"][:1])
             check("the log says what it did", "re-embedded" in sb.log() and MODEL_ID in sb.log())
