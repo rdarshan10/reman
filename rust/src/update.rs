@@ -119,7 +119,7 @@ fn test_server() -> Option<String> {
 
 /// http://127.0.0.1:<port> or http://localhost:<port>, nothing else (`http://localhost:@elsewhere/`
 /// is elsewhere).
-fn on_this_machine(url: &str) -> bool {
+pub(crate) fn on_this_machine(url: &str) -> bool {
     ["http://127.0.0.1:", "http://localhost:"].iter().any(|p| {
         url.strip_prefix(p).is_some_and(|rest| {
             let port = rest.split('/').next().unwrap_or("");
@@ -219,10 +219,18 @@ impl std::fmt::Display for Missing {
 
 impl std::error::Error for Missing {}
 
-/// At most `limit` bytes of `url`, into `to`.
-fn download(url: &str, to: &Path, limit: u64) -> Result<()> {
+/// At most `limit` bytes of `url`, into `to`. https only, except a test suite's server on this
+/// machine for a sandbox (REMAN_HOME set).
+pub(crate) fn download(url: &str, to: &Path, limit: u64) -> Result<()> {
     use std::io::Read;
-    let resp = match agent(Duration::from_secs(600)).get(url).header("User-Agent", user_agent()).call() {
+    let sandbox = std::env::var_os("REMAN_HOME").is_some_and(|h| !h.is_empty());
+    let local = sandbox && on_this_machine(url);
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .timeout_global(Some(Duration::from_secs(600)))
+        .https_only(test_server().is_none() && !local)
+        .build()
+        .into();
+    let resp = match agent.get(url).header("User-Agent", user_agent()).call() {
         Ok(r) => r,
         Err(ureq::Error::StatusCode(404)) => return Err(Missing.into()),
         Err(e) => return Err(e).with_context(|| format!("downloading {url}")),
@@ -246,7 +254,7 @@ fn expected_sum(sums: &str, name: &str) -> Option<String> {
     })
 }
 
-fn sha256_of(p: &Path) -> Result<String> {
+pub(crate) fn sha256_of(p: &Path) -> Result<String> {
     use std::io::Read;
     let (mut h, mut f, mut buf) = (Sha256::new(), std::fs::File::open(p)?, vec![0u8; 1 << 16]);
     loop {
@@ -259,7 +267,7 @@ fn sha256_of(p: &Path) -> Result<String> {
     Ok(h.finalize().iter().map(|b| format!("{b:02x}")).collect())
 }
 
-fn unpack(archive: &Path, into: &Path) -> Result<()> {
+pub(crate) fn unpack(archive: &Path, into: &Path) -> Result<()> {
     // the system's own tar, not whatever a folder on PATH calls tar (Windows 10 and 11 ship
     // bsdtar, which reads zip too); both refuse entries that climb out with `..`
     let tar = if cfg!(windows) {

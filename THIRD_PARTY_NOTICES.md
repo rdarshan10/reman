@@ -34,6 +34,13 @@ https://huggingface.co/BAAI/bge-small-en-v1.5
 The search model, downloaded on first start (not part of the program). Copyright (c) BAAI. MIT
 License (the same terms as the MIT License text below, with that copyright line).
 
+reman's own search model (`reman-commands-1`, downloaded once from reman's GitHub releases, not
+part of the program) is bge-small-en-v1.5 fine-tuned on commands. It was trained on descriptions
+and examples from the tldr-pages (CC BY 4.0, above) and on casual rewordings of those descriptions
+written by Qwen2.5-1.5B-Instruct (https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct, Apache
+License 2.0); the tools that made it are in rust/tools/. Stack Exchange content was used only to
+measure it, never to train it.
+
 ## Atuin
 
 https://github.com/atuinsh/atuin

@@ -63,6 +63,11 @@ pub struct Settings {
     /// with nobody using reman, and loaded again when someone does; absent = 15, 0 = kept
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_idle_min: Option<u32>,
+    /// which embedding model the history is searched with: absent = reman's own (model.rs),
+    /// downloaded once and checked against the checksum built into reman; "base" = the
+    /// general-purpose bge-small-en-v1.5 it started from
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub embed_model: Option<String>,
     /// shells open inside `reman shell` (so what your commands print is kept too)
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub shell_layer: bool,

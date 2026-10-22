@@ -235,7 +235,7 @@ Everything lives in `~/.reman/`:
 | path | what |
 |---|---|
 | `reman.db` | SQLite, same schema as the Python version; each run also keeps the end of what it printed (agents' runs, and yours inside `reman shell`), for the newest `output_runs` runs (3000 unless set) |
-| `config.json` | agent roots, strict-secrets flag, HTTP port/token, and the settings (`finder_height`, `finder_keys`, `finder_who`, `output_runs`, `shell_layer`, `model_idle_min`, ...) |
+| `config.json` | agent roots, strict-secrets flag, HTTP port/token, and the settings (`finder_height`, `finder_keys`, `finder_who`, `output_runs`, `shell_layer`, `model_idle_min`, `embed_model`, ...) |
 | `spool.jsonl` | fish captures and runs captured while the daemon was down, drained every second |
 | `models/` | bge-small-en-v1.5 (ONNX) |
 | `daemon.log`, `tui-panic.log` | logs |

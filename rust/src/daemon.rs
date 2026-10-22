@@ -280,12 +280,22 @@ impl Daemon {
         let store = Store::load(&conn)?;
         let fixes = Tracker::load(&conn)?;
         log(&format!("loaded {} commands / {} runs in {:?}", store.alive_count(), store.execs.len(), t.elapsed()));
+        // queries are embedded by the model the history's vectors came from (upgrade_model moves
+        // both to another), loaded when first needed (embed.rs)
+        let folder = crate::embed::override_dir().or_else(|| {
+            let mut have = db::meta_get(&conn, "embed_model").ok().flatten().unwrap_or_else(|| crate::model::BASE.into());
+            // an empty history starts on the model it should use: nothing to re-embed
+            let want = crate::model::wanted();
+            if store.len() == 0 && have != want && (want == crate::model::BASE || crate::model::ready(want)) && db::meta_set(&conn, "embed_model", want).is_ok() {
+                have = want.to_string();
+            }
+            crate::model::folder(&have).filter(|_| crate::model::ready(&have))
+        });
         Ok(Self {
             store: RwLock::new(store),
             fixes: Mutex::new(fixes),
             db: Mutex::new(conn),
-            // loaded when first needed (embed.rs)
-            embedder: Embedder::new(),
+            embedder: Embedder::new(folder),
             started: Instant::now(),
             flows_armed: Mutex::new(std::collections::HashMap::new()),
             greeted: Mutex::new(std::collections::HashSet::new()),
@@ -1786,6 +1796,84 @@ impl Daemon {
         Ok(work.len())
     }
 
+    /// Move the history to the model reman should use (model::wanted): download it when it isn't
+    /// here (never when updates are off: that keeps reman off the network), then re-embed every
+    /// command and description with it. The old model answers searches all the while: the new
+    /// vectors are made in memory by a second copy of the model, written in one transaction with
+    /// the model's name, and only then does the Embedder switch. Runs recorded meanwhile were
+    /// embedded by the old model: they are embedded again after.
+    fn upgrade_model(&self) -> Result<()> {
+        use crate::model;
+        if crate::embed::override_dir().is_some() {
+            return Ok(()); // a model being tried by hand stays as it is
+        }
+        let have = db::meta_get(&self.db.lock(), "embed_model")?.unwrap_or_else(|| model::BASE.into());
+        let want = model::wanted();
+        // a test suite's daemon (REMAN_DB) never downloads it: it uses it when it is here
+        let may_download = crate::settings::load().updates_mode() != "off" && (std::env::var_os("REMAN_DB").is_none() || std::env::var_os("REMAN_MODEL_URL").is_some());
+        if want != model::BASE && !model::ready(want) && may_download {
+            log(&format!("downloading the embedding model {want}"));
+            if let Err(e) = model::fetch() {
+                log(&format!("embedding model download failed: {e:#}"));
+            }
+        }
+        let target = if want == model::BASE || model::ready(want) { want } else { model::BASE };
+        if have == target && (target == model::BASE || model::ready(target)) {
+            return Ok(());
+        }
+        let t = Instant::now();
+        log(&format!("re-embedding the history with {target} (was {have})"));
+        let folder = model::folder(target);
+        let mut m = crate::embed::load(folder.as_deref())?;
+        let (work, last_row): (Vec<(String, Vec<i64>)>, i64) = {
+            let st = self.store.read();
+            let w: Vec<(String, Vec<i64>)> = st.entries.iter().filter(|e| e.alive).map(|e| (e.text.clone(), e.rows.iter().map(|r| r.id).collect())).collect();
+            let last = w.iter().flat_map(|(_, ids)| ids.iter().copied()).max().unwrap_or(0);
+            (w, last)
+        };
+        type Done = (Vec<f32>, Option<String>, Vec<(&'static str, Vec<f32>)>);
+        let mut done: Vec<Done> = Vec::with_capacity(work.len());
+        for chunk in work.chunks(256) {
+            let descs: Vec<describe::Description> = chunk.iter().map(|(t, _)| describe::describe(t)).collect();
+            let mut batch: Vec<&str> = chunk.iter().map(|(t, _)| t.as_str()).collect();
+            for d in &descs {
+                batch.extend(d.parts.iter().map(|p| p.1.as_str()));
+            }
+            let mut vecs = crate::embed::embed_with(&mut m, &batch)?.into_iter();
+            let raw: Vec<Vec<f32>> = (0..chunk.len()).map(|_| vecs.next().unwrap()).collect();
+            for (rv, d) in raw.into_iter().zip(descs) {
+                let parts = d.parts.iter().map(|p| (p.0, vecs.next().unwrap())).collect();
+                done.push((rv, d.display, parts));
+            }
+        }
+        drop(m);
+        {
+            let mut conn = self.db.lock();
+            let tx = conn.transaction()?;
+            for ((_, ids), (rv, display, parts)) in work.iter().zip(&done) {
+                for (i, id) in ids.iter().enumerate() {
+                    db::write_vectors(&tx, *id, rv, None, &[])?;
+                    // (every description vector replaced: none of the old model's left beside them)
+                    db::write_descriptions(&tx, *id, display.as_deref(), if i == 0 { parts } else { &[] })?;
+                }
+            }
+            db::meta_set(&tx, "embed_model", target)?;
+            tx.commit()?;
+        }
+        self.embedder.switch(folder);
+        self.reload()?;
+        let late: Vec<(String, Vec<i64>)> = {
+            let st = self.store.read();
+            st.entries.iter().filter(|e| e.alive && e.rows.iter().any(|r| r.id > last_row)).map(|e| (e.text.clone(), e.rows.iter().map(|r| r.id).collect())).collect()
+        };
+        if !late.is_empty() {
+            self.embed_rows(&late)?;
+            self.reload()?;
+        }
+        log(&format!("re-embedded {} commands with {target} in {:?}", work.len() + late.len(), t.elapsed()));
+        Ok(())
+    }
+
     /// Embed each (command, its row ids) and its descriptions again, and save them.
     fn embed_rows(&self, work: &[(String, Vec<i64>)]) -> Result<()> {
         for chunk in work.chunks(256) {
@@ -2106,6 +2194,7 @@ impl Daemon {
         Ok(match op {
             "ping" => json!({"ok": true, "indexed": self.store.read().alive_count(), "version": config::VERSION,
                               "pid": std::process::id(), "engine": "rust",
+                              "model": db::meta_get(&self.db.lock(), "embed_model").ok().flatten().unwrap_or_else(|| crate::model::BASE.into()),
                               "descriptions_current": db::meta_get(&self.db.lock(), "describe_version").ok().flatten().as_deref() == Some(DESCRIBE_VERSION)}),
             "ingest" => match run_from(req, "agent:claude-code") {
                 None => json!({"ok": false, "skipped": "empty"}),
@@ -2330,10 +2419,16 @@ pub fn serve(port: u16) -> Result<()> {
     println!("{msg}");
     {
         let d = d.clone();
-        std::thread::spawn(move || match d.redescribe() {
-            Ok(0) => {}
-            Ok(n) => log(&format!("re-described {n} commands whose description improved")),
-            Err(e) => log(&format!("redescribe failed: {e}")),
+        std::thread::spawn(move || {
+            match d.redescribe() {
+                Ok(0) => {}
+                Ok(n) => log(&format!("re-described {n} commands whose description improved")),
+                Err(e) => log(&format!("redescribe failed: {e}")),
+            }
+            // after: both write description vectors
+            if let Err(e) = d.upgrade_model() {
+                log(&format!("embedding model upgrade failed: {e:#}"));
+            }
         });
     }
     if crate::update::daemon_checks() {

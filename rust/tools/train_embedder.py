@@ -26,6 +26,34 @@ def dev_tool(tool):
     return int(hashlib.sha256(("dev:" + tool).encode()).hexdigest(), 16) % 100 < 5
 
 
+# How people say the verbs tldr starts its sentences with: the paraphrasing model almost never
+# writes "spin up" or "tear down" (0 and 47 of 74k queries), people type them all the time
+PHRASAL = {
+    "stop": ["tear down", "shut down", "bring down"],
+    "start": ["spin up", "fire up", "bring up"],
+    "run": ["kick off", "fire up", "launch"],
+    "remove": ["get rid of", "wipe", "clean up"],
+    "delete": ["get rid of", "wipe", "nuke"],
+    "kill": ["end", "stop"],
+    "list": ["show me", "see all", "what are the"],
+    "display": ["see", "look at", "check"],
+    "show": ["see", "look at", "check"],
+    "create": ["make", "set up", "add"],
+    "install": ["set up", "add", "get"],
+    "update": ["bump", "refresh"],
+    "upgrade": ["bump", "update"],
+    "download": ["grab", "pull down", "fetch"],
+    "restart": ["reboot", "bounce"],
+}
+
+
+def casual_verb(desc, rnd):
+    """The description with its leading verb said the way people say it, or None."""
+    first, _, rest = desc.partition(" ")
+    alts = PHRASAL.get(first.lower())
+    return f"{rnd.choice(alts)} {rest}".strip().lower() if alts and rest else None
+
+
 def sentence(r):
     """A description as reman embeds it (describe.rs): "git branch: Delete a local branch"."""
     return f"{r['page'].replace('-', ' ')}: {r['desc']}"
@@ -45,7 +73,10 @@ def examples(part, rnd, paraphrases=None):
         if not others:
             continue
         out.append({"anchor": form(r["desc"]), "positive": r["cmd"], "negative": rnd.choice(others)["cmd"]})
-        for q in (paraphrases or {}).get((r["tool"], r["desc"]), []):
+        queries = list((paraphrases or {}).get((r["tool"], r["desc"]), []))
+        if paraphrases is not None and (casual := casual_verb(r["desc"], rnd)):
+            queries.append(casual)
+        for q in queries:
             out.append({"anchor": form(q), "positive": r["cmd"], "negative": rnd.choice(others)["cmd"]})
             out.append({"anchor": form(q), "positive": sentence(r), "negative": sentence(rnd.choice(others))})
     rnd.shuffle(out)

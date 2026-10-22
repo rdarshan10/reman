@@ -12,12 +12,15 @@ use anyhow::{Result, anyhow};
 use fastembed::{EmbeddingModel, TextEmbedding, TextInitOptions};
 use parking_lot::Mutex;
 use std::collections::{HashMap, VecDeque};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, Ordering};
 
 pub struct Embedder {
     /// None until something needs it, and again once it has gone unused for a while
     model: Arc<Mutex<Option<TextEmbedding>>>,
+    /// which model: its folder, or None for the base model (model.rs)
+    folder: Arc<Mutex<Option<PathBuf>>>,
     /// a background load is under way
     loading: Arc<AtomicBool>,
     /// when reman was last used (unix seconds)
@@ -57,9 +60,8 @@ fn search_form(q: &str) -> String {
 }
 
 /// A model in a folder of its own (model.onnx + tokenizer files, as tools/train_embedder.py
-/// exports them): REMAN_MODEL_DIR, for trying a fine-tuned model. Every stored vector must come
-/// from the same model, so a history is re-embedded after switching (the `reindex` op).
-fn load_from(dir: &std::path::Path, threads: usize) -> Result<TextEmbedding> {
+/// exports them): reman's own (model.rs), or REMAN_MODEL_DIR's.
+fn load_from(dir: &Path, threads: usize) -> Result<TextEmbedding> {
     use fastembed::{InitOptionsUserDefined, Pooling, TokenizerFiles, UserDefinedEmbeddingModel};
     let read = |f: &str| std::fs::read(dir.join(f)).map_err(|e| anyhow!("{}: {e}", dir.join(f).display()));
     let files = TokenizerFiles {
@@ -72,26 +74,26 @@ fn load_from(dir: &std::path::Path, threads: usize) -> Result<TextEmbedding> {
     TextEmbedding::try_new_from_user_defined(model, InitOptionsUserDefined::new().with_intra_threads(threads)).map_err(|e| anyhow!("loading embedding model: {e}"))
 }
 
-/// How far this model's similarities sit from the ones search.rs's close rule was calibrated on
-/// (the shipped model): a fine-tuned model spreads them, scoring a right answer ~0.2 lower. Read
-/// from `reman.json` beside the model (`{"close_shift": -0.2}`); 0 for the shipped model.
+/// How far the current model's similarities sit from the scale search.rs's close rule was
+/// calibrated on (model::close_shift; f32 bits). Follows the model the Embedder uses.
+static CLOSE_SHIFT: AtomicU32 = AtomicU32::new(0);
+
 pub fn close_shift() -> f32 {
-    static SHIFT: std::sync::OnceLock<f32> = std::sync::OnceLock::new();
-    *SHIFT.get_or_init(|| {
-        let Some(dir) = std::env::var_os("REMAN_MODEL_DIR") else { return 0.0 };
-        std::fs::read_to_string(std::path::Path::new(&dir).join("reman.json"))
-            .ok()
-            .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
-            .and_then(|v| v.get("close_shift").and_then(serde_json::Value::as_f64))
-            .unwrap_or(0.0) as f32
-    })
+    f32::from_bits(CLOSE_SHIFT.load(Ordering::Relaxed))
 }
 
-fn load_model() -> Result<TextEmbedding> {
+/// REMAN_MODEL_DIR: a model to try (train_embedder.py's export). With it the daemon never
+/// changes the model on its own; `reindex` re-embeds a history with it.
+pub fn override_dir() -> Option<PathBuf> {
+    std::env::var_os("REMAN_MODEL_DIR").filter(|d| !d.is_empty()).map(PathBuf::from)
+}
+
+/// Load a model: from its folder, or (None) fastembed's base model.
+pub fn load(folder: Option<&Path>) -> Result<TextEmbedding> {
     let t = std::time::Instant::now();
     let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4).min(8);
-    let mut model = match std::env::var_os("REMAN_MODEL_DIR") {
-        Some(dir) => load_from(std::path::Path::new(&dir), threads)?,
+    let mut model = match folder {
+        Some(dir) => load_from(dir, threads)?,
         None => {
             let opts = TextInitOptions::new(EmbeddingModel::BGESmallENV15)
                 .with_cache_dir(config::models_dir())
@@ -102,8 +104,29 @@ fn load_model() -> Result<TextEmbedding> {
     };
     // the first run sets up the session's buffers: done here, not on someone's query
     model.embed(&["warmup query to load the model once"], None).map_err(|e| anyhow!("embed: {e}"))?;
-    crate::daemon::log(&format!("embedding model loaded in {:?}", t.elapsed()));
+    let name = folder.and_then(|d| d.file_name()).map_or(crate::model::BASE.into(), |n| n.to_string_lossy().into_owned());
+    crate::daemon::log(&format!("embedding model {name} loaded in {:?}", t.elapsed()));
     Ok(model)
+}
+
+/// Normalised vectors of `texts` from `model`, in batches of about the same length: one 3k-char
+/// pasted script no longer pads 63 short commands to 512 tokens.
+pub fn embed_with(model: &mut TextEmbedding, texts: &[&str]) -> Result<Vec<Vec<f32>>> {
+    let mut order: Vec<usize> = (0..texts.len()).collect();
+    order.sort_by_key(|&i| texts[i].len());
+    let sorted: Vec<&str> = order.iter().map(|&i| texts[i]).collect();
+    let mut vecs = Vec::with_capacity(sorted.len());
+    for b in batches(&sorted) {
+        let n = b.len();
+        vecs.extend(model.embed(&sorted[b], Some(n)).map_err(|e| anyhow!("embed: {e}"))?);
+    }
+    let mut out = vec![Vec::new(); texts.len()];
+    for (mut v, &i) in vecs.into_iter().zip(&order) {
+        debug_assert_eq!(v.len(), DIM);
+        normalize(&mut v);
+        out[i] = v;
+    }
+    Ok(out)
 }
 
 /// What the model freed goes back to the system: the heap keeps freed blocks committed for reuse
@@ -145,14 +168,37 @@ fn batches(sorted: &[&str]) -> Vec<std::ops::Range<usize>> {
 }
 
 impl Embedder {
-    /// Nothing is loaded yet.
-    pub fn new() -> Self {
+    /// The model in `folder` (None: the base model), loaded when first needed.
+    pub fn new(folder: Option<PathBuf>) -> Self {
+        CLOSE_SHIFT.store(crate::model::close_shift(folder.as_deref()).to_bits(), Ordering::Relaxed);
         Self {
             model: Arc::new(Mutex::new(None)),
+            folder: Arc::new(Mutex::new(folder)),
             loading: Arc::new(AtomicBool::new(false)),
             used: AtomicI64::new(config::now()),
             cache: Mutex::new(QueryCache { map: HashMap::new(), order: VecDeque::new(), cap: 512 }),
         }
+    }
+
+    /// Use another model from now on (once the history's vectors are from it: daemon.rs,
+    /// upgrade_model). Waits for an embedding under way; cached query vectors are the old model's.
+    pub fn switch(&self, folder: Option<PathBuf>) {
+        let mut m = self.model.lock();
+        let had = m.take().is_some();
+        CLOSE_SHIFT.store(crate::model::close_shift(folder.as_deref()).to_bits(), Ordering::Relaxed);
+        *self.folder.lock() = folder;
+        let mut c = self.cache.lock();
+        c.map.clear();
+        c.order.clear();
+        drop((m, c));
+        if had {
+            give_back();
+        }
+    }
+
+    fn load_current(&self) -> Result<TextEmbedding> {
+        let folder = self.folder.lock().clone();
+        load(folder.as_deref())
     }
 
     /// Someone is using reman: load the model in the background if it isn't, so whatever comes
@@ -163,12 +209,13 @@ impl Embedder {
         if self.model.try_lock().is_none_or(|m| m.is_some()) || self.loading.swap(true, Ordering::AcqRel) {
             return;
         }
-        let (model, loading) = (self.model.clone(), self.loading.clone());
+        let (model, folder, loading) = (self.model.clone(), self.folder.clone(), self.loading.clone());
         std::thread::spawn(move || {
             {
                 let mut m = model.lock();
                 if m.is_none() {
-                    match load_model() {
+                    let f = folder.lock().clone();
+                    match load(f.as_deref()) {
                         Ok(x) => *m = Some(x),
                         Err(e) => crate::daemon::log(&format!("{e:#}")),
                     }
@@ -199,29 +246,11 @@ impl Embedder {
             return Ok(vec![]);
         }
         self.used.store(config::now(), Ordering::Relaxed);
-        // length-sorted batches: one 3k-char pasted script no longer pads 63 short commands to 512 tokens
-        let mut order: Vec<usize> = (0..texts.len()).collect();
-        order.sort_by_key(|&i| texts[i].len());
-        let sorted: Vec<&str> = order.iter().map(|&i| texts[i]).collect();
-        let mut vecs = Vec::with_capacity(sorted.len());
-        {
-            let mut m = self.model.lock();
-            if m.is_none() {
-                *m = Some(load_model()?);
-            }
-            let model = m.as_mut().unwrap();
-            for b in batches(&sorted) {
-                let n = b.len();
-                vecs.extend(model.embed(&sorted[b], Some(n)).map_err(|e| anyhow!("embed: {e}"))?);
-            }
+        let mut m = self.model.lock();
+        if m.is_none() {
+            *m = Some(self.load_current()?);
         }
-        let mut out = vec![Vec::new(); texts.len()];
-        for (mut v, &i) in vecs.into_iter().zip(&order) {
-            debug_assert_eq!(v.len(), DIM);
-            normalize(&mut v);
-            out[i] = v;
-        }
-        Ok(out)
+        embed_with(m.as_mut().unwrap(), texts)
     }
 
     /// A request in words ("start the dev server") embedded as it is, and as a search query:

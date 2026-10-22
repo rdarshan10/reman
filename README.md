@@ -82,7 +82,7 @@ Both scripts download the latest release, verify its SHA-256 checksum, and run `
 2. wires your shells: the PowerShell profile and Command Prompt on Windows, your zsh / bash / fish config on macOS and Linux, and nushell and xonsh wherever they're installed;
 3. connects every coding tool it finds: Claude Code, Claude Desktop, Codex CLI, Cursor, VS Code, Windsurf, Gemini CLI, opencode and pi. Each gets the MCP server (pi has no MCP) and, when it runs shell commands, capture through its own hooks (or a small reman plugin for opencode and pi), so what the agent runs is remembered too. Each config gets a `.reman-bak` backup first.
 
-Everything it set up can be changed later on one page: `reman settings`. To skip connecting coding tools, set `REMAN_NO_CONNECT=1` (or run `reman setup --no-connect`). The first start downloads the embedding model, about 130 MB, once.
+Everything it set up can be changed later on one page: `reman settings`. To skip connecting coding tools, set `REMAN_NO_CONNECT=1` (or run `reman setup --no-connect`). The first start downloads the embedding model, about 130 MB, once. reman then downloads its own model, the same one trained on commands (about 115 MB, checked against a checksum built into reman), and moves your history to it in the background; `"embed_model": "base"` in config.json keeps the first. With updates off, reman downloads nothing.
 
 ### Manual download
 

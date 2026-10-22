@@ -20,6 +20,7 @@ mod http;
 mod import;
 mod insight;
 mod mcp;
+mod model;
 mod notify;
 mod onpath;
 mod output;
