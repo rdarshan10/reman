@@ -44,6 +44,9 @@ pub struct Daemon {
     outputs_due: Mutex<std::collections::HashMap<String, (String, i64)>>,
     /// stores of output since the last trim to the newest `output_runs`
     outputs_stored: std::sync::atomic::AtomicU32,
+    /// a new command came that reman could not describe: a program just installed, perhaps
+    /// (learn_programs looks within minutes, not at the next 6-hourly pass)
+    pub programs_due: std::sync::atomic::AtomicBool,
 }
 
 /// What is never recorded as-is: commands and folders matching the ignore patterns, and
@@ -302,6 +305,7 @@ impl Daemon {
             agent_starts: Mutex::new(std::collections::HashMap::new()),
             outputs_due: Mutex::new(std::collections::HashMap::new()),
             outputs_stored: std::sync::atomic::AtomicU32::new(0),
+            programs_due: std::sync::atomic::AtomicBool::new(false),
             privacy: Mutex::new(Privacy::default()),
         })
     }
@@ -364,6 +368,9 @@ impl Daemon {
         new_texts.dedup();
         // describe + embed [texts..., desc parts...] in one batched call
         let descs: Vec<describe::Description> = new_texts.iter().map(|t| describe::describe(t)).collect();
+        if descs.iter().any(|d| d.display.is_none()) {
+            self.programs_due.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
         let mut batch: Vec<&str> = new_texts.clone();
         for d in &descs {
             batch.extend(d.parts.iter().map(|p| p.1.as_str()));
@@ -2010,17 +2017,16 @@ impl Daemon {
         };
         self.rewrite_descriptions(&work)?;
         db::meta_set(&self.db.lock(), "describe_version", DESCRIBE_VERSION)?;
-        if !work.is_empty() {
-            self.reload()?;
-        }
         Ok(work.len())
     }
 
     /// Programs tldr has no page for, described from what this machine's own files say about
     /// them, never by running them (localhelp.rs), and the commands that run them re-described
-    /// and re-embedded. A program nothing was found for is looked for again after a week.
+    /// and re-embedded. A program whose file was not found is looked for again after an hour
+    /// (installed since, perhaps); one whose file said nothing, after a week.
     pub fn learn_programs(&self) -> Result<usize> {
         const WEEK: i64 = 7 * 86400;
+        const HOUR: i64 = 3600;
         let now = config::now();
         let (_, checked) = db::program_help(&self.db.lock())?;
         // each unknown program: the word it was typed as, and the folders it ran in
@@ -2040,7 +2046,7 @@ impl Daemon {
                         continue;
                     }
                     let (Some(prog), Some(word)) = (describe::parse_cmd(&t).0, describe::program_word(&t)) else { continue };
-                    if describe::knows_program(&prog) || !crate::localhelp::name_like(&prog) || checked.get(&prog).is_some_and(|at| now - at < WEEK) {
+                    if describe::knows_program(&prog) || !crate::localhelp::name_like(&prog) || checked.get(&prog).is_some_and(|&(at, had_file)| now - at < if had_file { WEEK } else { HOUR }) {
                         continue;
                     }
                     let w = wanted.entry(prog).or_insert_with(|| (word, Vec::new()));
@@ -2081,31 +2087,40 @@ impl Daemon {
         }
         let work: Vec<(String, Vec<i64>)> = {
             let st = self.store.read();
-            st.entries.iter().filter(|e| e.alive && describe::describe(&e.text).display != e.desc).map(|e| (e.text.clone(), e.rows.iter().map(|r| r.id).collect())).collect()
+            // only what runs a program just described (the store may not have the startup pass's
+            // other re-descriptions yet: they are not this work)
+            let named: std::collections::HashSet<&str> = found.iter().filter(|f| f.2.is_some()).map(|f| f.0.as_str()).collect();
+            let runs_named = |text: &str| std::iter::once(text.to_string()).chain(describe::wrapped(text)).any(|t| describe::parse_cmd(&t).0.is_some_and(|p| named.contains(p.as_str())));
+            st.entries.iter().filter(|e| e.alive && runs_named(&e.text)).map(|e| (e.text.clone(), e.rows.iter().map(|r| r.id).collect())).collect()
         };
         self.rewrite_descriptions(&work)?;
-        if !work.is_empty() {
-            self.reload()?;
-        }
+        crate::embed::give_back();
         log(&format!("described {said} of {} programs tldr has no page for, from their own files; {} commands re-described", found.len(), work.len()));
         Ok(work.len())
     }
 
-    /// Re-describe and re-embed these commands' descriptions: (text, its row ids).
+    /// Re-describe and re-embed these commands' descriptions: (text, its row ids), in the
+    /// database and in memory. A few at a time: the model and the database are what a shell's
+    /// hook waits on (1.5 s for a failed command's fix), and a background pass must not hold them.
     fn rewrite_descriptions(&self, work: &[(String, Vec<i64>)]) -> Result<()> {
-        for chunk in work.chunks(128) {
+        for chunk in work.chunks(16) {
             let descs: Vec<describe::Description> = chunk.iter().map(|(t, _)| describe::describe(t)).collect();
             let batch: Vec<&str> = descs.iter().flat_map(|d| d.parts.iter().map(|p| p.1.as_str())).collect();
             let mut vecs = if batch.is_empty() { Vec::new() } else { self.embedder.embed_many(&batch)? }.into_iter();
-            let mut conn = self.db.lock();
-            let tx = conn.transaction()?;
-            for ((_, ids), d) in chunk.iter().zip(&descs) {
-                let parts: Vec<(&str, Vec<f32>)> = d.parts.iter().map(|p| (p.0, vecs.next().unwrap())).collect();
-                for (i, id) in ids.iter().enumerate() {
-                    db::write_descriptions(&tx, *id, d.display.as_deref(), if i == 0 { &parts } else { &[] })?;
+            let mut updates: Vec<(&str, Option<String>, Vec<Vec<f32>>)> = Vec::with_capacity(chunk.len());
+            {
+                let mut conn = self.db.lock();
+                let tx = conn.transaction()?;
+                for ((text, ids), d) in chunk.iter().zip(&descs) {
+                    let parts: Vec<(&str, Vec<f32>)> = d.parts.iter().map(|p| (p.0, vecs.next().unwrap())).collect();
+                    for (i, id) in ids.iter().enumerate() {
+                        db::write_descriptions(&tx, *id, d.display.as_deref(), if i == 0 { &parts } else { &[] })?;
+                    }
+                    updates.push((text, d.display.clone(), parts.into_iter().map(|p| p.1).collect()));
                 }
+                tx.commit()?;
             }
-            tx.commit()?;
+            self.store.write().set_descriptions(&updates);
         }
         Ok(())
     }
@@ -2503,7 +2518,11 @@ pub fn serve(port: u16) -> Result<()> {
         std::thread::spawn(move || {
             match d.redescribe() {
                 Ok(0) => {}
-                Ok(n) => log(&format!("re-described {n} commands whose description improved")),
+                Ok(n) => {
+                    log(&format!("re-described {n} commands whose description improved"));
+                    // what that work freed, back to the system
+                    crate::embed::give_back();
+                }
                 Err(e) => log(&format!("redescribe failed: {e}")),
             }
             // after: both write description vectors
@@ -2533,8 +2552,10 @@ pub fn serve(port: u16) -> Result<()> {
                 if tick % 3600 == 0 {
                     let _ = d.purge_failed(1); // hourly retention
                 }
-                if tick % 21600 == 0 {
-                    // programs first run since: described from their files
+                // programs first run since: described from their files, within minutes of a
+                // command reman could not describe (at most every 10), else every 6 hours
+                let due = tick % 600 == 0 && d.programs_due.swap(false, std::sync::atomic::Ordering::Relaxed);
+                if due || tick % 21600 == 0 {
                     if let Err(e) = d.learn_programs() {
                         log(&format!("describing programs from their files failed: {e:#}"));
                     }

@@ -646,6 +646,42 @@ impl Store {
         self.by_text.get(&self.entries, text).is_some()
     }
 
+    /// Mirror db::write_descriptions into memory: these texts' descriptions replaced by new ones
+    /// (display, and one vector per sentence). What a re-description changes, without reloading
+    /// the whole history (a reload holds the database for a second or more).
+    pub fn set_descriptions(&mut self, updates: &[(&str, Option<String>, Vec<Vec<f32>>)]) {
+        let mut replaced: std::collections::HashSet<u32> = std::collections::HashSet::new();
+        let found: Vec<(u32, &Option<String>, &Vec<Vec<f32>>)> =
+            updates.iter().filter_map(|(t, d, v)| self.by_text.get(&self.entries, t).map(|i| (i, d, v))).collect();
+        replaced.extend(found.iter().map(|f| f.0));
+        // the old vectors out, in one pass
+        let mut keep = 0;
+        for j in 0..self.desc_owner.len() {
+            if !replaced.contains(&self.desc_owner[j]) {
+                if keep != j {
+                    self.desc_owner[keep] = self.desc_owner[j];
+                    self.desc_vecs.copy_within(j * DIM..(j + 1) * DIM, keep * DIM);
+                }
+                keep += 1;
+            }
+        }
+        self.desc_owner.truncate(keep);
+        self.desc_vecs.truncate(keep * DIM);
+        for (i, display, vecs) in found {
+            for v in vecs {
+                let mut v = v.clone();
+                crate::embed::normalize(&mut v);
+                crate::f16::encode_into(&mut self.desc_vecs, &v);
+                self.desc_owner.push(i);
+            }
+            let e = &mut self.entries[i as usize];
+            let described = describe::describe(&e.text);
+            e.desc_words = Some(described.parts.iter().map(|p| p.1.to_lowercase()).collect::<Vec<_>>().join(" ; ")).filter(|w| !w.is_empty());
+            e.action = describe::command_action(&e.text, &described);
+            e.desc = display.clone();
+        }
+    }
+
     /// Mirror a db::record_run into memory. `vecs` = (raw, desc display, desc part vectors) for a
     /// brand-new text. Returns the entry index.
     pub fn apply_run(&mut self, command_id: i64, new_row: bool, run: &Run, vecs: Option<(&[f32], Option<String>, &[Vec<f32>])>) -> u32 {
@@ -876,6 +912,31 @@ mod tests {
         s.remove_rows(&s.row_ids("ls"));
         assert!(!s.knows("ls"));
         assert_eq!(s.execs.len(), 2);
+    }
+
+    #[test]
+    fn descriptions_replaced_in_place() {
+        let mut s = Store::default();
+        let one = |x: f32| {
+            let mut v = vec![0.0; DIM];
+            v[0] = x;
+            v[1] = 1.0;
+            v
+        };
+        let a = s.apply_run(1, true, &run("eas build", 0, "C:/a", "human", 1), Some((&vec![1.0; DIM], None, &[])));
+        let b = s.apply_run(2, true, &run("git status", 0, "C:/a", "human", 2), Some((&vec![1.0; DIM], Some("git: x".into()), &[one(1.0), one(2.0)])));
+        assert_eq!(s.desc_owner, vec![b, b]);
+        s.set_descriptions(&[("eas build", Some("eas: EAS command line tool".into()), vec![one(3.0)]), ("git status", Some("git: y".into()), vec![one(4.0)])]);
+        // each entry's old vectors gone, the new ones in; nothing else touched
+        let mut owners = s.desc_owner.clone();
+        owners.sort();
+        assert_eq!(owners, vec![a, b]);
+        assert_eq!(s.desc_vecs.len(), 2 * DIM);
+        assert_eq!(s.entries[a as usize].desc.as_deref(), Some("eas: EAS command line tool"));
+        assert_eq!(s.entries[b as usize].desc.as_deref(), Some("git: y"));
+        // an unknown text changes nothing
+        s.set_descriptions(&[("never ran", Some("x".into()), vec![one(5.0)])]);
+        assert_eq!(s.desc_owner.len(), 2);
     }
 
     #[test]

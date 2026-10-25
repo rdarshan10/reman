@@ -223,9 +223,35 @@ fn version_info(file: &Path) -> Option<String> {
     if std::fs::metadata(file).ok()?.len() > MAX_EXE {
         return None;
     }
-    let bytes = std::fs::read(file).ok()?;
     let name = stem_of(&file.file_name()?.to_string_lossy().to_lowercase()).to_string();
-    ["FileDescription", "Comments"].iter().filter_map(|k| version_string(&bytes, k)).find(|v| tidy(v, &name).is_some())
+    let mut f = std::fs::File::open(file).ok()?;
+    // read a chunk at a time, not the whole file (a program can be 100 MB); the end of each
+    // chunk is kept for the next, so an entry cut in two is whole there
+    const CHUNK: usize = 1 << 20;
+    const KEEP: usize = 2048;
+    const KEYS: [&str; 2] = ["FileDescription", "Comments"];
+    let mut buf: Vec<u8> = Vec::with_capacity(CHUNK + KEEP);
+    let mut found: [Option<String>; 2] = [None, None];
+    loop {
+        let start = buf.len();
+        buf.resize(start + CHUNK, 0);
+        let n = std::io::Read::read(&mut f, &mut buf[start..]).ok()?;
+        buf.truncate(start + n);
+        if n == 0 {
+            break;
+        }
+        for (k, slot) in KEYS.iter().zip(found.iter_mut()) {
+            if slot.is_none() {
+                *slot = version_string(&buf, k);
+            }
+        }
+        if let Some(d) = found[0].as_ref().filter(|v| tidy(v, &name).is_some()) {
+            return Some(d.clone());
+        }
+        let cut = buf.len().saturating_sub(KEEP);
+        buf.drain(..cut);
+    }
+    found.into_iter().flatten().find(|v| tidy(v, &name).is_some())
 }
 
 /// The value of a String entry in a version resource: wLength, wValueLength, wType, the key
@@ -239,7 +265,9 @@ fn version_string(bytes: &[u8], key: &str) -> Option<String> {
         let value_len = u16::from_le_bytes([bytes[start + 2], bytes[start + 3]]) as usize;
         let mut at = i + pat.len();
         at += (4 - (at - start) % 4) % 4;
-        let units: Vec<u16> = bytes.get(at..at + value_len.min(256) * 2)?.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).take_while(|&u| u != 0).collect();
+        // cut off at the end of a chunk: whole in the next one
+        let Some(value) = bytes.get(at..at + value_len.min(256) * 2) else { continue };
+        let units: Vec<u16> = value.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).take_while(|&u| u != 0).collect();
         let s = String::from_utf16_lossy(&units);
         if value_len > 0 && !s.trim().is_empty() {
             return Some(s);
@@ -413,6 +441,13 @@ mod tests {
         b.extend([0xBB; 9]);
         assert_eq!(version_string(&b, "FileDescription").as_deref(), Some(val));
         assert_eq!(version_string(&b, "Comments"), None);
+        // read from a file a chunk at a time: an entry across the end of the first chunk is found
+        let d = tmp("version");
+        let mut file = vec![0xCCu8; (1 << 20) - 20];
+        file.extend(&b);
+        std::fs::write(d.join("clock.exe"), &file).unwrap();
+        assert_eq!(version_info(&d.join("clock.exe")).as_deref(), Some(val));
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]

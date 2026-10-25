@@ -95,18 +95,18 @@ pub fn meta_set(db: &Connection, key: &str, value: &str) -> Result<()> {
 }
 
 /// What this machine's files say the programs tldr has no page for are (localhelp.rs):
-/// program -> description, and when each was last looked for (found or not).
-pub fn program_help(db: &Connection) -> Result<(std::collections::HashMap<String, String>, std::collections::HashMap<String, i64>)> {
+/// program -> description, and when each was last looked for and whether its file was found.
+pub fn program_help(db: &Connection) -> Result<(std::collections::HashMap<String, String>, std::collections::HashMap<String, (i64, bool)>)> {
     let mut said = std::collections::HashMap::new();
     let mut checked = std::collections::HashMap::new();
-    let mut st = db.prepare("SELECT program, description, checked FROM program_help")?;
+    let mut st = db.prepare("SELECT program, description, checked, path IS NOT NULL FROM program_help")?;
     let mut rows = st.query([])?;
     while let Some(r) = rows.next()? {
         let p: String = r.get(0)?;
         if let Some(d) = r.get::<_, Option<String>>(1)? {
             said.insert(p.clone(), d);
         }
-        checked.insert(p, r.get::<_, Option<i64>>(2)?.unwrap_or(0));
+        checked.insert(p, (r.get::<_, Option<i64>>(2)?.unwrap_or(0), r.get(3)?));
     }
     Ok((said, checked))
 }

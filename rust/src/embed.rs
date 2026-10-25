@@ -131,7 +131,7 @@ pub fn embed_with(model: &mut TextEmbedding, texts: &[&str]) -> Result<Vec<Vec<f
 
 /// What the model freed goes back to the system: the heap keeps freed blocks committed for reuse
 /// otherwise, which after the model is a few dozen MB nobody will reuse soon.
-fn give_back() {
+pub fn give_back() {
     #[cfg(windows)]
     {
         #[link(name = "kernel32")]
