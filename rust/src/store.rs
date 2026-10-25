@@ -341,6 +341,10 @@ impl Store {
 
     pub fn load(db: &Connection) -> Result<Self> {
         let mut s = Store::default();
+        // every command is described below: with what this machine says of tldr's unknowns
+        if let Ok((said, _)) = db::program_help(db) {
+            describe::set_local(said);
+        }
         // sized once: grown by doubling, the vectors would hold up to twice their size
         let n: i64 = db.query_row("SELECT count(*) FROM commands", [], |r| r.get(0))?;
         s.vecs.reserve_exact(n.max(0) as usize * DIM);

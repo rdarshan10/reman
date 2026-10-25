@@ -26,6 +26,7 @@ mod onpath;
 mod output;
 mod pty;
 mod keys;
+mod localhelp;
 mod predict;
 mod redact;
 mod running;

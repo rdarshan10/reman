@@ -23,7 +23,7 @@ Rules, each fixing a wrong description seen in real search results:
   * options written `{{[-v|--version]}}` (most pages since 2024) are words, not values: dropping
     them as placeholders lost every such example (`git branch {{[-d|--delete]}}`).
 """
-import glob, json, os, re
+import glob, json, os, re, sys
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 PAGES = os.path.join(ROOT, "tldr_pages")
@@ -145,8 +145,29 @@ def main():
             gloss[stem] = f"{real} (`{target}`)"
         elif stem not in gloss:
             gloss[stem] = f"The same as `{target}`"
+    # PowerShell's cmdlets, from Microsoft's documentation (build_ps_pairs.py's ps_pages.json, passed
+    # as --psdocs): where tldr has no page of its own
+    from_docs = set()
+    if "--psdocs" in sys.argv:
+        pages = json.load(open(sys.argv[sys.argv.index("--psdocs") + 1], encoding="utf-8"))
+        for key, p in pages.items():
+            if key in gloss or key in ex:
+                continue
+            gloss[key] = p["synopsis"]
+            exs = []
+            for title, cmd in p["examples"]:
+                words, value = example_words(cmd)
+                header = [p["name"].lower()]
+                if words[:1] == header:
+                    exs.append([title, words[1:], int(value)])
+            if exs:
+                ex[key] = exs
+            from_docs.add(key)
+        print(f"  + {len(from_docs)} PowerShell cmdlets from the documentation")
+    # reman's own words beat the documentation's ("Gets TCP connections" says nothing of ports)
     for k, v in EXTRA.items():
-        gloss.setdefault(k, v)
+        if k not in gloss or k in from_docs:
+            gloss[k] = v
 
     json.dump({"cmd": dict(sorted(gloss.items())), "ex": dict(sorted(ex.items()))}, open(OUT, "w", encoding="utf-8"), ensure_ascii=False, separators=(",", ":"))
     print(f"{len(gloss)} pages, {len(ex)} example keys -> {OUT}")

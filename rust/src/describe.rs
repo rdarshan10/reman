@@ -2,7 +2,7 @@
 //! tldr-pages descriptions. Port of reman_enrich.py (parse_cmd, describe, group_key) - nothing
 //! here ever runs a binary. (Repo identity is in git.rs.)
 use std::collections::HashMap;
-use std::sync::OnceLock;
+use std::sync::{OnceLock, RwLock};
 
 static TLDR_JSON: &[u8] = include_bytes!("../../tldr_map.json");
 
@@ -44,6 +44,23 @@ fn tldr() -> &'static TldrMap {
     })
 }
 
+/// What this machine's own files say a program is, for programs tldr has no page for
+/// (localhelp.rs: an exe's version info, an npm package's description, a script's header). Set
+/// by the daemon before it describes anything.
+fn local() -> &'static RwLock<HashMap<String, String>> {
+    static L: OnceLock<RwLock<HashMap<String, String>>> = OnceLock::new();
+    L.get_or_init(|| RwLock::new(HashMap::new()))
+}
+
+pub fn set_local(map: HashMap<String, String>) {
+    *local().write().unwrap_or_else(|e| e.into_inner()) = map;
+}
+
+/// Does reman have a sentence for `prog` (a parse_cmd name), from tldr or from this machine?
+pub fn knows_program(prog: &str) -> bool {
+    tldr().cmd.contains_key(prog) || local().read().unwrap_or_else(|e| e.into_inner()).contains_key(prog)
+}
+
 const NON_TOOLS: &[&str] = &[
     "#", "&", "cd", "if", "for", "while", "function", "async", "from", "import", "echo", "cls", "clear", "$", "{",
     "}", "(", ")", "set", "return",
@@ -77,19 +94,33 @@ fn without_prompt(cmd: &str) -> &str {
     cmd
 }
 
-/// (program, subcommand) with leading `cd x;`, `&`, drive hops etc. skipped.
-pub fn parse_cmd(cmd: &str) -> (Option<String>, Option<String>) {
-    let toks: Vec<&str> = without_prompt(cmd).split_whitespace().collect();
+/// Where the program is among a command's words: past `cd x;`, `&`, drive hops, assignments.
+fn program_at(toks: &[&str]) -> usize {
     let mut i = 0;
     while i < toks.len() {
         let t = toks[i];
         let tl = t.to_lowercase();
-        if matches!(t, "&" | "&&" | "|" | ";") || is_drive_hop(&tl) || tl == "cd" || tl == "set" || t.ends_with(';') {
+        // `NAME=value cmd`: the variable is for the program after it
+        let assignment = t.split_once('=').is_some_and(|(k, _)| !k.is_empty() && k.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_') && k.chars().all(|c| c.is_ascii_alphanumeric() || c == '_'));
+        if matches!(t, "&" | "&&" | "|" | ";") || is_drive_hop(&tl) || tl == "cd" || tl == "set" || t.ends_with(';') || assignment {
             i += 1;
             continue;
         }
         break;
     }
+    i
+}
+
+/// The program word as typed (`.\TransparentClock.exe`, `eas`), for finding its file.
+pub fn program_word(cmd: &str) -> Option<String> {
+    let toks: Vec<&str> = without_prompt(cmd).split_whitespace().collect();
+    toks.get(program_at(&toks)).map(|t| t.trim_matches(|c| c == '"' || c == '\'').to_string())
+}
+
+/// (program, subcommand) with leading `cd x;`, `&`, drive hops etc. skipped.
+pub fn parse_cmd(cmd: &str) -> (Option<String>, Option<String>) {
+    let toks: Vec<&str> = without_prompt(cmd).split_whitespace().collect();
+    let i = program_at(&toks);
     if i >= toks.len() {
         return (None, None);
     }
@@ -711,6 +742,20 @@ fn env_assignment(cmd: &str) -> Option<(String, String)> {
     None
 }
 
+/// A Python virtual environment's activation script (`venv\Scripts\activate`, `.venv/bin/activate`,
+/// `& .venv\Scripts\Activate.ps1`, `source venv/bin/activate`): no tool of its own to look up.
+fn venv_activation(cmd: &str) -> Option<(String, String)> {
+    let t = cmd.trim();
+    if t.contains(['\n', ';', '|']) {
+        return None;
+    }
+    let mut toks = t.split_whitespace().filter(|w| !matches!(*w, "&" | "." | "source"));
+    let script = toks.next()?.trim_matches(|c| c == '"' || c == '\'').replace('\\', "/").to_lowercase();
+    let name = script.rsplit('/').next()?;
+    let in_env = script.contains("/scripts/") || script.contains("/bin/") || script.starts_with("scripts/") || script.starts_with("bin/");
+    (in_env && matches!(name, "activate" | "activate.ps1" | "activate.bat" | "activate.fish" | "activate.csh")).then(|| ("activate".to_string(), "Activate the Python virtual environment (venv) in this shell".to_string()))
+}
+
 /// Changing directory, the commonest line of all, which no tldr page describes the way people ask
 /// for it ("go up one directory"). Only a line that does nothing else: `cd api && npm test` is
 /// about the test.
@@ -739,7 +784,7 @@ fn directory_change(cmd: &str) -> Option<(String, String)> {
 
 fn describe_one(cmd: &str) -> Description {
     let cmd = without_prompt(cmd);
-    if let Some((label, sentence)) = env_assignment(cmd).or_else(|| directory_change(cmd)) {
+    if let Some((label, sentence)) = env_assignment(cmd).or_else(|| directory_change(cmd)).or_else(|| venv_activation(cmd)) {
         return Description { display: Some(format!("{label}: {sentence}")), parts: vec![("spec", format!("{label}: {sentence}"))] };
     }
     let (prog, sub) = parse_cmd(cmd);
@@ -748,7 +793,7 @@ fn describe_one(cmd: &str) -> Description {
     };
     let m = tldr();
     let mut parts = Vec::new();
-    if let Some(g) = m.cmd.get(&prog) {
+    if let Some(g) = m.cmd.get(&prog).cloned().or_else(|| local().read().unwrap_or_else(|e| e.into_inner()).get(&prog).cloned()) {
         parts.push(("gen", format!("{prog}: {g}")));
     }
     // what the arguments say: `git checkout main` "Switch to an existing local branch",
@@ -945,7 +990,13 @@ mod tests {
         assert!(says(r#"$env:API_URL = "http://localhost:8000""#).contains("environment variable API_URL"));
         assert!(says("set NODE_ENV=production").contains("environment variable NODE_ENV"));
         assert!(says("export FOO=1").contains("environment variable FOO"));
-        assert!(says("Copy-Item a.txt b.txt").to_lowercase().contains("copy files"));
+        assert!(says("Copy-Item a.txt b.txt").to_lowercase().contains("copy a file"));
+        assert!(says(r"venv\Scripts\activate").contains("virtual environment"));
+        assert!(says(r"& d:\code\api\.venv\Scripts\Activate.ps1").contains("virtual environment"));
+        assert!(says("source .venv/bin/activate").contains("virtual environment"));
+        assert!(!says("activate").contains("virtual environment"), "a bare word is not a venv's script");
+        // the variable is for the program after it
+        assert_eq!(parse_cmd("PYTHONIOENCODING=utf-8 python -u -m pkg.batch").0.as_deref(), Some("python"));
         assert!(says("cd ..").contains("Go up one directory"));
         assert!(says(r"cd D:\code\billing-api").contains("Change the current directory"));
         assert!(says("Set-Location -").contains("previous directory"));

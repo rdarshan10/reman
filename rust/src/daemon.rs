@@ -136,7 +136,7 @@ impl ArmedFlow {
 
 /// Bumped whenever describe() or tldr_map.json changes what commands are described as; a daemon
 /// on an older db re-describes the affected commands once, in the background (`redescribe`).
-const DESCRIBE_VERSION: &str = "5";
+const DESCRIBE_VERSION: &str = "6";
 
 pub fn log(msg: &str) {
     let line = format!("[{}] {msg}\n", config::now());
@@ -2008,6 +2008,91 @@ impl Daemon {
                 .map(|e| (e.text.clone(), e.rows.iter().map(|r| r.id).collect()))
                 .collect()
         };
+        self.rewrite_descriptions(&work)?;
+        db::meta_set(&self.db.lock(), "describe_version", DESCRIBE_VERSION)?;
+        if !work.is_empty() {
+            self.reload()?;
+        }
+        Ok(work.len())
+    }
+
+    /// Programs tldr has no page for, described from what this machine's own files say about
+    /// them, never by running them (localhelp.rs), and the commands that run them re-described
+    /// and re-embedded. A program nothing was found for is looked for again after a week.
+    pub fn learn_programs(&self) -> Result<usize> {
+        const WEEK: i64 = 7 * 86400;
+        let now = config::now();
+        let (_, checked) = db::program_help(&self.db.lock())?;
+        // each unknown program: the word it was typed as, and the folders it ran in
+        let mut wanted: std::collections::HashMap<String, (String, Vec<String>)> = std::collections::HashMap::new();
+        let mut activated = Vec::new();
+        let cwds: Vec<String> = {
+            let st = self.store.read();
+            for e in st.entries.iter().filter(|e| e.alive) {
+                let here: Vec<String> = e.rows.iter().filter_map(|r| r.cwd).map(|c| st.cwd_name(c).to_string()).filter(|c| std::path::Path::new(c).is_absolute()).collect();
+                if e.text.to_lowercase().contains("activate") {
+                    activated.extend(crate::localhelp::activated(&e.text, &here));
+                }
+                for t in std::iter::once(e.text.clone()).chain(describe::wrapped(&e.text)) {
+                    // only what reman can't describe at all: a venv's activate.ps1 it can, and
+                    // `npx astro dev` is npx's but astro is unknown
+                    if describe::describe(&t).display.is_some() {
+                        continue;
+                    }
+                    let (Some(prog), Some(word)) = (describe::parse_cmd(&t).0, describe::program_word(&t)) else { continue };
+                    if describe::knows_program(&prog) || !crate::localhelp::name_like(&prog) || checked.get(&prog).is_some_and(|at| now - at < WEEK) {
+                        continue;
+                    }
+                    let w = wanted.entry(prog).or_insert_with(|| (word, Vec::new()));
+                    for h in &here {
+                        if !w.1.contains(h) {
+                            w.1.push(h.clone());
+                        }
+                    }
+                }
+            }
+            (0..st.cwd_count()).map(|i| st.cwd_name(i).to_string()).collect()
+        };
+        if wanted.is_empty() {
+            return Ok(0);
+        }
+        // the files are read without holding the database
+        let mut finder = crate::localhelp::Finder::new(&cwds, &activated);
+        let found: Vec<(String, Option<String>, Option<String>)> = wanted
+            .iter()
+            .map(|(prog, (word, here))| {
+                let file = finder.find(word, here);
+                let said = file.as_deref().and_then(|f| finder.describe(f));
+                (prog.clone(), file.map(|f| f.display().to_string()), said)
+            })
+            .collect();
+        let said = found.iter().filter(|f| f.2.is_some()).count();
+        {
+            let mut conn = self.db.lock();
+            let tx = conn.transaction()?;
+            for (prog, path, desc) in &found {
+                tx.execute("INSERT OR REPLACE INTO program_help(program, path, description, checked) VALUES (?1, ?2, ?3, ?4)", params![prog, path, desc, now])?;
+            }
+            tx.commit()?;
+            if said == 0 {
+                return Ok(0);
+            }
+            describe::set_local(db::program_help(&conn)?.0);
+        }
+        let work: Vec<(String, Vec<i64>)> = {
+            let st = self.store.read();
+            st.entries.iter().filter(|e| e.alive && describe::describe(&e.text).display != e.desc).map(|e| (e.text.clone(), e.rows.iter().map(|r| r.id).collect())).collect()
+        };
+        self.rewrite_descriptions(&work)?;
+        if !work.is_empty() {
+            self.reload()?;
+        }
+        log(&format!("described {said} of {} programs tldr has no page for, from their own files; {} commands re-described", found.len(), work.len()));
+        Ok(work.len())
+    }
+
+    /// Re-describe and re-embed these commands' descriptions: (text, its row ids).
+    fn rewrite_descriptions(&self, work: &[(String, Vec<i64>)]) -> Result<()> {
         for chunk in work.chunks(128) {
             let descs: Vec<describe::Description> = chunk.iter().map(|(t, _)| describe::describe(t)).collect();
             let batch: Vec<&str> = descs.iter().flat_map(|d| d.parts.iter().map(|p| p.1.as_str())).collect();
@@ -2022,11 +2107,7 @@ impl Daemon {
             }
             tx.commit()?;
         }
-        db::meta_set(&self.db.lock(), "describe_version", DESCRIBE_VERSION)?;
-        if !work.is_empty() {
-            self.reload()?;
-        }
-        Ok(work.len())
+        Ok(())
     }
 
     pub fn reload(&self) -> Result<()> {
@@ -2429,6 +2510,9 @@ pub fn serve(port: u16) -> Result<()> {
             if let Err(e) = d.upgrade_model() {
                 log(&format!("embedding model upgrade failed: {e:#}"));
             }
+            if let Err(e) = d.learn_programs() {
+                log(&format!("describing programs from their files failed: {e:#}"));
+            }
         });
     }
     if crate::update::daemon_checks() {
@@ -2448,6 +2532,12 @@ pub fn serve(port: u16) -> Result<()> {
                 }
                 if tick % 3600 == 0 {
                     let _ = d.purge_failed(1); // hourly retention
+                }
+                if tick % 21600 == 0 {
+                    // programs first run since: described from their files
+                    if let Err(e) = d.learn_programs() {
+                        log(&format!("describing programs from their files failed: {e:#}"));
+                    }
                 }
                 if tick % 30 == 0 {
                     if let Some(min) = crate::settings::load().model_idle_minutes() {

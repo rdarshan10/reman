@@ -37,6 +37,11 @@ pub fn on_path(name: &str, path: Option<&str>) -> bool {
     folders(path.unwrap_or(&own)).iter().any(|d| endings.iter().any(|x| d.join(format!("{name}{x}")).symlink_metadata().is_ok()))
 }
 
+/// This process's PATH, as folders.
+pub fn path_folders() -> Vec<PathBuf> {
+    folders(&std::env::var("PATH").unwrap_or_default())
+}
+
 /// PATH's folders. On Windows a PATH from Git Bash or MSYS (`/c/Users/me/bin:/usr/bin`) is
 /// read as such, its drive folders turned back into `C:/Users/me/bin`.
 fn folders(path: &str) -> Vec<PathBuf> {

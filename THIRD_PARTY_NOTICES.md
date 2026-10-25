@@ -14,6 +14,18 @@ and shortened. Copyright © 2014-present the tldr-pages team and contributors, l
 Creative Commons Attribution 4.0 International License (CC BY 4.0):
 https://creativecommons.org/licenses/by/4.0/
 
+## PowerShell documentation
+
+https://github.com/MicrosoftDocs/PowerShell-Docs and
+https://github.com/MicrosoftDocs/windows-powershell-docs
+
+The descriptions of PowerShell cmdlets tldr has no page for (also in `tldr_map.json`) are each
+cmdlet's synopsis and its examples' titles and commands, extracted and shortened from Microsoft's
+documentation. Copyright (c) Microsoft Corporation. The documentation is licensed under the
+Creative Commons Attribution 4.0 International License (CC BY 4.0,
+https://creativecommons.org/licenses/by/4.0/); the example code under the MIT License (the same
+terms as the MIT License text below, with that copyright line).
+
 ## ONNX Runtime
 
 https://github.com/microsoft/onnxruntime

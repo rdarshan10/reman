@@ -52,7 +52,9 @@ pub fn migrate(db: &Connection) -> Result<()> {
          CREATE TABLE IF NOT EXISTS fix_pairs (
             id INTEGER PRIMARY KEY, failed_text TEXT NOT NULL, fixed_cmd TEXT NOT NULL,
             confidence TEXT NOT NULL, cwd TEXT, count INTEGER DEFAULT 1,
-            first_seen INTEGER, last_seen INTEGER, UNIQUE(failed_text, fixed_cmd));",
+            first_seen INTEGER, last_seen INTEGER, UNIQUE(failed_text, fixed_cmd));
+         CREATE TABLE IF NOT EXISTS program_help (
+            program TEXT PRIMARY KEY, path TEXT, description TEXT, checked INTEGER);",
     )?;
     add_column(db, "commands", "description", "TEXT")?;
     add_column(db, "commands", "desc_source", "TEXT DEFAULT 'none'")?;
@@ -90,6 +92,23 @@ pub fn meta_get(db: &Connection, key: &str) -> Result<Option<String>> {
 pub fn meta_set(db: &Connection, key: &str, value: &str) -> Result<()> {
     db.execute("INSERT OR REPLACE INTO reman_meta(key,value) VALUES(?,?)", params![key, value])?;
     Ok(())
+}
+
+/// What this machine's files say the programs tldr has no page for are (localhelp.rs):
+/// program -> description, and when each was last looked for (found or not).
+pub fn program_help(db: &Connection) -> Result<(std::collections::HashMap<String, String>, std::collections::HashMap<String, i64>)> {
+    let mut said = std::collections::HashMap::new();
+    let mut checked = std::collections::HashMap::new();
+    let mut st = db.prepare("SELECT program, description, checked FROM program_help")?;
+    let mut rows = st.query([])?;
+    while let Some(r) = rows.next()? {
+        let p: String = r.get(0)?;
+        if let Some(d) = r.get::<_, Option<String>>(1)? {
+            said.insert(p.clone(), d);
+        }
+        checked.insert(p, r.get::<_, Option<i64>>(2)?.unwrap_or(0));
+    }
+    Ok((said, checked))
 }
 
 pub fn pack(v: &[f32]) -> Vec<u8> {
