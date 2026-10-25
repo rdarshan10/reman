@@ -283,8 +283,13 @@ fn freq(runs: u32) -> f32 {
     0.03 * (runs as f32 / (runs as f32 + 20.0))
 }
 
+/// What was run lately is what is being worked on: worth half as much after two weeks. (It was
+/// 0.02 / (1 + days), gone in a day: on the 122 real requests, 0.04 halving every 7 to 30 days
+/// put the right command first 2 more times and a wrong one first as sure 2 fewer; 0.08 and up
+/// started burying older right answers.)
 fn recency(last: i64, now: i64) -> f32 {
-    0.02 / (1.0 + ((now - last).max(0) as f32 / 86400.0))
+    const HALF_LIFE_DAYS: f32 = 14.0;
+    0.04 * 0.5f32.powf((now - last).max(0) as f32 / 86400.0 / HALF_LIFE_DAYS)
 }
 
 struct Cand {
