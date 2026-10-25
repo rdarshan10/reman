@@ -1,4 +1,9 @@
-# reman
+<h1 align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/logo-dark.svg">
+    <img src="assets/logo-light.svg" alt="reman" width="360">
+  </picture>
+</h1>
 
 **Your shell history, searchable by meaning, with proof of what worked. For you and your AI agents.**
 
@@ -277,7 +282,7 @@ Detailed documentation, every key and the storage layout: [rust/README.md](rust/
 ## Credits
 
 - [Atuin](https://github.com/atuinsh/atuin) (MIT License): its secret patterns are adapted in `redact.rs`, and `reman shell` follows the design of its terminal layer, on Windows too. Coming from Atuin? `reman setup` imports its history.
-- [tldr-pages](https://github.com/tldr-pages/tldr) (CC BY 4.0): the command descriptions reman shows and searches.
+- [tldr-pages](https://github.com/tldr-pages/tldr) (CC BY 4.0): the command descriptions reman shows and searches. PowerShell cmdlets tldr has no page for are described from Microsoft's [PowerShell documentation](https://github.com/MicrosoftDocs/PowerShell-Docs) (CC BY 4.0, examples MIT). A program neither covers is described from its own files on your machine (an npm package's description, a Python package's summary, an exe's version information, a script's opening comment), never by running it.
 - [bge-small-en-v1.5](https://huggingface.co/BAAI/bge-small-en-v1.5) by BAAI (MIT License), the search model, run by [ONNX Runtime](https://github.com/microsoft/onnxruntime).
 
 The full notices are in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md); every Rust library reman is built from, with its license, is in `THIRD_PARTY_LICENSES.html` in each release.
