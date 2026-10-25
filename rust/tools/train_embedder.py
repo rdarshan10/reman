@@ -44,6 +44,19 @@ PHRASAL = {
     "upgrade": ["bump", "update"],
     "download": ["grab", "pull down", "fetch"],
     "restart": ["reboot", "bounce"],
+    "downgrade": ["roll back", "revert", "undo"],
+    "revert": ["undo", "roll back"],
+    "undo": ["revert", "roll back"],
+    "extract": ["unzip", "unpack"],
+    "decompress": ["unzip", "unpack"],
+    "compress": ["zip up", "pack"],
+    "connect": ["log into", "get into"],
+    "terminate": ["kill", "end"],
+    "rename": ["change the name of"],
+    "find": ["look for", "search for"],
+    "search": ["look for", "find"],
+    "copy": ["duplicate"],
+    "execute": ["run"],
 }
 
 
@@ -129,7 +142,8 @@ def main():
     ap.add_argument("--lr", type=float, default=3e-5)
     ap.add_argument("--batch", type=int, default=128)
     ap.add_argument("--seed", type=int, default=7)
-    ap.add_argument("--paraphrases", help="paraphrase.py's output: casual queries per description")
+    ap.add_argument("--paraphrases", help="paraphrase.py's outputs, comma-separated: casual queries per description")
+    ap.add_argument("--extra", help="more training pairs, comma-separated files (build_ps_pairs.py's ps_train.jsonl)")
     a = ap.parse_args()
 
     from sentence_transformers import SentenceTransformer
@@ -156,12 +170,17 @@ def main():
     evaluator = InformationRetrievalEvaluator(queries, corpus, relevant, name="dev", accuracy_at_k=[1, 5], mrr_at_k=[10], show_progress_bar=False)
     print("before:", {k: round(v, 4) for k, v in evaluator(model).items() if "accuracy@1" in k or "mrr@10" in k})
 
+    for extra in filter(None, (a.extra or "").split(",")):
+        more = rows(extra)
+        train += [r for r in more if not dev_tool(r["tool"])]
+        print(f"+ {len(more)} pairs from {os.path.basename(extra)}")
     paraphrases = None
     if a.paraphrases:
         paraphrases = {}
-        for line in open(a.paraphrases, encoding="utf-8"):
-            p = json.loads(line)
-            paraphrases[(p["tool"], p["desc"])] = p["queries"]
+        for path in a.paraphrases.split(","):
+            for line in open(path, encoding="utf-8"):
+                p = json.loads(line)
+                paraphrases[(p["tool"], p["desc"])] = p["queries"]
         print(f"paraphrases for {len(paraphrases)} descriptions")
     ds = Dataset.from_list(examples(train, rnd, paraphrases))
     print(f"{len(ds)} training examples")
