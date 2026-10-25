@@ -1,4 +1,5 @@
 fn main() {
+    tldr_map();
     // Windows (MSVC): reman.exe.manifest, embedded as the exe's manifest resource. It opts the
     // daemon into the segment heap. Written as a .res file here, so linking needs no SDK tools.
     println!("cargo:rerun-if-changed=reman.exe.manifest");
@@ -12,6 +13,30 @@ fn main() {
     let res = std::path::PathBuf::from(std::env::var("OUT_DIR").unwrap()).join("reman-manifest.res");
     std::fs::write(&res, manifest_res(&manifest)).expect("writing the manifest resource");
     println!("cargo:rustc-link-arg-bin=reman={}", res.display());
+}
+
+/// tldr_map.json (tools/build_tldr_map.py) as describe.rs reads it in place, never copying its
+/// text onto the heap: a `C\tpage\tsentence` line per description, then an
+/// `E\tpage\tdescription\twords\t0|1` line per example (words space-separated), a page's
+/// examples together and in order.
+fn tldr_map() {
+    println!("cargo:rerun-if-changed=../tldr_map.json");
+    let dir = std::path::PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap());
+    let json = std::fs::read(dir.join("..").join("tldr_map.json")).expect("reading tldr_map.json");
+    let map: serde_json::Value = serde_json::from_slice(&json).expect("parsing tldr_map.json");
+    let clean = |s: &str| s.replace(['\t', '\n', '\r'], " ");
+    let mut out = String::with_capacity(json.len());
+    for (page, sentence) in map["cmd"].as_object().expect("cmd") {
+        out += &format!("C\t{}\t{}\n", clean(page), clean(sentence.as_str().unwrap_or("")));
+    }
+    for (page, examples) in map["ex"].as_object().expect("ex") {
+        for e in examples.as_array().into_iter().flatten() {
+            let words: Vec<String> = e[1].as_array().into_iter().flatten().filter_map(|w| w.as_str()).map(|w| clean(w).replace(' ', "")).collect();
+            out += &format!("E\t{}\t{}\t{}\t{}\n", clean(page), clean(e[0].as_str().unwrap_or("")), words.join(" "), e[2].as_u64().unwrap_or(0).min(1));
+        }
+    }
+    let path = std::path::PathBuf::from(std::env::var("OUT_DIR").unwrap()).join("tldr_map.tsv");
+    std::fs::write(path, out).expect("writing tldr_map.tsv");
 }
 
 /// A .res file holding one resource: RT_MANIFEST (24), id 1, after the empty entry every .res

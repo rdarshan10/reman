@@ -27,6 +27,10 @@ vt100 = "0.16.2"
 sysinfo = { version = "0.39.6", default-features = false, features = ["system"] }
 ed25519-dalek = { version = "2", default-features = false, features = ["std"] }
 
+[build-dependencies]
+# build.rs turns tldr_map.json into the form describe.rs reads in place
+serde_json = "1.0.151"
+
 [profile.release]
 opt-level = 3
 lto = "thin"

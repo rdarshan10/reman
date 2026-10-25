@@ -4,43 +4,72 @@
 use std::collections::HashMap;
 use std::sync::{OnceLock, RwLock};
 
-static TLDR_JSON: &[u8] = include_bytes!("../../tldr_map.json");
+/// The description map (tldr_map.json, from tools/build_tldr_map.py) as build.rs writes it for
+/// reading in place: tab-separated `C page sentence` lines, then `E page description words 0|1`
+/// lines, a page's examples together. Its text stays in the program's image; parsed into owned strings it
+/// was ~10 MB of a ~70 MB idle daemon.
+static TLDR_MAP: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/tldr_map.tsv"));
 
 struct TldrMap {
-    cmd: HashMap<String, String>,
-    /// page -> its examples, in order (tools/build_tldr_map.py)
-    ex: HashMap<String, Vec<Example>>,
+    text: &'static str,
+    cmd: HashMap<&'static str, &'static str>,
+    /// page -> where its examples' lines are in `text`
+    ex: HashMap<&'static str, (u32, u32)>,
 }
 
 /// One tldr example: what it does, the words a command needs to be it (space-separated,
 /// alternatives joined by `|`: `-itemtype directory`, `-d|--delete`), and whether it takes a value.
 struct Example {
-    desc: Box<str>,
-    words: Box<str>,
+    desc: &'static str,
+    words: &'static str,
     value: bool,
 }
 
 impl Example {
-    fn words(&self) -> impl Iterator<Item = &str> {
+    fn words(&self) -> impl Iterator<Item = &'static str> {
         self.words.split(' ').filter(|w| !w.is_empty())
+    }
+}
+
+impl TldrMap {
+    /// A page's examples, in order.
+    fn examples(&self, page: &str) -> Option<Vec<Example>> {
+        let &(a, b) = self.ex.get(page)?;
+        let lines = self.text.get(a as usize..b as usize)?.lines();
+        Some(
+            lines
+                .filter_map(|l| {
+                    let mut f = l.split('\t').skip(2);
+                    Some(Example { desc: f.next()?, words: f.next()?, value: f.next()? == "1" })
+                })
+                .collect(),
+        )
     }
 }
 
 fn tldr() -> &'static TldrMap {
     static M: OnceLock<TldrMap> = OnceLock::new();
     M.get_or_init(|| {
-        #[derive(serde::Deserialize)]
-        struct Raw {
-            cmd: HashMap<String, String>,
-            ex: HashMap<String, Vec<(String, Vec<String>, u8)>>,
+        let text = std::str::from_utf8(TLDR_MAP).unwrap_or("");
+        let (mut cmd, mut ex) = (HashMap::new(), HashMap::<&str, (u32, u32)>::new());
+        let mut at = 0;
+        for line in text.split_inclusive('\n') {
+            let start = at;
+            at += line.len();
+            let mut f = line.trim_end_matches('\n').split('\t');
+            match (f.next(), f.next(), f.next()) {
+                (Some("C"), Some(page), Some(sentence)) => {
+                    cmd.insert(page, sentence);
+                }
+                (Some("E"), Some(page), Some(_)) => {
+                    ex.entry(page).and_modify(|r| r.1 = at as u32).or_insert((start as u32, at as u32));
+                }
+                _ => {}
+            }
         }
-        let raw: Raw = serde_json::from_slice(TLDR_JSON).unwrap_or(Raw { cmd: HashMap::new(), ex: HashMap::new() });
-        let ex = raw
-            .ex
-            .into_iter()
-            .map(|(page, exs)| (page, exs.into_iter().map(|(d, w, v)| Example { desc: d.into(), words: w.join(" ").into(), value: v != 0 }).collect()))
-            .collect();
-        TldrMap { cmd: raw.cmd, ex }
+        cmd.shrink_to_fit();
+        ex.shrink_to_fit();
+        TldrMap { text, cmd, ex }
     })
 }
 
@@ -687,7 +716,7 @@ fn args_after(cmd: &str, word: &str) -> Vec<String> {
 /// existing local branch"), and a bare command the first with no arguments - but never on a page
 /// of subcommands: `docker POSTGRES_USER=x psql` is no `docker ps`.
 fn example_for<'a>(m: &'a TldrMap, page: &str, args: &[String]) -> Option<&'a str> {
-    let exs = m.ex.get(page)?;
+    let exs = m.examples(page)?;
     // where in the command a word is: of two examples as long, the one for what comes first
     // (`rm -rf`: recursive, not force)
     let at = |w: &str| w.split('|').filter_map(|alt| args.iter().position(|a| a == alt)).min();
@@ -697,7 +726,7 @@ fn example_for<'a>(m: &'a TldrMap, page: &str, args: &[String]) -> Option<&'a st
         .filter(|(_, e)| e.words().next().is_some() && e.words().all(|w| at(w).is_some()))
         .max_by_key(|(i, e)| (e.words().count(), std::cmp::Reverse(e.words().filter_map(at).min()), std::cmp::Reverse(*i)));
     if let Some((_, e)) = best {
-        return Some(&e.desc);
+        return Some(e.desc);
     }
     match args.first() {
         None => exs.iter().find(|e| e.words().next().is_none() && !e.value),
@@ -706,7 +735,7 @@ fn example_for<'a>(m: &'a TldrMap, page: &str, args: &[String]) -> Option<&'a st
         }
         Some(_) => None,
     }
-    .map(|e| &*e.desc)
+    .map(|e| e.desc)
 }
 
 /// The first example of `page` led by `word` whose other words the command has too (`args`, its
@@ -714,13 +743,13 @@ fn example_for<'a>(m: &'a TldrMap, page: &str, args: &[String]) -> Option<&'a st
 /// -a`, "List all Docker containers (running and stopped)".
 fn led_by<'a>(m: &'a TldrMap, page: &str, word: &str, args: &[String]) -> Option<&'a str> {
     let has = |w: &str| w.split('|').any(|alt| args.iter().any(|a| a == alt));
-    m.ex.get(page)?
-        .iter()
+    m.examples(page)?
+        .into_iter()
         .find(|e| {
             let mut ws = e.words();
             ws.next().is_some_and(|w| w.split('|').any(|a| a == word)) && ws.all(has)
         })
-        .map(|e| &*e.desc)
+        .map(|e| e.desc)
 }
 
 /// Setting an environment variable, which no tldr page describes: PowerShell's `$env:NAME = ...`,
@@ -793,7 +822,7 @@ fn describe_one(cmd: &str) -> Description {
     };
     let m = tldr();
     let mut parts = Vec::new();
-    if let Some(g) = m.cmd.get(&prog).cloned().or_else(|| local().read().unwrap_or_else(|e| e.into_inner()).get(&prog).cloned()) {
+    if let Some(g) = m.cmd.get(prog.as_str()).map(|g| g.to_string()).or_else(|| local().read().unwrap_or_else(|e| e.into_inner()).get(&prog).cloned()) {
         parts.push(("gen", format!("{prog}: {g}")));
     }
     // what the arguments say: `git checkout main` "Switch to an existing local branch",
@@ -812,8 +841,8 @@ fn describe_one(cmd: &str) -> Description {
         if let Some(sub2) = word_after(cmd, &sub) {
             let page2 = format!("{page}-{sub2}");
             let args2 = args_after(cmd, &sub2);
-            match m.cmd.get(&page2) {
-                Some(g) => {
+            match m.cmd.get(page2.as_str()) {
+                Some(&g) => {
                     add(&mut spec, Some(g));
                     add(&mut spec, example_for(m, &page2, &args2));
                 }
@@ -821,7 +850,7 @@ fn describe_one(cmd: &str) -> Description {
                 // that page's own sentence
                 None => {
                     if let Some(e) = led_by(m, &page, &sub2, &args2) {
-                        add(&mut spec, m.cmd.get(&page).map(String::as_str));
+                        add(&mut spec, m.cmd.get(page.as_str()).copied());
                         add(&mut spec, Some(e));
                     }
                 }
@@ -832,7 +861,7 @@ fn describe_one(cmd: &str) -> Description {
         }
         if spec.is_empty() {
             let args = args_after(cmd, &sub);
-            add(&mut spec, m.cmd.get(&page).map(String::as_str));
+            add(&mut spec, m.cmd.get(page.as_str()).copied());
             match example_for(m, &page, &args) {
                 Some(e) => add(&mut spec, Some(e)),
                 None => add(&mut spec, led_by(m, &prog, &sub, &args)),
