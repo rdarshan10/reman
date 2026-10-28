@@ -1054,7 +1054,10 @@ fn serve(input: std::sync::mpsc::Receiver<String>, output: impl Write, pol: Poli
     while let Some(msg) = wire.next() {
         let params = msg.get("params").cloned().unwrap_or(Value::Null);
         match msg.get("method").and_then(Value::as_str) {
-            Some("initialize") => consent.meet(&params, std::env::var("CLAUDE_CODE_ENTRYPOINT").ok().as_deref()),
+            Some("initialize") => {
+                consent.meet(&params, std::env::var("CLAUDE_CODE_ENTRYPOINT").ok().as_deref());
+                consent.settle();
+            }
             // the agent asks to see its project: the app's approval of this call is the user's yes
             Some("tools/call") if params.get("name").and_then(Value::as_str) == Some(SHARE_TOOL) => {
                 let args = params.get("arguments").cloned().unwrap_or(json!({}));
@@ -1207,6 +1210,12 @@ impl Consent {
         let says = init.pointer("/capabilities/elicitation").is_some_and(|c| !c.is_null());
         self.can_ask = says && entrypoint != Some("claude-vscode");
         self.app = init.pointer("/clientInfo/name").and_then(Value::as_str).map_or_else(|| "A coding agent".to_string(), app_name);
+    }
+
+    /// The user's side: strict permissions (`reman settings`), and whether reman's dialog box can
+    /// be shown here. Apart from `meet` so the tests never read the real settings (strict there
+    /// sent them to a dialog box instead of the app).
+    fn settle(&mut self) {
         self.strict = std::env::var("REMAN_CONSENT_WINDOW").as_deref() == Ok("on") || crate::settings::load().strict_permissions;
         self.window = window::available();
     }
