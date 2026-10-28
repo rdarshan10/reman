@@ -1,5 +1,26 @@
 # Changelog
 
+## v0.3.6
+
+### Changes you'll notice
+
+- **reman's own embedding model.** Search now understands requests about commands better: it uses bge-small-en-v1.5 fine-tuned on commands, so it knows `git branch -D` deletes a branch and "spin up the containers" means `docker compose up`. The daemon downloads it once (113 MB, checked against the SHA-256 built into reman) and moves your history to it in the background; the old model answers searches until it's done. It is never downloaded with updates off. On 122 labelled requests against a real 11,000-command history, the right answer came first 79 times in v0.3.5 and 93 now, and wrong answers marked sure fell from 37 to 6. `"embed_model": "base"` in config.json keeps (or goes back to) the old model.
+- **Better descriptions.** Options tldr writes as `{{[-d|--delete]}}` are no longer dropped, so `git branch -d` reads as deleting a branch. PowerShell cmdlets tldr has no page for are described from Microsoft's documentation. A program neither covers is described from its own files, never by running it: a Python package's summary, an npm package's description, an exe's version information, a script's synopsis or opening comment. A tool you just installed is described within minutes.
+- **A request is never answered by its opposite:** asking to install doesn't offer a removal, start doesn't offer stop.
+- **What you ran lately counts for longer** (it used to fade within a day; now it halves every two weeks), and results that tie come back in the same order every time.
+
+### Memory
+
+- **The daemon uses far less memory.** The embedding model loads when it's needed and is let go after 15 minutes with nobody using reman (`model_idle_min` in config.json; 0 keeps it). Vectors are held as half floats, and descriptions and strings many commands share are held once. On an 11,000-command history the idle daemon went from 262 MB to about 48 MB.
+
+### Fixed
+
+- "install node modules" found nothing when an agent's `grep "...\|Modules..."` was in the history: a `|` inside quotes split the command into steps.
+- A pipeline is described by what its last step does, and a chain by what its steps agree on, so a long cleanup script no longer answers an unrelated request as sure.
+- Re-describing commands no longer holds the database long enough to make a shell miss a failed command's fix.
+
+The first start after updating re-describes your history once (a few seconds), then downloads the model and re-embeds it in the background.
+
 ## v0.3.5
 
 ### Fixed
