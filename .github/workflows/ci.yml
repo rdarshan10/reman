@@ -26,6 +26,13 @@ jobs:
         with:
           workspaces: rust
       - name: Test
-        run: cargo test --release
+        shell: bash
+        # a failing test also becomes an annotation: readable through the API without signing in
+        run: |
+          set -o pipefail
+          cargo test --release 2>&1 | tee test.log || {
+            grep -E "panicked at|^test .* FAILED|^error|assertion|left:|right:" test.log | head -40 | sed 's/^/::error::/'
+            exit 1
+          }
       - name: Build
         run: cargo build --release
