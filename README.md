@@ -87,7 +87,7 @@ Both scripts download the latest release, verify its SHA-256 checksum, and run `
 2. wires your shells: the PowerShell profile and Command Prompt on Windows, your zsh / bash / fish config on macOS and Linux, and nushell and xonsh wherever they're installed;
 3. connects every coding tool it finds: Claude Code, Claude Desktop, Codex CLI, Cursor, VS Code, Windsurf, Gemini CLI, opencode and pi. Each gets the MCP server (pi has no MCP) and, when it runs shell commands, capture through its own hooks (or a small reman plugin for opencode and pi), so what the agent runs is remembered too. Each config gets a `.reman-bak` backup first.
 
-Everything it set up can be changed later on one page: `reman settings`. To skip connecting coding tools, set `REMAN_NO_CONNECT=1` (or run `reman setup --no-connect`). The first start downloads the embedding model, about 130 MB, once. reman then downloads its own model, the same one trained on commands (about 115 MB, checked against a checksum built into reman), and moves your history to it in the background; `"embed_model": "base"` in config.json keeps the first. With updates off, reman downloads nothing.
+Everything it set up can be changed later on one page: `reman settings`. To skip connecting coding tools, set `REMAN_NO_CONNECT=1` (or run `reman setup --no-connect`). The first start downloads the embedding model, about 130 MB, once. reman then downloads its own model, the same one trained on commands (about 115 MB, checked against a checksum built into reman), and moves your history to it in the background; *Search model* in `reman settings` switches between the two. With updates off, reman downloads nothing.
 
 ### Manual download
 
@@ -119,10 +119,10 @@ cargo build --release
 ```sh
 reman update               # install the latest release now
 reman update --check       # only say whether one is out
-reman update --auto on     # from now on, install new versions on their own (off: just tell me)
+reman update --auto off    # just tell me when one is out (on: install them on their own again)
 ```
 
-Once a day reman asks GitHub whether a new version is out, and a desktop notification says so, once per version. With `--auto on` it installs it instead, and tells you it did. `reman settings` has the same choice, plus *never check*, which keeps reman off the network entirely.
+Once a day reman asks GitHub whether a new version is out, installs it on its own, and a desktop notification says it did. With `--auto off` a notification only tells you, once per version. `reman settings` has the same choice, plus *never check*, which keeps reman off the network entirely.
 
 Every update is checked before anything runs. Each release's `SHA256SUMS.txt` is signed with reman's release key (Ed25519), whose public half is built into reman, so a release that wasn't signed with it, or a file changed after signing, is refused. The archive must then match its signed checksum. Only a newer version is installed, never an older one. Of GitHub's answer only the version number is used, and every download address is built by reman itself, over https only. An AI agent can't turn automatic updates on.
 
@@ -221,12 +221,12 @@ Agents get ten tools: `reman_search`, `reman_check`, `reman_fixes`, `reman_recen
 
 What agents can see:
 - **Only folders you approve.** Nothing is visible to an agent until you share a folder, not even the project it's working in (a repo, a git worktree of it included; never your whole home folder or a drive).
-- **Approve it from the chat.** When an agent needs its project's history, you approve it with your app's own buttons:
-  - in apps that support MCP elicitation (VS Code's Copilot, Cursor, Claude Code in a terminal), reman asks you there: *Allow for this session* (nothing is saved; the next session asks again), *Always allow*, or *Don't allow* (not asked again this session);
+- **Strict permissions, on by default:** when an agent needs its project's history, only reman's own dialog box can let it in: a light or dark card on Windows, a native alert on macOS, zenity or kdialog on Linux. *Allow for this session* (nothing is saved; the next session asks again), *Always allow*, or *Don't allow* (not asked again this session). Your AI app's buttons and dialogs don't count, so an app set to approve tool calls by itself can't share anything. Where the dialog can't be shown (over SSH), nothing is shared. Only you can turn it off, in your own terminal (`reman settings`, under *What agents can see*).
+- **With strict permissions off, approve it from the chat** with your app's own buttons:
+  - in apps that support MCP elicitation (VS Code's Copilot, Cursor, Claude Code in a terminal), reman asks you there, with the same three choices;
   - everywhere else (Claude Code in VS Code, Claude Desktop, Gemini CLI...), the agent calls `reman_share_project`, and your app's usual tool approval (*Allow* / *Deny*) decides: Allow shares the project for this session only. After a No, the agent can't ask again that session.
 
   Either way the decision is yours, not the AI's.
-- **Strict permissions** (`reman settings`, under *What agents can see*): only reman's own dialog box can let an agent in: a light or dark card on Windows, a native alert on macOS, zenity or kdialog on Linux. Your AI app's buttons and dialogs no longer count, which matters if you let an app approve tool calls by itself. Where the dialog can't be shown (over SSH), nothing is shared. Only you can turn it off, in your own terminal.
 - **Or from your terminal:** `reman connect --add-root <folder>` shares a folder with every agent for good (`--remove-root` undoes it); `reman connect` lists your busiest folders that aren't shared.
 - **Secrets are redacted**, and in strict mode (the default) anything still secret-looking is withheld.
 

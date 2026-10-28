@@ -40,6 +40,9 @@ enum Row {
     DoneAlert(Option<u64>),
     /// new versions: "notify", "auto" or "off", and a newer version a check already found
     Updates { mode: &'static str, waiting: Option<String> },
+    /// the embedding model search uses: reman's own (or the general one), and the one the
+    /// history is embedded with right now, when the daemon says (a move may be under way)
+    Model { own: bool, now: Option<String> },
     /// the finder: lines under the prompt, or None for the whole screen
     FinderHeight(Option<u16>),
     FinderVim(bool),
@@ -79,7 +82,8 @@ impl Row {
             Row::Strict(_) => "Strict mode withholds any command that still looks like it holds a secret after redaction.".into(),
             Row::OldHistory(_) => "Old, imported history has no folder. When on, agents also get its generic commands (no paths, quotes or hosts).".into(),
             Row::Secrets(_) => "↵ cycles: mask the value (`export API_TOKEN=***`) · drop the command · keep as typed, so your finder shows it whole. Agents always get secrets masked. `reman scrub` cleans older history.".into(),
-            Row::Updates { .. } => "↵ cycles: tell me · install on their own · never check. reman asks GitHub once a day for a new version; installs check its SHA-256 first. `reman update` installs one now.".into(),
+            Row::Updates { .. } => "↵ cycles: install on their own (the default) · never check · tell me. reman asks GitHub once a day for a new version; installs check its signature and SHA-256 first. `reman update` installs one now.".into(),
+            Row::Model { .. } => "↵ switches: reman's own model, trained on commands (the default) · bge-small-en-v1.5, the general one it started from. Your history moves to the other in the background; search keeps working meanwhile.".into(),
             Row::DoneAlert(_) => "↵ cycles: after 1 minute · after 5 minutes · never. A desktop notification when a command of yours that ran that long finishes, with how long it took.".into(),
             Row::FinderHeight(_) => "↵ cycles: 20 lines under the prompt · 30 lines · the whole screen. Where the finder (↑, Tab, Ctrl+R) opens.".into(),
             Row::FinderVim(_) => "↵ switches the finder's keys: as in a text box, or vim (Esc for normal mode: j k move, dd forgets, i types, q closes).".into(),
@@ -186,6 +190,15 @@ fn exes() -> (PathBuf, PathBuf) {
     })
 }
 
+/// PowerShell's execution policies, looked at once while the page is open: each look starts
+/// PowerShell (about a second), and every Enter rebuilds the page. The Shells row, which changes
+/// them, has them looked at again.
+static PS_BLOCKS: std::sync::Mutex<Option<Vec<(&'static str, String, bool)>>> = std::sync::Mutex::new(None);
+
+fn ps_blocks() -> Vec<(&'static str, String, bool)> {
+    PS_BLOCKS.lock().unwrap_or_else(|e| e.into_inner()).get_or_insert_with(crate::ps_policy_blocks).clone()
+}
+
 fn build(draft: &KeyDraft, saved: &KeyDraft) -> Vec<Row> {
     let (exe, _) = exes();
     let st = settings::load();
@@ -219,6 +232,10 @@ fn build(draft: &KeyDraft, saved: &KeyDraft) -> Vec<Row> {
     r.push(Row::DoneAlert(st.done_alert_after()));
     r.push(Row::Updates { mode: st.updates_mode(), waiting: crate::update::waiting() });
 
+    let daemon = client::Client::connect_timeout(Duration::from_millis(200)).ok().and_then(|mut c| c.call(&json!({"op": "ping"})).ok());
+    r.push(Row::Header("Search"));
+    r.push(Row::Model { own: st.own_model(), now: daemon.as_ref().and_then(|p| p["model"].as_str()).map(String::from) });
+
     r.push(Row::Header("Finder"));
     r.push(Row::FinderHeight(st.finder_lines()));
     r.push(Row::FinderEveryone(st.finder_everyone()));
@@ -251,7 +268,7 @@ fn build(draft: &KeyDraft, saved: &KeyDraft) -> Vec<Row> {
     if cfg!(windows) {
         let ps = crate::ps_wired();
         // wired but blocked (execution policy) is as good as not wired: Enter fixes it
-        let blocked: Vec<_> = crate::ps_policy_blocks().into_iter().filter(|b| !b.2).collect();
+        let blocked: Vec<_> = ps_blocks().into_iter().filter(|b| !b.2).collect();
         let detail = match (&ps, blocked.first()) {
             (Some(_), Some((exe, policy, _))) => format!("wired, but {} blocks profile scripts ({policy}): Enter allows your own", crate::ps_name(exe)),
             (Some(p), None) => p.display().to_string(),
@@ -275,7 +292,6 @@ fn build(draft: &KeyDraft, saved: &KeyDraft) -> Vec<Row> {
     }
 
     r.push(Row::Header("reman"));
-    let daemon = client::Client::connect_timeout(Duration::from_millis(200)).ok().and_then(|mut c| c.call(&json!({"op": "ping"})).ok());
     r.push(Row::Info {
         label: "daemon",
         value: match daemon {
@@ -369,13 +385,33 @@ fn act(row: &Row) -> Result<(String, Color)> {
         Row::Updates { mode, .. } => {
             let mut st = settings::load();
             let (next, msg) = match *mode {
-                "notify" => (Some("auto"), "new versions install on their own, after their SHA-256 is checked"),
-                "auto" => (Some("off"), "reman no longer checks for new versions; `reman update` still installs one"),
-                _ => (None, "reman tells you when a new version is out"),
+                "notify" => ("auto", "new versions install on their own, after their SHA-256 is checked"),
+                "auto" => ("off", "reman no longer checks for new versions; `reman update` still installs one"),
+                _ => ("notify", "reman tells you when a new version is out"),
             };
-            st.updates = next.map(String::from);
+            // each choice written out: absent means automatic
+            st.updates = Some(next.to_string());
             settings::save(&st)?;
             (msg.to_string(), OK)
+        }
+        Row::Model { own, .. } => {
+            let mut st = settings::load();
+            st.embed_model = own.then(|| "base".to_string());
+            settings::save(&st)?;
+            // the daemon moves the history to the model wanted as it starts (daemon.rs,
+            // upgrade_model): a new one, from the installed copy
+            if let Ok(mut c) = client::Client::connect_timeout(Duration::from_millis(300)) {
+                let _ = c.call(&json!({"op": "shutdown"}));
+                std::thread::sleep(Duration::from_millis(800));
+            }
+            let _ = client::Client::connect_with(&exe);
+            if *own {
+                ("search uses bge-small-en-v1.5, the general model: your history moves to it in the background".into(), OK)
+            } else if !crate::model::ready(crate::model::COMMANDS.id) && st.updates_mode() == "off" {
+                ("reman's own model isn't downloaded, and with updates off reman stays off the network: search keeps the general one".into(), WARN)
+            } else {
+                ("search uses reman's own model: your history moves to it in the background (downloaded once if needed)".into(), OK)
+            }
         }
         Row::DoneAlert(after) => {
             let mut st = settings::load();
@@ -443,6 +479,7 @@ fn act(row: &Row) -> Result<(String, Color)> {
             let msg = match *name {
                 "PowerShell" => {
                     let mut done = crate::wire_ps_profiles(&exe)?;
+                    *PS_BLOCKS.lock().unwrap_or_else(|e| e.into_inner()) = None; // looked at again below and after
                     for (sh, _, locked) in crate::ps_policy_blocks() {
                         if !locked {
                             crate::allow_ps_scripts(sh)?;
@@ -575,6 +612,19 @@ fn row_line(row: &Row, sel: bool, w: usize) -> Line<'static> {
                 None => Span::raw(""),
             },
         ]),
+        Row::Model { own, now } => {
+            let want = if *own { crate::model::COMMANDS.id } else { crate::model::BASE };
+            Line::from(vec![
+                bar,
+                Span::styled("Search model: ", name_st),
+                if *own { state("reman's own, trained on commands".into(), OK) } else { state("general (bge-small-en-v1.5)".into(), OK) },
+                match now.as_deref() {
+                    Some(n) if n != want && *own && !crate::model::ready(want) => state("   not downloaded yet".into(), MUTED),
+                    Some(n) if n != want => state("   moving your history to it…".into(), ACCENT),
+                    _ => Span::raw(""),
+                },
+            ])
+        }
         Row::DoneAlert(after) => Line::from(vec![
             bar,
             Span::styled("Done alerts: ", name_st),

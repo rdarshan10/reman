@@ -10,7 +10,8 @@ What may never be installed:
 What happens:
   * a signed, newer release installs: `reman update` checks it, runs its setup, and the sandbox's
     daemon runs from its bin folder;
-  * notify (the default): the daemon tells about a new version once, suggesting `--auto on`;
+  * notify (`--auto off`; automatic is the default): the daemon tells about a new version once,
+    suggesting `--auto on`;
   * an agent can't turn automatic updates on; `--auto off` is fine;
   * auto: the daemon installs a signed release on its own, once; a tampered one is refused and
     it says it couldn't update.
@@ -229,9 +230,11 @@ def run(tmp, home, api):
     check("the sandbox's daemon is up", code == 0, out)
     check("reman update leaves no process holding its output", not HELD, HELD)
 
-    print("== notify (the default)")
+    print("== notify")
     reman(env, "stop")
     time.sleep(1)
+    code, out = reman(env, "update", "--auto", "off")
+    check("--auto off: told instead, written out (no setting means automatic)", code == 0 and '"notify"' in open(os.path.join(home, "config.json")).read(), out)
     open(os.path.join(home, "update.json"), "w").write("{}")
     if os.path.exists(os.path.join(tmp, "notify.log")):
         os.remove(os.path.join(tmp, "notify.log"))

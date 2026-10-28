@@ -60,8 +60,10 @@ class Sandbox:
         self.config({})
         self.proc = None
 
-    def config(self, c):
-        json.dump(dict({"strict_secrets": True}, **c), open(self.cfg, "w"))
+    def config(self, c, bare=False):
+        # strict permissions are on by default; most checks here are of the app asking, so off
+        # unless `bare` (only what `c` says, every other setting as a new install has it)
+        json.dump(c if bare else dict({"strict_secrets": True, "strict_permissions": False}, **c), open(self.cfg, "w"))
         # the daemon re-reads it when its modified time changes
         t = time.time() + 1
         os.utime(self.cfg, (t, t))
@@ -316,14 +318,16 @@ def consent(sb):
     s.close()
 
     # strict permissions: only reman's own dialog box decides (here there is none: the sandbox
-    # never shows it), so neither the app's dialog nor its Allow on reman_share_project shares
-    sb.config({"strict_permissions": True})
-    s = McpSession(sb, repo)
-    got = s.tool("reman_recent", {}, answer="Allow for this session")
-    shared = s.tool("reman_share_project", {}).get("result", {})
-    check("strict permissions: the app isn't asked, its Allow doesn't share", not s.asked and shared.get("shared") is False and "Strict permissions" in shared.get("reason", ""), (s.asked, shared))
-    check("...and the history stays hidden", not s.tool("reman_recent", {}).get("result"))
-    s.close()
+    # never shows it), so neither the app's dialog nor its Allow on reman_share_project shares.
+    # On by default: set in so many words, and in a config that doesn't mention it
+    for cfg, what in (({"strict_permissions": True}, "on"), ({}, "the default")):
+        sb.config(cfg, bare=not cfg)
+        s = McpSession(sb, repo)
+        got = s.tool("reman_recent", {}, answer="Allow for this session")
+        shared = s.tool("reman_share_project", {}).get("result", {})
+        check(f"strict permissions {what}: the app isn't asked, its Allow doesn't share", not s.asked and shared.get("shared") is False and "Strict permissions" in shared.get("reason", ""), (s.asked, shared))
+        check("...and the history stays hidden", not s.tool("reman_recent", {}).get("result"))
+        s.close()
     sb.config({})
 
     # a No in the app's own dialog stays a No: the share tool can't get around it

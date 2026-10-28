@@ -1,5 +1,17 @@
 # Changelog
 
+## v0.3.7
+
+### Changes you'll notice
+
+- **Strict permissions are on by default.** When an agent asks to see a folder, only reman's own dialog box can share it; your AI app's Allow buttons and dialogs don't count, so an app set to approve tool calls by itself can't share your history. Turn it off in `reman settings` (only from your own terminal) to approve from the chat instead. Off was the default until now, so it turns on for everyone who hadn't turned it on.
+- **Updates install on their own by default**, once their signature and checksum check out, and a notification says so. `reman update --auto off` (or *tell me* in `reman settings`) brings back a notification only; *never check* keeps reman off the network, and stays as it was. *Tell me* was the default until now and wasn't written down, so it becomes automatic: pick it again if you want it.
+- **Search model in `reman settings`:** switch between reman's own model, trained on commands, and the general bge-small-en-v1.5. Your history moves to the other in the background while search keeps working.
+
+### Fixed
+
+- `reman settings` no longer pauses about a second after every change: it started PowerShell twice each time to read its script policy, and now reads it once.
+
 ## v0.3.6
 
 ### Changes you'll notice

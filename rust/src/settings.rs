@@ -5,7 +5,7 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
-#[derive(Serialize, Deserialize, Default, Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Settings {
     /// folders whose commands agents may read (REMAN_MCP_ROOT overrides per agent)
     #[serde(default)]
@@ -35,15 +35,17 @@ pub struct Settings {
     pub ignore_folders: Vec<String>,
     /// strict permissions: only reman's own dialog box can let an agent see a folder; the AI
     /// app's approval buttons and dialogs can't (mcp.rs, Consent). For apps set to approve tool
-    /// calls on their own. Where the dialog can't be shown (no desktop), nothing is shared.
-    #[serde(default, alias = "consent_window", skip_serializing_if = "std::ops::Not::not")]
+    /// calls on their own. Where the dialog can't be shown (no desktop), nothing is shared. On
+    /// unless turned off (only `false` is written)
+    #[serde(default = "yes", alias = "consent_window", skip_serializing_if = "is_on")]
     pub strict_permissions: bool,
     /// a desktop notification when a command of yours that ran this many seconds finishes;
     /// absent = 60, 0 = never
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub done_alert_after_s: Option<u64>,
-    /// new versions (update.rs): absent = a daily check and a notification, "auto" = installed
-    /// on their own, "off" = no check at all
+    /// new versions (update.rs): absent or "auto" = installed on their own, after their signature
+    /// and checksum are checked; "notify" = a daily check and a notification; "off" = no check
+    /// at all
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub updates: Option<String>,
     /// the finder: how many lines it takes under the prompt; absent = 20, 0 = the whole screen
@@ -89,13 +91,18 @@ impl Settings {
         }
     }
 
-    /// "notify" (the default), "auto" or "off"
+    /// "auto" (the default), "notify" or "off"
     pub fn updates_mode(&self) -> &'static str {
         match self.updates.as_deref() {
-            Some("auto") => "auto",
+            Some("notify") => "notify",
             Some("off") => "off",
-            _ => "notify",
+            _ => "auto",
         }
+    }
+
+    /// The history is searched with reman's own model (trained on commands), not the general one.
+    pub fn own_model(&self) -> bool {
+        self.embed_model.as_deref() != Some("base")
     }
 
     /// Lines the finder takes under the prompt; None = the whole screen.
@@ -175,6 +182,17 @@ fn yes() -> bool {
     true
 }
 
+fn is_on(b: &bool) -> bool {
+    *b
+}
+
+/// What an empty config.json means: every default in one place, the serde attributes above.
+impl Default for Settings {
+    fn default() -> Self {
+        serde_json::from_str("{}").expect("every field has a default")
+    }
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Http {
     pub port: u16,
@@ -186,7 +204,7 @@ pub fn path() -> PathBuf {
 }
 
 pub fn load() -> Settings {
-    std::fs::read_to_string(path()).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or(Settings { strict_secrets: true, ..Default::default() })
+    std::fs::read_to_string(path()).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default()
 }
 
 pub fn save(s: &Settings) -> Result<()> {
@@ -214,4 +232,31 @@ pub fn new_token() -> String {
 
 pub fn roots_sep() -> &'static str {
     if cfg!(windows) { ";" } else { ":" }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_new_install_is_strict_and_updates_itself() {
+        let st = Settings::default();
+        assert!(st.strict_permissions && st.strict_secrets);
+        assert_eq!(st.updates_mode(), "auto");
+        assert!(st.own_model());
+        // the defaults aren't written out, so a later default can still change them
+        assert_eq!(serde_json::to_string(&st).unwrap(), r#"{"mcp_roots":[],"strict_secrets":true,"share_old_history":false}"#);
+    }
+
+    #[test]
+    fn what_the_user_turned_off_stays_off() {
+        let st: Settings = serde_json::from_str(r#"{"strict_permissions": false, "updates": "notify", "embed_model": "base"}"#).unwrap();
+        assert!(!st.strict_permissions);
+        assert_eq!(st.updates_mode(), "notify");
+        assert!(!st.own_model());
+        let again: Settings = serde_json::from_str(&serde_json::to_string(&st).unwrap()).unwrap();
+        assert!(!again.strict_permissions && again.updates_mode() == "notify");
+        // the setting's old name still reads
+        assert!(serde_json::from_str::<Settings>(r#"{"consent_window": true}"#).unwrap().strict_permissions);
+    }
 }

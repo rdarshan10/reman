@@ -109,11 +109,11 @@ t.keys("enter", wait=1.0)
 roots = cfg().get("mcp_roots", [])
 check("`a` + a typed path shares that folder", any(os.path.normcase(r) == os.path.normcase(SHARE_TYPED) for r in roots), str(roots))
 
-check("the strict-permissions switch is there, off by default", t.goto("Strict permissions") and "[ ]" in t.selected(), t.selected().strip())
+check("the strict-permissions switch is there, on by default", t.goto("Strict permissions") and "[x]" in t.selected(), t.selected().strip())
 t.keys("enter", wait=0.8)
-check("Enter turns it on and saves", cfg().get("strict_permissions") is True and "[x]" in t.selected(), cfg())
+check("Enter turns it off (from the user's own terminal) and saves that", cfg().get("strict_permissions") is False and "[ ]" in t.selected(), cfg())
 t.keys("enter", wait=0.8)
-check("Enter again turns it off (from the user's own terminal)", "strict_permissions" not in cfg(), cfg())
+check("Enter again turns it back on (only `false` is ever written)", "strict_permissions" not in cfg() and "[x]" in t.selected(), cfg())
 
 check("the strict-secrets switch can be selected", t.goto("Strict secrets"), t.selected().strip())
 t.keys("enter", wait=0.8)
@@ -126,6 +126,15 @@ t.keys("enter", wait=0.8)
 check("Enter: keep as typed (redaction off for you; agents still masked)", cfg().get("secrets") == "keep" and "agents still get them masked" in t.selected(), cfg().get("secrets"))
 t.keys("enter", wait=0.8)
 check("Enter: back to masking", "secrets" not in cfg() and "mask the value" in t.selected(), cfg().get("secrets"))
+
+check("updates install on their own by default", t.goto("Updates:") and "install them on their own" in t.selected(), t.selected().strip())
+for mode, shown in (("off", "never check"), ("notify", "tell me"), ("auto", "install them on their own")):
+    t.keys("enter", wait=0.8)
+    check(f"Enter: {shown}, saved as {mode!r}", cfg().get("updates") == mode and shown in t.selected(), (cfg().get("updates"), t.selected().strip()))
+
+# (shown, not switched: switching restarts the daemon, and this suite shares the real one)
+check("the search model: reman's own by default", t.goto("Search model:") and "reman's own" in t.selected(), t.selected().strip())
+check("...the help line names the other choice", "bge-small-en-v1.5" in t.text(), t.text()[-300:])
 
 # Keys: a draft until s saves it. Press the new key (+ adds a second); a key that types is refused;
 # Del turns one off; r gives it back; u undoes; leaving with changes unsaved asks first

@@ -1,8 +1,8 @@
 //! Updates. Once a day the daemon asks GitHub for the latest release (nothing is sent but the
 //! request itself). What it does then is the `updates` setting:
-//!   * absent ("notify"): one desktop notification per new version, suggesting automatic updates;
-//!   * "auto": downloads it and installs it with the new binary's own `reman setup --no-connect`;
-//!     the new daemon then says so;
+//!   * absent or "auto" (the default): downloads it and installs it with the new binary's own
+//!     `reman setup --no-connect`; the new daemon then says so;
+//!   * "notify": one desktop notification per new version, suggesting automatic updates;
 //!   * "off": no check at all.
 //! `reman update` installs the latest release now, whatever the setting.
 //!
@@ -476,7 +476,8 @@ pub fn set_auto(on: bool) -> Result<()> {
         crate::connect::refuse_if_agent("Turning on automatic updates")?;
     }
     let mut st = settings::load();
-    st.updates = on.then(|| "auto".to_string());
+    // "notify" is written out: absent means automatic
+    st.updates = Some(if on { "auto" } else { "notify" }.to_string());
     settings::save(&st)?;
     // the daemon looks again within the hour, not tomorrow
     let mut s = State::load();
