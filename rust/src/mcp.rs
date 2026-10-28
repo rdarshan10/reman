@@ -169,7 +169,7 @@ fn sum(st: &Store, rows: &[&Row]) -> Seen {
         agent: rows.iter().map(|r| r.agent).sum(),
         last_used: rows.first().map(|r| r.last_used).unwrap_or(0),
         last_exit: rows.first().and_then(|r| r.last_exit),
-        actors: rows.iter().map(|r| r.last_actor.clone().unwrap_or_else(|| "human".into())).collect(),
+        actors: rows.iter().map(|r| r.last_actor.as_deref().unwrap_or("human").to_string()).collect(),
         // newest row that has a real folder; null = only known from folder-less old history
         cwd: rows.iter().find(|r| !st.row_unscoped(r)).and_then(|r| r.cwd).map(|c| st.cwd_name(c).to_string()),
     }

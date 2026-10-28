@@ -6,7 +6,8 @@ use crate::db::{self, Run};
 use crate::describe;
 use anyhow::Result;
 use rusqlite::Connection;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 #[derive(Debug, Clone)]
 pub struct Row {
@@ -19,7 +20,7 @@ pub struct Row {
     pub agent: u32,
     pub last_used: i64,
     pub last_exit: Option<i64>,
-    pub last_actor: Option<String>,
+    pub last_actor: Option<Arc<str>>,
     /// how long its recent successful and failed runs took, newest last (Row::KEEP_MS each)
     pub ok_ms: Vec<u32>,
     pub fail_ms: Vec<u32>,
@@ -55,7 +56,7 @@ pub struct Entry {
     pub desc: Option<String>,
     /// every description sentence (the tool's and the subcommand's), lowercased once: the
     /// words search matches a query against, on every keystroke
-    pub desc_words: Option<String>,
+    pub desc_words: Option<Arc<str>>,
     pub rows: Vec<Row>,
     pub pinned: bool,
     pub comment: bool,
@@ -68,7 +69,7 @@ pub struct Entry {
     /// outcome, reads like Python/JS). Kept in the db, never offered back.
     pub noise: bool,
     /// the programs it runs (describe::programs): `npx astro dev` -> npx, astro
-    pub progs: Vec<String>,
+    pub progs: Box<[Arc<str>]>,
     /// what its description says it does to its object (describe::Action)
     pub action: Option<describe::Action>,
     /// the last part of each path in it, lowercased (`tar -czf b.tgz data/`: "b.tgz data"):
@@ -127,7 +128,7 @@ pub struct Agg {
     pub agent: u32,
     pub last_used: i64,
     pub last_exit: Option<i64>,
-    pub last_actor: Option<String>,
+    pub last_actor: Option<Arc<str>>,
     pub cwd: Option<u32>,
     pub folders: u32,
 }
@@ -137,7 +138,7 @@ impl Agg {
         status_of(self.ok, self.fail)
     }
     pub fn actor_label(&self) -> String {
-        self.last_actor.clone().unwrap_or_else(|| "human".into())
+        self.last_actor.as_deref().unwrap_or("human").to_string()
     }
     pub fn is_agent(&self) -> bool {
         self.last_actor.as_deref().is_some_and(|a| a.starts_with("agent"))
@@ -161,8 +162,9 @@ pub fn status_of(ok: u32, fail: u32) -> &'static str {
 
 #[derive(Default)]
 struct Interner {
-    names: Vec<String>,
-    index: HashMap<String, u32>,
+    names: Vec<Arc<str>>,
+    /// (the same string as the name, when the key is the name itself)
+    index: HashMap<Arc<str>, u32>,
 }
 
 impl Interner {
@@ -174,8 +176,9 @@ impl Interner {
             return *i;
         }
         let i = self.names.len() as u32;
-        self.names.push(display.to_string());
-        self.index.insert(k.to_string(), i);
+        let name: Arc<str> = display.into();
+        self.index.insert(if k == display { name.clone() } else { k.into() }, i);
+        self.names.push(name);
         i
     }
 }
@@ -186,8 +189,7 @@ pub struct Store {
     /// entries.len() * DIM, L2-normalised, as half floats (f16.rs); zero rows for entries without
     /// a vector
     pub vecs: Vec<u16>,
-    pub desc_vecs: Vec<u16>,
-    pub desc_owner: Vec<u32>,
+    pub desc: DescVecs,
     by_text: TextIndex,
     pub by_id: HashMap<i64, u32>,
     cwds: Interner,
@@ -202,10 +204,27 @@ pub struct Store {
     /// error signature -> the entries that failed that way (errors::signature)
     pub by_sig: HashMap<String, Vec<u32>>,
     /// every program some command in the history runs: a query naming one names a tool you use
-    pub programs: std::collections::HashSet<String>,
+    pub programs: HashSet<Arc<str>>,
+    /// one copy of each string many commands hold (who ran it last, what a description says)
+    strs: HashSet<Arc<str>>,
     /// (entry, folder, command of the line) -> [runs, ok, fail] to add to what the line's exit
     /// status recorded, from what its output said (verdict.rs)
     pub seen: HashMap<(u32, Option<u32>, String), [i32; 3]>,
+}
+
+/// `s` as the one copy `pool` holds.
+fn shared(pool: &mut HashSet<Arc<str>>, s: &str) -> Arc<str> {
+    if let Some(a) = pool.get(s) {
+        return a.clone();
+    }
+    let a: Arc<str> = s.into();
+    pool.insert(a.clone());
+    a
+}
+
+/// Every sentence of a description, lowercased: Entry::desc_words.
+fn described_words(d: &describe::Description) -> Option<String> {
+    Some(d.parts.iter().map(|p| p.1.to_lowercase()).collect::<Vec<_>>().join(" ; ")).filter(|w| !w.is_empty())
 }
 
 /// One bit per character class: a-z, 0-9, and the other printable ASCII folded into the rest.
@@ -259,6 +278,102 @@ impl TextIndex {
             self.by_hash.remove(&h);
         }
         self.clash.remove(text);
+    }
+}
+
+/// The description vectors, each distinct one held once: commands that run the same tool share
+/// its sentences (one history: 11,459 (command, sentence) pairs, 575 distinct vectors).
+#[derive(Default)]
+pub struct DescVecs {
+    /// the distinct vectors, DIM half floats each, L2-normalised
+    vecs: Vec<u16>,
+    /// (entry, vector) pairs: entry owner[k] is described by vector of[k]
+    owner: Vec<u32>,
+    of: Vec<u32>,
+    /// a vector's hash -> the vector. A different vector with the same hash is just held again.
+    hasher: std::hash::RandomState,
+    index: HashMap<u64, u32>,
+}
+
+impl DescVecs {
+    /// How many distinct vectors.
+    pub fn len(&self) -> usize {
+        self.vecs.len() / DIM
+    }
+
+    pub fn get(&self, j: u32) -> &[u16] {
+        &self.vecs[j as usize * DIM..(j as usize + 1) * DIM]
+    }
+
+    /// (entry, vector index) for every description vector of every entry.
+    pub fn pairs(&self) -> impl Iterator<Item = (u32, u32)> + '_ {
+        self.owner.iter().copied().zip(self.of.iter().copied())
+    }
+
+    /// One of `entry`'s description vectors, as embedded.
+    fn add(&mut self, entry: u32, v: &[f32]) {
+        use std::hash::BuildHasher;
+        let mut v = v.to_vec();
+        crate::embed::normalize(&mut v);
+        let at = self.vecs.len();
+        crate::f16::encode_into(&mut self.vecs, &v);
+        let h = self.hasher.hash_one(&self.vecs[at..]);
+        let j = match self.index.get(&h) {
+            Some(&j) if self.get(j) == &self.vecs[at..] => {
+                self.vecs.truncate(at);
+                j
+            }
+            Some(_) => (at / DIM) as u32,
+            None => {
+                self.index.insert(h, (at / DIM) as u32);
+                (at / DIM) as u32
+            }
+        };
+        self.owner.push(entry);
+        self.of.push(j);
+    }
+
+    /// Every vector of these entries out; one no entry has any more goes too.
+    fn remove(&mut self, entries: &HashSet<u32>) {
+        use std::hash::BuildHasher;
+        let mut keep = 0;
+        for k in 0..self.owner.len() {
+            if !entries.contains(&self.owner[k]) {
+                self.owner[keep] = self.owner[k];
+                self.of[keep] = self.of[k];
+                keep += 1;
+            }
+        }
+        self.owner.truncate(keep);
+        self.of.truncate(keep);
+        let mut used = vec![false; self.len()];
+        for &j in &self.of {
+            used[j as usize] = true;
+        }
+        let mut moved_to = vec![0u32; used.len()];
+        let mut next = 0;
+        for (j, _) in used.iter().enumerate().filter(|u| *u.1) {
+            if next != j {
+                self.vecs.copy_within(j * DIM..(j + 1) * DIM, next * DIM);
+            }
+            moved_to[j] = next as u32;
+            next += 1;
+        }
+        self.vecs.truncate(next * DIM);
+        for j in &mut self.of {
+            *j = moved_to[*j as usize];
+        }
+        self.index.clear();
+        for j in 0..next as u32 {
+            self.index.entry(self.hasher.hash_one(self.get(j))).or_insert(j);
+        }
+    }
+
+    fn shrink_to_fit(&mut self) {
+        self.vecs.shrink_to_fit();
+        self.owner.shrink_to_fit();
+        self.of.shrink_to_fit();
+        self.index.shrink_to_fit();
     }
 }
 
@@ -373,7 +488,7 @@ impl Store {
                 agent: r.get::<_, Option<i64>>(7)?.unwrap_or(0).max(0) as u32,
                 last_used: r.get::<_, Option<i64>>(8)?.unwrap_or(0),
                 last_exit: r.get(9)?,
-                last_actor: r.get(10)?,
+                last_actor: r.get::<_, Option<String>>(10)?.map(|a| shared(&mut s.strs, &a)),
                 ok_ms: Vec::new(),
                 fail_ms: Vec::new(),
             };
@@ -399,10 +514,8 @@ impl Store {
             if seen.insert((ei, kind), ()).is_some() {
                 continue;
             }
-            if let Some(mut v) = db::unpack(&r.get::<_, Vec<u8>>(2)?) {
-                crate::embed::normalize(&mut v);
-                crate::f16::encode_into(&mut s.desc_vecs, &v);
-                s.desc_owner.push(ei);
+            if let Some(v) = db::unpack(&r.get::<_, Vec<u8>>(2)?) {
+                s.desc.add(ei, &v);
             }
         }
         drop(rows);
@@ -437,8 +550,7 @@ impl Store {
             s.execs.push(ex);
         }
         s.vecs.shrink_to_fit();
-        s.desc_vecs.shrink_to_fit();
-        s.desc_owner.shrink_to_fit();
+        s.desc.shrink_to_fit();
         s.execs.shrink_to_fit();
         s.entries.shrink_to_fit();
         // most commands have one row and a few runs: a Vec grown one push at a time holds 4+
@@ -463,7 +575,7 @@ impl Store {
 
     /// A branch name or commit as Exec::branch / Exec::head hold it.
     pub fn git_name(&self, i: u32) -> Option<&str> {
-        (i > 0).then(|| self.git.names[i as usize - 1].as_str())
+        (i > 0).then(|| &*self.git.names[i as usize - 1])
     }
 
     fn intern_cwd(&mut self, c: &str) -> u32 {
@@ -614,10 +726,9 @@ impl Store {
             }
             None => self.vecs.extend(std::iter::repeat_n(0, DIM)),
         }
-        let mut progs = describe::programs(text);
-        progs.shrink_to_fit();
-        self.programs.extend(progs.iter().cloned());
+        let progs = describe::programs(text).iter().map(|p| shared(&mut self.programs, p)).collect();
         let described = describe::describe(text);
+        let desc_words = described_words(&described).map(|w| shared(&mut self.strs, &w));
         let lower = text.to_lowercase();
         self.entries.push(Entry {
             text: text.to_string(),
@@ -626,7 +737,7 @@ impl Store {
             mask: char_mask(text),
             gkey: describe::group_key(text),
             shape: describe::shape_key(text),
-            desc_words: Some(described.parts.iter().map(|p| p.1.to_lowercase()).collect::<Vec<_>>().join(" ; ")).filter(|w| !w.is_empty()),
+            desc_words,
             action: describe::command_action(text, &described),
             desc,
             rows: Vec::new(),
@@ -655,31 +766,20 @@ impl Store {
             updates.iter().filter_map(|(t, d, v)| self.by_text.get(&self.entries, t).map(|i| (i, d, v))).collect();
         replaced.extend(found.iter().map(|f| f.0));
         // the old vectors out, in one pass
-        let mut keep = 0;
-        for j in 0..self.desc_owner.len() {
-            if !replaced.contains(&self.desc_owner[j]) {
-                if keep != j {
-                    self.desc_owner[keep] = self.desc_owner[j];
-                    self.desc_vecs.copy_within(j * DIM..(j + 1) * DIM, keep * DIM);
-                }
-                keep += 1;
-            }
-        }
-        self.desc_owner.truncate(keep);
-        self.desc_vecs.truncate(keep * DIM);
+        self.desc.remove(&replaced);
         for (i, display, vecs) in found {
             for v in vecs {
-                let mut v = v.clone();
-                crate::embed::normalize(&mut v);
-                crate::f16::encode_into(&mut self.desc_vecs, &v);
-                self.desc_owner.push(i);
+                self.desc.add(i, v);
             }
+            let described = describe::describe(&self.entries[i as usize].text);
+            let words = described_words(&described).map(|w| shared(&mut self.strs, &w));
             let e = &mut self.entries[i as usize];
-            let described = describe::describe(&e.text);
-            e.desc_words = Some(described.parts.iter().map(|p| p.1.to_lowercase()).collect::<Vec<_>>().join(" ; ")).filter(|w| !w.is_empty());
+            e.desc_words = words;
             e.action = describe::command_action(&e.text, &described);
             e.desc = display.clone();
         }
+        // what no description says any more
+        self.strs.retain(|a| Arc::strong_count(a) > 1);
     }
 
     /// Mirror a db::record_run into memory. `vecs` = (raw, desc display, desc part vectors) for a
@@ -694,11 +794,7 @@ impl Store {
                 };
                 let i = self.upsert_entry(&run.cmd, raw, desc);
                 for v in parts {
-                    let mut v = v.clone();
-                    crate::embed::normalize(&mut v);
-                    room(&mut self.desc_vecs);
-                    crate::f16::encode_into(&mut self.desc_vecs, &v);
-                    self.desc_owner.push(i);
+                    self.desc.add(i, v);
                 }
                 i
             }
@@ -707,6 +803,7 @@ impl Store {
         let session = self.sessions.intern(&run.session, &run.session);
         let (ok, bad) = (run.ok() as u32, run.failed() as u32);
         let (h, a) = if run.is_agent() { (0, 1) } else { (1, 0) };
+        let actor = shared(&mut self.strs, &run.actor);
         let e = &mut self.entries[ei as usize];
         e.alive = true;
         e.noise = false; // it just ran for real
@@ -722,7 +819,7 @@ impl Store {
                 agent: a,
                 last_used: run.ts,
                 last_exit: run.exit,
-                last_actor: Some(run.actor.clone()),
+                last_actor: Some(actor),
                 ok_ms: Vec::new(),
                 fail_ms: Vec::new(),
             });
@@ -738,7 +835,7 @@ impl Store {
             r.agent += a;
             r.last_used = r.last_used.max(run.ts);
             r.last_exit = run.exit;
-            r.last_actor = Some(run.actor.clone());
+            r.last_actor = Some(actor);
         }
         self.by_id.insert(command_id, ei);
         if let Some(e) = run.err.clone().filter(|_| run.failed()) {
@@ -784,10 +881,11 @@ impl Store {
 
     /// A shell's record of a run became an agent's (db::claim_for_agent), with what its output said.
     pub fn claim_for_agent(&mut self, command_id: i64, actor: &str, seen: Option<&str>) {
+        let actor = shared(&mut self.strs, actor);
         let Some((ei, r)) = self.row_of(command_id) else { return };
         r.human = r.human.saturating_sub(1);
         r.agent += 1;
-        r.last_actor = Some(actor.to_string());
+        r.last_actor = Some(actor);
         let cwd = r.cwd;
         if let Some(j) = seen {
             self.note_seen(ei, cwd, j);
@@ -925,18 +1023,47 @@ mod tests {
         };
         let a = s.apply_run(1, true, &run("eas build", 0, "C:/a", "human", 1), Some((&vec![1.0; DIM], None, &[])));
         let b = s.apply_run(2, true, &run("git status", 0, "C:/a", "human", 2), Some((&vec![1.0; DIM], Some("git: x".into()), &[one(1.0), one(2.0)])));
-        assert_eq!(s.desc_owner, vec![b, b]);
+        let owners = |s: &Store| {
+            let mut o: Vec<u32> = s.desc.pairs().map(|p| p.0).collect();
+            o.sort();
+            o
+        };
+        assert_eq!(owners(&s), vec![b, b]);
         s.set_descriptions(&[("eas build", Some("eas: EAS command line tool".into()), vec![one(3.0)]), ("git status", Some("git: y".into()), vec![one(4.0)])]);
         // each entry's old vectors gone, the new ones in; nothing else touched
-        let mut owners = s.desc_owner.clone();
-        owners.sort();
-        assert_eq!(owners, vec![a, b]);
-        assert_eq!(s.desc_vecs.len(), 2 * DIM);
+        assert_eq!(owners(&s), vec![a, b]);
+        assert_eq!(s.desc.len(), 2);
         assert_eq!(s.entries[a as usize].desc.as_deref(), Some("eas: EAS command line tool"));
         assert_eq!(s.entries[b as usize].desc.as_deref(), Some("git: y"));
         // an unknown text changes nothing
         s.set_descriptions(&[("never ran", Some("x".into()), vec![one(5.0)])]);
-        assert_eq!(s.desc_owner.len(), 2);
+        assert_eq!(s.desc.pairs().count(), 2);
+    }
+
+    #[test]
+    fn a_description_vector_shared_is_held_once() {
+        let mut s = Store::default();
+        let v = |x: f32| {
+            let mut v = vec![0.0; DIM];
+            v[0] = x;
+            v[1] = 1.0;
+            v
+        };
+        let a = s.apply_run(1, true, &run("git push", 0, "C:/a", "human", 1), Some((&vec![1.0; DIM], None, &[v(1.0), v(2.0)])));
+        let b = s.apply_run(2, true, &run("git pull", 0, "C:/a", "human", 2), Some((&vec![1.0; DIM], None, &[v(1.0), v(3.0)])));
+        assert_eq!(s.desc.len(), 3, "the sentence both share is held once");
+        assert_eq!(s.desc.pairs().count(), 4);
+        let shared = |s: &Store, e: u32| s.desc.pairs().filter(|p| p.0 == e).any(|p| (0.70..0.71).contains(&crate::f16::decode(s.desc.get(p.1)[0])));
+        assert!(shared(&s, a) && shared(&s, b));
+        // a's vectors replaced: the one only a had goes, the shared one stays for b
+        s.set_descriptions(&[("git push", None, vec![v(4.0)])]);
+        assert_eq!(s.desc.len(), 3);
+        assert!(shared(&s, b) && !shared(&s, a));
+        // same scores as one vector per pair
+        let q = v(1.0);
+        let (sim, _) = crate::search::similarities(&s, &q);
+        let best = |e: u32| s.desc.pairs().filter(|p| p.0 == e).map(|p| crate::f16::dot(s.desc.get(p.1), &q)).fold(crate::f16::dot(s.vec(e), &q), f32::max);
+        assert_eq!((sim[a as usize], sim[b as usize]), (best(a), best(b)));
     }
 
     #[test]

@@ -3,7 +3,7 @@
 //!    weak-confidence -> literal word-overlap fallback). Kept for parity checks.
 //!  - `Hybrid` (default): semantic + nucleo fuzzy + prefix, so `dock comp up` or a half-typed
 //!    command finds the exact thing instantly while natural-language intents still work.
-use crate::config::{self, DIM};
+use crate::config;
 use crate::store::{Scope, Store};
 use nucleo_matcher::pattern::{CaseMatching, Normalization, Pattern};
 use nucleo_matcher::{Config, Matcher, Utf32Str};
@@ -273,7 +273,7 @@ fn named_tools(store: &Store, text: &str) -> Vec<String> {
         .filter(|w| crate::describe::action_of(w).is_none())
         .filter(|w| w.len() >= 3 && store.programs.contains(w.as_str()))
         .filter(|w| {
-            let elsewhere = |e: &&crate::store::Entry| e.alive && !e.progs.iter().any(|p| p == w) && e.desc_words.as_deref().is_some_and(|d| has_word(d, w));
+            let elsewhere = |e: &&crate::store::Entry| e.alive && !e.progs.iter().any(|p| **p == **w) && e.desc_words.as_deref().is_some_and(|d| has_word(d, w));
             store.entries.iter().filter(elsewhere).take(2).count() < 2
         })
         .collect()
@@ -313,8 +313,10 @@ pub fn similarities(store: &Store, qv: &[f32]) -> (Vec<f32>, Vec<f32>) {
         }
     }
     let mut sim = raw.clone();
-    for (j, &owner) in store.desc_owner.iter().enumerate() {
-        let d = crate::f16::dot(&store.desc_vecs[j * DIM..(j + 1) * DIM], qv);
+    // each distinct description vector scored once, then given to every entry it describes
+    let desc: Vec<f32> = (0..store.desc.len() as u32).map(|j| crate::f16::dot(store.desc.get(j), qv)).collect();
+    for (owner, j) in store.desc.pairs() {
+        let d = desc[j as usize];
         let s = &mut sim[owner as usize];
         if d > *s {
             *s = d;
@@ -437,7 +439,7 @@ pub fn search_ranked(store: &Store, q: &Query, qv: Option<&[f32]>, rank_qv: Opti
         .filter(|c| short_text(c))
         .flat_map(|c| {
             let e = &store.entries[c.idx as usize];
-            std::iter::once(e.shape.as_str()).chain(e.progs.iter().map(String::as_str)).chain(e.desc_words.as_deref())
+            std::iter::once(e.shape.as_str()).chain(e.progs.iter().map(|p| &**p)).chain(e.desc_words.as_deref())
         })
         .collect();
     let toks = query_words(text, &texts);
@@ -541,8 +543,13 @@ pub fn search_ranked(store: &Store, q: &Query, qv: Option<&[f32]>, rank_qv: Opti
         }
     }
     // answers first: a close hit always outranks one that isn't (an agent's one-off that quotes
-    // the query word for word stays below the command it was about)
-    scored.sort_by(|a, b| b.close.cmp(&a.close).then(b.score.total_cmp(&a.score)).then_with(|| a.idx.cmp(&b.idx)));
+    // the query word for word stays below the command it was about). A tie goes to the one run
+    // more recently: commands run seconds apart differ in recency by less than an f32 holds, so
+    // their scores come out equal or not depending on the clock, and the order moved with it.
+    let last = |i: u32| cands.binary_search_by_key(&i, |c| c.idx).map_or(0, |k| cands[k].last);
+    scored.sort_by(|a, b| {
+        b.close.cmp(&a.close).then(b.score.total_cmp(&a.score)).then_with(|| last(b.idx).cmp(&last(a.idx))).then_with(|| a.idx.cmp(&b.idx))
+    });
     let group = q.group && mode != "manual";
     finish(store, scored, q, group, mode)
 }
@@ -596,6 +603,7 @@ fn recent(store: &Store, mut cands: Vec<Cand>, q: &Query) -> Outcome {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::DIM;
     use crate::db::{self, Run};
     use rusqlite::Connection;
 
@@ -636,6 +644,28 @@ mod tests {
         }
         let out = search(&s, &q("git st"), None);
         assert_eq!(s.entries[out.hits[0].idx as usize].text, "git status");
+    }
+
+    #[test]
+    fn equal_scores_go_to_the_one_run_more_recently() {
+        // run a second apart a year ago: the same score once rounded, whichever came first
+        let a_year_ago = config::now() - 365 * 86400;
+        for older_first in [true, false] {
+            let mut s = Store::default();
+            let mut v = vec![0.0; DIM];
+            v[0] = 1.0;
+            let mut runs = [("tool alpha", a_year_ago), ("tool beta", a_year_ago + 1)];
+            if !older_first {
+                runs.reverse();
+            }
+            for (k, (cmd, ts)) in runs.iter().enumerate() {
+                let r = Run { cmd: cmd.to_string(), exit: Some(0), cwd: Some("C:/p".into()), actor: "human".into(), ts: *ts, ..Default::default() };
+                s.apply_run(10 + k as i64, true, &r, Some((&v, None, &[])));
+            }
+            let out = search(&s, &Query { rank: Rank::Semantic, ..q("build the app") }, Some(&v));
+            assert_eq!(out.hits[0].score, out.hits[1].score, "a tie");
+            assert_eq!(s.entries[out.hits[0].idx as usize].text, "tool beta", "older inserted first: {older_first}");
+        }
     }
 
     #[test]
