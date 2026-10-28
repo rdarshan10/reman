@@ -397,10 +397,13 @@ mod tests {
     #[test]
     fn packages_say_what_their_commands_are() {
         let d = tmp("pkgs");
-        // npm's shim and the package it runs
-        std::fs::create_dir_all(d.join("node_modules").join("eas-cli")).unwrap();
-        std::fs::write(d.join("node_modules").join("eas-cli").join("package.json"), r#"{"name":"eas-cli","description":"EAS command line tool"}"#).unwrap();
-        std::fs::write(d.join("eas.cmd"), "@ECHO off\r\n\"%_prog%\"  \"%dp0%\\node_modules\\eas-cli\\bin\\run\" %*\r\n").unwrap();
+        // npm's shim in the project's node_modules/.bin and the package it runs. A name no PATH has:
+        // the folders on PATH are looked in first (this test once passed only where eas was installed)
+        let bin = d.join("node_modules").join(".bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::create_dir_all(d.join("node_modules").join("acme-deploy")).unwrap();
+        std::fs::write(d.join("node_modules").join("acme-deploy").join("package.json"), r#"{"name":"acme-deploy","description":"Deploy Acme sites from the command line"}"#).unwrap();
+        std::fs::write(bin.join("acme-deploy.cmd"), "@ECHO off\r\n\"%_prog%\"  \"%dp0%\\..\\acme-deploy\\bin\\run\" %*\r\n").unwrap();
         // a venv's console script and its package
         let env = d.join("venv");
         std::fs::create_dir_all(env.join("Scripts")).unwrap();
@@ -410,9 +413,11 @@ mod tests {
         std::fs::write(di.join("METADATA"), "Metadata-Version: 2.1\nName: lightrag-hku\nSummary: LightRAG: Simple and Fast Retrieval-Augmented Generation\n\nLong description. Summary: not this\n").unwrap();
         std::fs::write(env.join("Scripts").join("lightrag-server.exe"), b"MZ\0\0").unwrap();
         let mut f = Finder::new(&[d.display().to_string()], &[]);
-        let eas = f.find("eas", &[]).expect("found in the folder's listing");
-        assert_eq!(f.describe(&eas).as_deref(), Some("EAS command line tool"));
+        let shim = f.find("acme-deploy", &[]).expect("found in the folder's node_modules/.bin");
+        assert_eq!(shim, bin.join("acme-deploy.cmd"));
+        assert_eq!(f.describe(&shim).as_deref(), Some("Deploy Acme sites from the command line"));
         let lr = f.find("lightrag-server", &[]).expect("found in the folder's venv");
+        assert_eq!(lr, env.join("Scripts").join("lightrag-server.exe"));
         assert_eq!(f.describe(&lr).as_deref(), Some("LightRAG: Simple and Fast Retrieval-Augmented Generation"));
         assert!(f.find("readme", &[]).is_none());
         // a project's own file, only for what ran in that project
